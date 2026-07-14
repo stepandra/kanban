@@ -3,8 +3,11 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
-
+import type { RuntimeBoardData } from "../../src/core/api-contract";
+import { createWorkspaceMetadataMonitor } from "../../src/server/workspace-metadata-monitor";
+import { readJjWorkspaceState } from "../../src/workspace/jj-utils";
 import { deleteTaskWorktree, ensureTaskWorktreeIfDoesntExist } from "../../src/workspace/task-worktree";
+import { captureTaskTurnCheckpoint } from "../../src/workspace/turn-checkpoints";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
 
@@ -35,6 +38,23 @@ function runGit(cwd: string, args: string[]): string {
 	}
 	return result.stdout.trim();
 }
+
+function runJj(cwd: string, args: string[]): string {
+	const result = spawnSync("jj", ["--no-pager", "--color=never", "-R", cwd, ...args], {
+		cwd,
+		encoding: "utf8",
+	});
+	if (result.status !== 0) {
+		throw new Error(
+			[`jj ${args.join(" ")} failed in ${cwd}`, result.stdout.trim(), result.stderr.trim()]
+				.filter((part) => part.length > 0)
+				.join("\n"),
+		);
+	}
+	return result.stdout.trim();
+}
+
+const jjIt = spawnSync("jj", ["--version"], { stdio: "ignore" }).status === 0 ? it : it.skip;
 
 async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
 	const { path: tempHome, cleanup } = createTempDir("kanban-home-");
@@ -438,6 +458,105 @@ describe.sequential("task-worktree integration", () => {
 
 				expect(restored.warning).toContain("Saved task changes could not be reapplied automatically.");
 				expect(runGit(restored.path, ["rev-parse", "HEAD"])).toBe(createdCommit);
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	jjIt("creates, resumes, and preserves a jj task workspace", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-jj-workspace-");
+			try {
+				const repoPath = join(sandboxRoot, "repo");
+				mkdirSync(repoPath, { recursive: true });
+				const initResult = spawnSync("jj", ["git", "init"], { cwd: repoPath, encoding: "utf8" });
+				if (initResult.status !== 0) {
+					throw new Error(initResult.stderr.trim() || "Could not initialize jj test repository.");
+				}
+				writeFileSync(join(repoPath, "README.md"), "hello\n", "utf8");
+				runJj(repoPath, ["describe", "-m", "initial"]);
+
+				const taskId = `task-jj-${Date.now()}`;
+				const ensured = await ensureTaskWorktreeIfDoesntExist({
+					cwd: repoPath,
+					taskId,
+					baseRef: "@",
+				});
+				expect(ensured.ok).toBe(true);
+				if (!ensured.ok) {
+					throw new Error(ensured.error ?? "jj task workspace was not created");
+				}
+				expect(runJj(ensured.path, ["workspace", "root"])).not.toBe("");
+
+				const progressPath = join(ensured.path, "progress.txt");
+				writeFileSync(progressPath, "keep me\n", "utf8");
+				const changedState = await readJjWorkspaceState(ensured.path);
+				expect(changedState.changedFiles).toBe(1);
+				expect(changedState.additions).toBe(1);
+				expect(changedState.changeId).not.toBe("");
+				expect(changedState.commitId).not.toBe("");
+				const board: RuntimeBoardData = {
+					columns: [
+						{ id: "backlog", title: "Backlog", cards: [] },
+						{ id: "in_progress", title: "In Progress", cards: [] },
+						{
+							id: "review",
+							title: "Review",
+							cards: [
+								{
+									id: taskId,
+									title: "jj task",
+									prompt: "jj task",
+									startInPlanMode: false,
+									baseRef: "@",
+									createdAt: 1,
+									updatedAt: 1,
+								},
+							],
+						},
+						{ id: "trash", title: "Done", cards: [] },
+					],
+					dependencies: [],
+				};
+				const metadataMonitor = createWorkspaceMetadataMonitor({ onMetadataUpdated: () => {} });
+				try {
+					const changedMetadata = await metadataMonitor.connectWorkspace({
+						workspaceId: "jj-test",
+						workspacePath: repoPath,
+						board,
+					});
+					expect(changedMetadata.taskWorkspaces[0]?.changedFiles).toBe(1);
+
+					await expect(captureTaskTurnCheckpoint({ cwd: ensured.path, taskId, turn: 1 })).rejects.toThrow(
+						"Git turn checkpoints are unavailable in jj workspaces.",
+					);
+					runJj(ensured.path, ["commit", "-m", "finish task"]);
+					const committedState = await readJjWorkspaceState(ensured.path);
+					expect(committedState.changedFiles).toBe(0);
+					expect(committedState.commitId).not.toBe(changedState.commitId);
+
+					const committedMetadata = await metadataMonitor.updateWorkspaceState({
+						workspaceId: "jj-test",
+						workspacePath: repoPath,
+						board,
+					});
+					expect(committedMetadata.taskWorkspaces[0]?.changedFiles).toBe(0);
+				} finally {
+					metadataMonitor.close();
+				}
+				const resumed = await ensureTaskWorktreeIfDoesntExist({
+					cwd: repoPath,
+					taskId,
+					baseRef: "@",
+				});
+				expect(resumed.ok).toBe(true);
+				expect(resumed.ok ? resumed.path : null).toBe(ensured.path);
+				expect(readFileSync(progressPath, "utf8")).toBe("keep me\n");
+
+				const deleted = await deleteTaskWorktree({ repoPath, taskId });
+				expect(deleted).toEqual({ ok: true, removed: false });
+				expect(readFileSync(progressPath, "utf8")).toBe("keep me\n");
 			} finally {
 				cleanup();
 			}

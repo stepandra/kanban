@@ -2,9 +2,12 @@ import type {
 	RuntimeBoardData,
 	RuntimeGitSyncSummary,
 	RuntimeTaskWorkspaceMetadata,
+	RuntimeVcsMode,
 	RuntimeWorkspaceMetadata,
 } from "../core/api-contract";
+import { detectRepositoryKind } from "../state/workspace-state";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
+import { readJjWorkspaceState } from "../workspace/jj-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
@@ -27,6 +30,7 @@ interface CachedTaskWorkspaceMetadata {
 
 interface WorkspaceMetadataEntry {
 	workspacePath: string;
+	vcs: RuntimeVcsMode;
 	trackedTasks: TrackedTaskWorkspace[];
 	subscriberCount: number;
 	pollTimer: NodeJS.Timeout | null;
@@ -58,7 +62,7 @@ export interface WorkspaceMetadataMonitor {
 function collectTrackedTasks(board: RuntimeBoardData): TrackedTaskWorkspace[] {
 	const tracked: TrackedTaskWorkspace[] = [];
 	for (const column of board.columns) {
-		// Backlog and trash cards do not need git metadata polling. Tracking only
+		// Backlog and trash cards do not need VCS metadata polling. Tracking only
 		// active columns avoids unnecessary work, and trash paths are reconstructed
 		// from task id on the web-ui side.
 		if (column.id === "backlog" || column.id === "trash") {
@@ -139,6 +143,7 @@ function createEmptyWorkspaceMetadata(): RuntimeWorkspaceMetadata {
 function createWorkspaceEntry(workspacePath: string): WorkspaceMetadataEntry {
 	return {
 		workspacePath,
+		vcs: detectRepositoryKind(workspacePath) ?? "git",
 		trackedTasks: [],
 		subscriberCount: 0,
 		pollTimer: null,
@@ -183,6 +188,7 @@ async function loadTaskWorkspaceMetadata(
 	workspacePath: string,
 	task: TrackedTaskWorkspace,
 	current: CachedTaskWorkspaceMetadata | null,
+	vcs: RuntimeVcsMode,
 ): Promise<CachedTaskWorkspaceMetadata | null> {
 	const pathInfo = await getTaskWorkspacePathInfo({
 		cwd: workspacePath,
@@ -218,6 +224,34 @@ async function loadTaskWorkspaceMetadata(
 	}
 
 	try {
+		if (vcs === "jj") {
+			const state = await readJjWorkspaceState(pathInfo.path);
+			if (
+				current &&
+				current.stateToken === state.stateToken &&
+				current.data.path === pathInfo.path &&
+				current.data.baseRef === pathInfo.baseRef
+			) {
+				return current;
+			}
+			return {
+				data: {
+					taskId: task.taskId,
+					path: pathInfo.path,
+					exists: true,
+					baseRef: pathInfo.baseRef,
+					branch: null,
+					isDetached: false,
+					headCommit: state.commitId,
+					changedFiles: state.changedFiles,
+					additions: state.additions,
+					deletions: state.deletions,
+					stateVersion: Date.now(),
+				},
+				stateToken: state.stateToken,
+			};
+		}
+
 		const probe = await probeGitWorkspaceState(pathInfo.path);
 		if (
 			current &&
@@ -291,12 +325,14 @@ export function createWorkspaceMetadataMonitor(
 
 		entry.refreshPromise = (async () => {
 			const previousSnapshot = buildWorkspaceMetadataSnapshot(entry);
-			entry.homeGit = await loadHomeGitMetadata(entry);
+			if (entry.vcs === "git") {
+				entry.homeGit = await loadHomeGitMetadata(entry);
+			}
 
 			const nextTaskEntries = await Promise.all(
 				entry.trackedTasks.map(async (task) => {
 					const current = entry.taskMetadataByTaskId.get(task.taskId) ?? null;
-					const next = await loadTaskWorkspaceMetadata(entry.workspacePath, task, current);
+					const next = await loadTaskWorkspaceMetadata(entry.workspacePath, task, current, entry.vcs);
 					return next ? [task.taskId, next] : null;
 				}),
 			);
@@ -329,6 +365,7 @@ export function createWorkspaceMetadataMonitor(
 	}): WorkspaceMetadataEntry => {
 		const existing = workspaces.get(input.workspaceId) ?? createWorkspaceEntry(input.workspacePath);
 		existing.workspacePath = input.workspacePath;
+		existing.vcs = detectRepositoryKind(input.workspacePath) ?? existing.vcs;
 		existing.trackedTasks = collectTrackedTasks(input.board);
 		workspaces.set(input.workspaceId, existing);
 		return existing;

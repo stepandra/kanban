@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
@@ -11,7 +11,6 @@ import { registerHooksCommand } from "./commands/hooks";
 import { registerTaskCommand } from "./commands/task";
 import { loadGlobalRuntimeConfig, loadRuntimeConfig } from "./config/runtime-config";
 import type { RuntimeCommandRunResponse } from "./core/api-contract";
-import { createGitProcessEnv } from "./core/git-process-env";
 import {
 	installGracefulShutdownHandlers,
 	shouldSuppressImmediateDuplicateShutdownSignals,
@@ -33,6 +32,7 @@ import {
 import { disablePasscode, generateInternalToken, generatePasscode } from "./security/passcode-manager";
 import { terminateProcessForTimeout } from "./server/process-termination";
 import type { RuntimeStateHub } from "./server/runtime-state-hub";
+import { detectRepositoryKind } from "./state/workspace-state";
 import { captureNodeException, flushNodeTelemetry } from "./telemetry/sentry-node.js";
 import type { TerminalSessionManager } from "./terminal/session-manager";
 import { runOnDemandUpdate } from "./update/update";
@@ -236,16 +236,6 @@ async function pathIsDirectory(path: string): Promise<boolean> {
 	}
 }
 
-function hasGitRepository(path: string): boolean {
-	const result = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
-		cwd: path,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-		env: createGitProcessEnv(),
-	});
-	return result.status === 0 && result.stdout.trim() === "true";
-}
-
 function isAddressInUseError(error: unknown): error is NodeJS.ErrnoException {
 	return (
 		typeof error === "object" &&
@@ -282,7 +272,7 @@ async function canReachKanbanServer(workspaceId: string | null): Promise<boolean
 
 async function tryOpenExistingServer(options: { noOpen: boolean; shouldAutoOpenBrowser: boolean }): Promise<boolean> {
 	let workspaceId: string | null = null;
-	if (hasGitRepository(process.cwd())) {
+	if (detectRepositoryKind(process.cwd())) {
 		const { loadWorkspaceContext } = await import("./state/workspace-state.js");
 		const context = await loadWorkspaceContext(process.cwd());
 		workspaceId = context.workspaceId;
@@ -411,7 +401,7 @@ async function startServer(): Promise<{
 		cwd: process.cwd(),
 		loadGlobalRuntimeConfig,
 		loadRuntimeConfig,
-		hasGitRepository,
+		detectRepositoryKind,
 		pathIsDirectory,
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
@@ -449,7 +439,7 @@ async function startServer(): Promise<{
 		runCommand: runScopedCommand,
 		resolveProjectInputPath,
 		assertPathIsDirectory,
-		hasGitRepository,
+		detectRepositoryKind,
 		disposeWorkspace: disposeTrackedWorkspace,
 		collectProjectWorktreeTaskIdsForRemoval,
 		pickDirectoryPathFromSystemDialog,

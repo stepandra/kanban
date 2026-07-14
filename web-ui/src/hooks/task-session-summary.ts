@@ -1,5 +1,6 @@
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 
+// State can arrive from an action response and the runtime stream out of order.
 export function selectNewestTaskSessionSummary(
 	left: RuntimeTaskSessionSummary | null,
 	right: RuntimeTaskSessionSummary | null,

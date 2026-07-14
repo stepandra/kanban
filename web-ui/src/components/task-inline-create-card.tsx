@@ -260,7 +260,7 @@ export function TaskInlineCreateCard({
 				</label>
 
 				<div>
-					<span className="text-[11px] text-text-secondary block mb-1">Worktree base ref</span>
+					<span className="text-[11px] text-text-secondary block mb-1">Workspace base revision</span>
 					<BranchSelectDropdown
 						id={branchSelectId}
 						options={branchOptions}
@@ -269,7 +269,7 @@ export function TaskInlineCreateCard({
 						onPopoverOpenChange={setIsBranchPopoverOpen}
 						fill
 						size="sm"
-						emptyText="No branches detected"
+						emptyText="No revisions detected"
 					/>
 				</div>
 

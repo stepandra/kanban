@@ -208,6 +208,7 @@ export default function App(): ReactElement {
 
 	const {
 		workspacePath,
+		workspaceVcs,
 		workspaceGit,
 		workspaceRevision,
 		setWorkspaceRevision,
@@ -226,6 +227,7 @@ export default function App(): ReactElement {
 		setSessions,
 		setCanPersistWorkspaceState,
 	});
+	const gitFeaturesEnabled = workspaceVcs === "git";
 	const { selectedTaskId, selectedCard, setSelectedTaskId, handleBack } = useDetailTaskNavigation({
 		board,
 		currentProjectId,
@@ -280,7 +282,7 @@ export default function App(): ReactElement {
 		workspacePath,
 	});
 
-	const { createTaskBranchOptions, defaultTaskBranchRef } = useTaskBranchOptions({ workspaceGit });
+	const { createTaskBranchOptions, defaultTaskBranchRef } = useTaskBranchOptions({ workspaceGit, workspaceVcs });
 	const queueTaskStartAfterEdit = useCallback((taskId: string) => {
 		setPendingTaskStartAfterEditId(taskId);
 	}, []);
@@ -344,6 +346,12 @@ export default function App(): ReactElement {
 	});
 
 	useEffect(() => {
+		if (!gitFeaturesEnabled) {
+			setIsGitHistoryOpen(false);
+		}
+	}, [gitFeaturesEnabled]);
+
+	useEffect(() => {
 		taskEditorResetRef.current = resetTaskEditorState;
 	}, [resetTaskEditorState]);
 
@@ -384,13 +392,14 @@ export default function App(): ReactElement {
 		resetGitActionState,
 	} = useGitActions({
 		currentProjectId,
+		workspaceVcs,
 		board,
 		selectedCard,
 		runtimeProjectConfig,
 		sendTaskSessionInput,
 		sendTaskChatMessage,
 		fetchTaskWorkspaceInfo,
-		isGitHistoryOpen,
+		isGitHistoryOpen: gitFeaturesEnabled && isGitHistoryOpen,
 		refreshWorkspaceState,
 	});
 	const agentCommand = runtimeProjectConfig?.effectiveCommand ?? null;
@@ -618,7 +627,7 @@ export default function App(): ReactElement {
 		selectedCard,
 		isDetailTerminalOpen,
 		isHomeTerminalOpen: showHomeBottomTerminal,
-		isHomeGitHistoryOpen: !selectedCard && isGitHistoryOpen,
+		isHomeGitHistoryOpen: gitFeaturesEnabled && !selectedCard && isGitHistoryOpen,
 		canUseCreateTaskShortcut: !hasNoProjects && currentProjectId !== null,
 		handleToggleDetailTerminal,
 		handleToggleHomeTerminal,
@@ -838,26 +847,26 @@ export default function App(): ReactElement {
 						isWorkspacePathLoading={shouldShowProjectLoadingState}
 						workspaceHint={navbarWorkspaceHint}
 						runtimeHint={navbarRuntimeHint}
-						selectedTaskId={selectedCard?.card.id ?? null}
-						selectedTaskBaseRef={selectedCard?.card.baseRef ?? null}
-						showHomeGitSummary={!hasNoProjects && !selectedCard}
+						selectedTaskId={gitFeaturesEnabled ? (selectedCard?.card.id ?? null) : null}
+						selectedTaskBaseRef={gitFeaturesEnabled ? (selectedCard?.card.baseRef ?? null) : null}
+						showHomeGitSummary={gitFeaturesEnabled && !hasNoProjects && !selectedCard}
 						runningGitAction={selectedCard || hasNoProjects ? null : runningGitAction}
 						onGitFetch={
-							selectedCard
+							selectedCard || !gitFeaturesEnabled
 								? undefined
 								: () => {
 										void runGitAction("fetch");
 									}
 						}
 						onGitPull={
-							selectedCard
+							selectedCard || !gitFeaturesEnabled
 								? undefined
 								: () => {
 										void runGitAction("pull");
 									}
 						}
 						onGitPush={
-							selectedCard
+							selectedCard || !gitFeaturesEnabled
 								? undefined
 								: () => {
 										void runGitAction("push");
@@ -883,8 +892,8 @@ export default function App(): ReactElement {
 						onOpenWorkspace={onOpenWorkspace}
 						canOpenWorkspace={canOpenWorkspace}
 						isOpeningWorkspace={isOpeningWorkspace}
-						onToggleGitHistory={hasNoProjects ? undefined : handleToggleGitHistory}
-						isGitHistoryOpen={isGitHistoryOpen}
+						onToggleGitHistory={hasNoProjects || !gitFeaturesEnabled ? undefined : handleToggleGitHistory}
+						isGitHistoryOpen={gitFeaturesEnabled && isGitHistoryOpen}
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
@@ -903,7 +912,7 @@ export default function App(): ReactElement {
 										<FolderOpen size={48} strokeWidth={1} />
 										<h3 className="text-sm font-semibold text-text-primary">No projects yet</h3>
 										<p className="text-[13px] text-text-secondary">
-											Add a git repository to start using Kanban.
+											Add a Git or jj repository to start using Kanban.
 										</p>
 										<Button
 											variant="primary"
@@ -918,7 +927,7 @@ export default function App(): ReactElement {
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
-										{isGitHistoryOpen ? (
+										{gitFeaturesEnabled && isGitHistoryOpen ? (
 											<GitHistoryView
 												workspaceId={currentProjectId}
 												gitHistory={gitHistory}
@@ -1012,6 +1021,7 @@ export default function App(): ReactElement {
 									selection={selectedCard}
 									currentProjectId={currentProjectId}
 									workspacePath={workspacePath}
+									gitFeaturesEnabled={gitFeaturesEnabled}
 									selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 									runtimeConfig={runtimeProjectConfig ?? null}
 									sessionSummary={detailSession}
@@ -1055,7 +1065,7 @@ export default function App(): ReactElement {
 									onMoveToTrash={handleMoveToTrash}
 									isMoveToTrashLoading={moveToTrashLoadingById[selectedCard.card.id] ?? false}
 									gitHistoryPanel={
-										isGitHistoryOpen ? (
+										gitFeaturesEnabled && isGitHistoryOpen ? (
 											<GitHistoryView workspaceId={currentProjectId} gitHistory={gitHistory} />
 										) : undefined
 									}

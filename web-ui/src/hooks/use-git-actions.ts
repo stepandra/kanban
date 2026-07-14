@@ -4,7 +4,12 @@ import { type UseGitHistoryDataResult, useGitHistoryData } from "@/components/gi
 import { buildTaskGitActionPrompt, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { isNativeClineAgentSelected } from "@/runtime/native-agent";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import type { RuntimeConfigResponse, RuntimeGitSyncAction, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
+import type {
+	RuntimeConfigResponse,
+	RuntimeGitSyncAction,
+	RuntimeTaskWorkspaceInfoResponse,
+	RuntimeVcsMode,
+} from "@/runtime/types";
 import { findCardSelection } from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
@@ -28,6 +33,7 @@ interface TaskGitActionLoadingState {
 
 interface UseGitActionsInput {
 	currentProjectId: string | null;
+	workspaceVcs?: RuntimeVcsMode | null;
 	board: BoardData;
 	selectedCard: CardSelection | null;
 	runtimeProjectConfig: RuntimeConfigResponse | null;
@@ -86,6 +92,7 @@ function matchesWorkspaceInfoSelection(
 
 export function useGitActions({
 	currentProjectId,
+	workspaceVcs,
 	board,
 	selectedCard,
 	runtimeProjectConfig,
@@ -277,6 +284,7 @@ export function useGitActions({
 				const prompt = buildTaskGitActionPrompt({
 					action,
 					workspaceInfo,
+					vcs: workspaceVcs ?? "git",
 					templates: runtimeProjectConfig
 						? {
 								commitPromptTemplate: runtimeProjectConfig.commitPromptTemplate,
@@ -336,6 +344,7 @@ export function useGitActions({
 			setTaskGitActionLoading,
 			shouldUseClineChatForTaskGitActions,
 			taskGitActionLoadingByTaskId,
+			workspaceVcs,
 		],
 	);
 

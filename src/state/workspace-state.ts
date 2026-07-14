@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile, realpath, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
 import {
@@ -10,6 +11,7 @@ import {
 	type RuntimeBoardData,
 	type RuntimeGitRepositoryInfo,
 	type RuntimeTaskSessionSummary,
+	type RuntimeVcsMode,
 	type RuntimeWorkspaceStateResponse,
 	type RuntimeWorkspaceStateSaveRequest,
 	runtimeBoardDataSchema,
@@ -132,6 +134,7 @@ export interface RuntimeWorkspaceContext {
 	repoPath: string;
 	workspaceId: string;
 	statePath: string;
+	vcs: RuntimeVcsMode;
 	git: RuntimeGitRepositoryInfo;
 }
 
@@ -442,6 +445,44 @@ function detectGitRoot(cwd: string): string | null {
 	return runGitCapture(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
+function runJjCapture(cwd: string, args: string[]): string | null {
+	const result = spawnSync("jj", ["--ignore-working-copy", "--no-pager", "--color=never", "-R", cwd, ...args], {
+		cwd,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "ignore"],
+	});
+	if (result.status !== 0 || typeof result.stdout !== "string") {
+		return null;
+	}
+	const value = result.stdout.trim();
+	return value.length > 0 ? value : null;
+}
+
+function hasJjRepositoryMarker(cwd: string): boolean {
+	let current = resolve(cwd);
+	while (true) {
+		if (existsSync(join(current, ".jj"))) {
+			return true;
+		}
+		const parent = dirname(current);
+		if (parent === current) {
+			return false;
+		}
+		current = parent;
+	}
+}
+
+function detectJjRoot(cwd: string): string | null {
+	return hasJjRepositoryMarker(cwd) ? runJjCapture(cwd, ["root"]) : null;
+}
+
+export function detectRepositoryKind(cwd: string): RuntimeVcsMode | null {
+	if (detectJjRoot(cwd)) {
+		return "jj";
+	}
+	return detectGitRoot(cwd) ? "git" : null;
+}
+
 function detectGitCurrentBranch(repoPath: string): string | null {
 	return runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
 }
@@ -509,16 +550,16 @@ async function resolveWorkspacePath(cwd: string): Promise<string> {
 		canonicalCwd = resolvedCwd;
 	}
 
-	const gitRoot = detectGitRoot(canonicalCwd);
-	if (!gitRoot) {
-		throw new Error(`No git repository detected at ${canonicalCwd}`);
+	const repositoryRoot = detectJjRoot(canonicalCwd) ?? detectGitRoot(canonicalCwd);
+	if (!repositoryRoot) {
+		throw new Error(`No Git or jj repository detected at ${canonicalCwd}`);
 	}
 
-	const resolvedGitRoot = resolve(gitRoot);
+	const resolvedRepositoryRoot = resolve(repositoryRoot);
 	try {
-		return await realpath(resolvedGitRoot);
+		return await realpath(resolvedRepositoryRoot);
 	} catch {
-		return resolvedGitRoot;
+		return resolvedRepositoryRoot;
 	}
 }
 
@@ -531,6 +572,7 @@ function toWorkspaceStateResponse(
 	return {
 		repoPath: context.repoPath,
 		statePath: context.statePath,
+		vcs: context.vcs,
 		git: context.git,
 		board,
 		sessions,
@@ -553,6 +595,18 @@ export async function loadWorkspaceContext(
 	options: LoadWorkspaceContextOptions = {},
 ): Promise<RuntimeWorkspaceContext> {
 	const repoPath = await resolveWorkspacePath(cwd);
+	const vcs = detectRepositoryKind(repoPath);
+	if (!vcs) {
+		throw new Error(`No Git or jj repository detected at ${repoPath}`);
+	}
+	const repositoryInfo =
+		vcs === "jj"
+			? {
+					currentBranch: "@",
+					defaultBranch: "@",
+					branches: ["@"],
+				}
+			: detectGitRepositoryInfo(repoPath);
 	const autoCreateIfMissing = options.autoCreateIfMissing ?? true;
 	if (!autoCreateIfMissing) {
 		const index = await readWorkspaceIndex();
@@ -564,7 +618,8 @@ export async function loadWorkspaceContext(
 			repoPath,
 			workspaceId: existingEntry.workspaceId,
 			statePath: getWorkspaceDirectoryPath(existingEntry.workspaceId),
-			git: detectGitRepositoryInfo(repoPath),
+			vcs,
+			git: repositoryInfo,
 		};
 	}
 
@@ -583,7 +638,8 @@ export async function loadWorkspaceContext(
 			repoPath,
 			workspaceId: ensured.entry.workspaceId,
 			statePath: getWorkspaceDirectoryPath(ensured.entry.workspaceId),
-			git: detectGitRepositoryInfo(repoPath),
+			vcs,
+			git: repositoryInfo,
 		};
 	});
 }

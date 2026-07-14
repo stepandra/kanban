@@ -197,6 +197,9 @@ export const runtimeGitRepositoryInfoSchema = z.object({
 });
 export type RuntimeGitRepositoryInfo = z.infer<typeof runtimeGitRepositoryInfoSchema>;
 
+export const runtimeVcsModeSchema = z.enum(["git", "jj"]);
+export type RuntimeVcsMode = z.infer<typeof runtimeVcsModeSchema>;
+
 export const runtimeGitSyncActionSchema = z.enum(["fetch", "pull", "push"]);
 export type RuntimeGitSyncAction = z.infer<typeof runtimeGitSyncActionSchema>;
 
@@ -302,6 +305,7 @@ export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummary
 export const runtimeWorkspaceStateResponseSchema = z.object({
 	repoPath: z.string(),
 	statePath: z.string(),
+	vcs: runtimeVcsModeSchema,
 	git: runtimeGitRepositoryInfoSchema,
 	board: runtimeBoardDataSchema,
 	sessions: z.record(z.string(), runtimeTaskSessionSummarySchema),

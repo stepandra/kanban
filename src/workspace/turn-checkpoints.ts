@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import type { RuntimeTaskTurnCheckpoint } from "../core/api-contract";
 import { createGitProcessEnv } from "../core/git-process-env";
+import { detectRepositoryKind } from "../state/workspace-state";
 import { getGitStdout, type RunGitOptions } from "./git-utils";
 
 const CHECKPOINT_AUTHOR_NAME = "kanban-checkpoint";
@@ -74,6 +75,9 @@ export async function captureTaskTurnCheckpoint(input: {
 	taskId: string;
 	turn: number;
 }): Promise<RuntimeTaskTurnCheckpoint> {
+	if (detectRepositoryKind(input.cwd) === "jj") {
+		throw new Error("Git turn checkpoints are unavailable in jj workspaces.");
+	}
 	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
 	const commit = await createWorkingTreeCheckpointCommit(repoRoot, input.turn, input.taskId);
 	const ref = buildCheckpointRef(input.taskId, input.turn);

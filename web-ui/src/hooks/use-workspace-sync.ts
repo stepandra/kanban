@@ -3,10 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { notifyError } from "@/components/app-toaster";
 import { createInitialBoardData } from "@/data/board-data";
-import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
+import { selectNewestTaskSessionSummary } from "@/hooks/task-session-summary";
 import type {
 	RuntimeGitRepositoryInfo,
 	RuntimeTaskSessionSummary,
+	RuntimeVcsMode,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
 import { fetchWorkspaceState } from "@/runtime/workspace-state-query";
@@ -26,6 +27,7 @@ interface UseWorkspaceSyncInput {
 
 interface UseWorkspaceSyncResult {
 	workspacePath: string | null;
+	workspaceVcs: RuntimeVcsMode | null;
 	workspaceGit: RuntimeGitRepositoryInfo | null;
 	workspaceRevision: number | null;
 	setWorkspaceRevision: Dispatch<SetStateAction<number | null>>;
@@ -61,6 +63,7 @@ export function useWorkspaceSync({
 	setCanPersistWorkspaceState,
 }: UseWorkspaceSyncInput): UseWorkspaceSyncResult {
 	const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+	const [workspaceVcs, setWorkspaceVcs] = useState<RuntimeVcsMode | null>(null);
 	const [workspaceGit, setWorkspaceGit] = useState<RuntimeGitRepositoryInfo | null>(null);
 	const [appliedWorkspaceProjectId, setAppliedWorkspaceProjectId] = useState<string | null>(null);
 	const [workspaceRevision, setWorkspaceRevision] = useState<number | null>(null);
@@ -89,6 +92,7 @@ export function useWorkspaceSync({
 			if (!nextWorkspaceState) {
 				setCanPersistWorkspaceState(false);
 				setWorkspacePath(null);
+				setWorkspaceVcs(null);
 				setWorkspaceGit(null);
 				setAppliedWorkspaceProjectId(null);
 				setBoard(createInitialBoardData());
@@ -107,6 +111,7 @@ export function useWorkspaceSync({
 				return;
 			}
 			setWorkspacePath(nextWorkspaceState.repoPath);
+			setWorkspaceVcs(nextWorkspaceState.vcs);
 			setWorkspaceGit(nextWorkspaceState.git);
 			setSessions((currentSessions) => {
 				const incomingSessions = nextWorkspaceState.sessions ?? {};
@@ -194,6 +199,7 @@ export function useWorkspaceSync({
 
 	return {
 		workspacePath,
+		workspaceVcs,
 		workspaceGit,
 		workspaceRevision,
 		setWorkspaceRevision,

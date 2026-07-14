@@ -312,6 +312,7 @@ export function CardDetailView({
 	selection,
 	currentProjectId,
 	workspacePath,
+	gitFeaturesEnabled = true,
 	selectedAgentId = null,
 	runtimeConfig = null,
 	sessionSummary,
@@ -370,6 +371,7 @@ export function CardDetailView({
 	selection: CardSelection;
 	currentProjectId: string | null;
 	workspacePath?: string | null;
+	gitFeaturesEnabled?: boolean;
 	selectedAgentId?: RuntimeAgentId | null;
 	runtimeConfig?: RuntimeConfigResponse | null;
 	sessionSummary: RuntimeTaskSessionSummary | null;
@@ -497,12 +499,18 @@ export function CardDetailView({
 		isDocumentVisible && !gitHistoryPanel && selection.column.id !== "trash" ? DETAIL_DIFF_POLL_INTERVAL_MS : null,
 		lastTurnViewKey,
 		true,
+		gitFeaturesEnabled,
 	);
 	const runtimeFiles = workspaceChanges?.files ?? null;
 	const isWorkspaceChangesPending = isRuntimeAvailable && workspaceChanges === null;
 	const hasNoWorkspaceFileChanges =
-		isRuntimeAvailable && workspaceChanges !== null && runtimeFiles !== null && runtimeFiles.length === 0;
-	const emptyDiffTitle = diffMode === "last_turn" ? "No changes since last turn" : "No working changes";
+		!gitFeaturesEnabled ||
+		(isRuntimeAvailable && workspaceChanges !== null && runtimeFiles !== null && runtimeFiles.length === 0);
+	const emptyDiffTitle = !gitFeaturesEnabled
+		? "Git diff is unavailable in jj workspaces"
+		: diffMode === "last_turn"
+			? "No changes since last turn"
+			: "No working changes";
 	const taskCardsPanelPercent = `${(taskCardsPanelRatio * 100).toFixed(1)}%`;
 	const detailContentPanelPercent = `${((1 - taskCardsPanelRatio) * 100).toFixed(1)}%`;
 	const agentPanelPercent = `${(agentPanelRatio * 100).toFixed(1)}%`;
@@ -719,7 +727,7 @@ export function CardDetailView({
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "diff" ? "flex" : "none" }}
 						>
-							{isRuntimeAvailable ? (
+							{gitFeaturesEnabled && isRuntimeAvailable ? (
 								<DiffToolbar
 									mode={diffMode}
 									onModeChange={setDiffMode}
@@ -859,7 +867,7 @@ export function CardDetailView({
 								className="flex min-h-0 min-w-0 flex-col"
 								style={{ width: isDiffExpanded ? "100%" : diffPanelPercent }}
 							>
-								{isRuntimeAvailable ? (
+								{gitFeaturesEnabled && isRuntimeAvailable ? (
 									<DiffToolbar
 										mode={diffMode}
 										onModeChange={setDiffMode}

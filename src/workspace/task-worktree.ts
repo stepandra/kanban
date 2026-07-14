@@ -7,8 +7,14 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
-import { getRuntimeHomePath, getTaskWorktreesHomePath, loadWorkspaceContext } from "../state/workspace-state";
+import {
+	detectRepositoryKind,
+	getRuntimeHomePath,
+	getTaskWorktreesHomePath,
+	loadWorkspaceContext,
+} from "../state/workspace-state";
 import { getGitCommandErrorMessage, getGitStdout, readGitHeadInfo, runGit } from "./git-utils";
+import { runJj } from "./jj-utils";
 import { getWorkspaceFolderLabelForWorktreePath, normalizeTaskIdForWorktreePath } from "./task-worktree-path";
 import { listTurbopackNodeModulesSymlinkSkipPaths } from "./task-worktree-turbopack";
 
@@ -131,6 +137,95 @@ function getTrashedTaskPatchesRootPath(): string {
 function getTaskWorktreePath(repoPath: string, taskId: string): string {
 	const workspaceLabel = getWorkspaceFolderLabelForWorktreePath(repoPath);
 	return join(getWorktreesRootPath(taskId), workspaceLabel);
+}
+
+async function readJjCommit(cwd: string, revision: string): Promise<string | null> {
+	const result = await runJj(cwd, ["--ignore-working-copy", "log", "--no-graph", "-r", revision, "-T", "commit_id"]);
+	return result.ok && result.stdout ? result.stdout : null;
+}
+
+async function ensureJjTaskWorkspace(options: {
+	repoPath: string;
+	taskId: string;
+	baseRef: string;
+	worktreePath: string;
+}): Promise<RuntimeWorktreeEnsureResponse> {
+	const existingRoot = await runJj(options.worktreePath, ["--ignore-working-copy", "workspace", "root"]);
+	if (existingRoot.ok) {
+		return {
+			ok: true,
+			path: options.worktreePath,
+			baseRef: options.baseRef,
+			baseCommit: (await readJjCommit(options.worktreePath, "@")) ?? "@",
+		};
+	}
+
+	if (!options.baseRef) {
+		return {
+			ok: false,
+			path: null,
+			baseRef: options.baseRef,
+			baseCommit: null,
+			error: "Task base revision is required for jj workspace creation.",
+		};
+	}
+
+	const baseCommit = await readJjCommit(options.repoPath, options.baseRef);
+	if (!baseCommit) {
+		return {
+			ok: false,
+			path: null,
+			baseRef: options.baseRef,
+			baseCommit: null,
+			error: `Could not resolve jj revision "${options.baseRef}".`,
+		};
+	}
+
+	await mkdir(dirname(options.worktreePath), { recursive: true });
+	return await lockedFileSystem.withLock(
+		{
+			path: dirname(options.worktreePath),
+			type: "directory",
+			lockfileName: KANBAN_TASK_WORKTREE_SETUP_LOCKFILE_NAME,
+		},
+		async () => {
+			const lockedExistingRoot = await runJj(options.worktreePath, ["--ignore-working-copy", "workspace", "root"]);
+			if (lockedExistingRoot.ok) {
+				return {
+					ok: true,
+					path: options.worktreePath,
+					baseRef: options.baseRef,
+					baseCommit: (await readJjCommit(options.worktreePath, "@")) ?? baseCommit,
+				};
+			}
+
+			const addResult = await runJj(options.repoPath, [
+				"workspace",
+				"add",
+				"--name",
+				`kanban-${options.taskId}`,
+				"-r",
+				options.baseRef,
+				options.worktreePath,
+			]);
+			if (!addResult.ok) {
+				return {
+					ok: false,
+					path: null,
+					baseRef: options.baseRef,
+					baseCommit: null,
+					error: addResult.stderr || "Could not create jj task workspace.",
+				};
+			}
+
+			return {
+				ok: true,
+				path: options.worktreePath,
+				baseRef: options.baseRef,
+				baseCommit,
+			};
+		},
+	);
 }
 
 function getTaskPatchFilePrefix(taskId: string): string {
@@ -443,6 +538,14 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 		const context = await loadWorkspaceContext(options.cwd);
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
 		const worktreePath = getTaskWorktreePath(context.repoPath, taskId);
+		if (context.vcs === "jj") {
+			return await ensureJjTaskWorkspace({
+				repoPath: context.repoPath,
+				taskId,
+				baseRef: options.baseRef.trim(),
+				worktreePath,
+			});
+		}
 		// Investigation note: ensure is called on every task start. The previous implementation
 		// compared the worktree HEAD to the latest baseRef commit and recreated the worktree
 		// when the base branch advanced, which could destroy valid task progress. Existing
@@ -567,6 +670,13 @@ export async function deleteTaskWorktree(options: {
 	taskId: string;
 }): Promise<RuntimeWorktreeDeleteResponse> {
 	try {
+		if (detectRepositoryKind(options.repoPath) === "jj") {
+			// ponytail: preserve jj workspaces until Kanban has an explicit, user-confirmed cleanup flow.
+			return {
+				ok: true,
+				removed: false,
+			};
+		}
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
 		const rootPath = getWorktreesBaseRootPath();
 		const worktreePath = getTaskWorktreePath(options.repoPath, taskId);
@@ -616,7 +726,7 @@ export async function resolveTaskCwd(options: {
 
 	const normalizedBaseRef = options.baseRef.trim();
 	if (!normalizedBaseRef) {
-		throw new Error("Task base branch is required for task workspace resolution.");
+		throw new Error("Task base revision is required for task workspace resolution.");
 	}
 
 	if (options.ensure) {
@@ -652,7 +762,7 @@ export async function getTaskWorkspacePathInfo(options: {
 	}
 
 	if (!normalizedBaseRef) {
-		throw new Error("Task base branch is required for task workspace info.");
+		throw new Error("Task base revision is required for task workspace info.");
 	}
 
 	const worktreePath = getTaskWorktreePath(repoPath, taskId);
@@ -679,6 +789,18 @@ export async function getTaskWorkspaceInfo(options: {
 			branch: null,
 			isDetached: false,
 			headCommit: null,
+		};
+	}
+	const context = await loadWorkspaceContext(options.cwd);
+	if (context.vcs === "jj") {
+		return {
+			taskId: workspacePathInfo.taskId,
+			path: workspacePathInfo.path,
+			exists: true,
+			baseRef: workspacePathInfo.baseRef,
+			branch: null,
+			isDetached: false,
+			headCommit: await readJjCommit(workspacePathInfo.path, "@"),
 		};
 	}
 

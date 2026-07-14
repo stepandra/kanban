@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import type { RuntimeGitRepositoryInfo } from "@/runtime/types";
+import type { RuntimeGitRepositoryInfo, RuntimeVcsMode } from "@/runtime/types";
 
 interface TaskBranchOption {
 	value: string;
@@ -9,6 +9,7 @@ interface TaskBranchOption {
 
 interface UseTaskBranchOptionsInput {
 	workspaceGit: RuntimeGitRepositoryInfo | null;
+	workspaceVcs: RuntimeVcsMode | null;
 }
 
 interface UseTaskBranchOptionsResult {
@@ -16,8 +17,14 @@ interface UseTaskBranchOptionsResult {
 	defaultTaskBranchRef: string;
 }
 
-export function useTaskBranchOptions({ workspaceGit }: UseTaskBranchOptionsInput): UseTaskBranchOptionsResult {
+export function useTaskBranchOptions({
+	workspaceGit,
+	workspaceVcs,
+}: UseTaskBranchOptionsInput): UseTaskBranchOptionsResult {
 	const createTaskBranchOptions = useMemo(() => {
+		if (workspaceVcs === "jj") {
+			return [{ value: "@", label: "@ (current change)" }];
+		}
 		if (!workspaceGit) {
 			return [] as TaskBranchOption[];
 		}
@@ -44,14 +51,17 @@ export function useTaskBranchOptions({ workspaceGit }: UseTaskBranchOptionsInput
 		append(workspaceGit.defaultBranch, workspaceGit.defaultBranch ? "(default)" : undefined);
 
 		return options;
-	}, [workspaceGit]);
+	}, [workspaceGit, workspaceVcs]);
 
 	const defaultTaskBranchRef = useMemo(() => {
+		if (workspaceVcs === "jj") {
+			return "@";
+		}
 		if (!workspaceGit) {
 			return "";
 		}
 		return workspaceGit.currentBranch ?? workspaceGit.defaultBranch ?? createTaskBranchOptions[0]?.value ?? "";
-	}, [createTaskBranchOptions, workspaceGit]);
+	}, [createTaskBranchOptions, workspaceGit, workspaceVcs]);
 
 	return {
 		createTaskBranchOptions,
