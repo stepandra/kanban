@@ -759,6 +759,47 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	};
 }
 
+async function prepareExternalTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const runtimeState = await runtimeClient.workspace.getState.query();
+	const record = findTaskRecord(runtimeState, input.taskId);
+	if (!record) {
+		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+	}
+	if (record.columnId !== "backlog" && record.columnId !== "in_progress" && record.columnId !== "review") {
+		throw new Error(
+			`Task "${input.taskId}" is in "${record.columnId}" and cannot be prepared for an external executor.`,
+		);
+	}
+
+	const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
+		taskId: record.task.id,
+		baseRef: record.task.baseRef,
+	});
+	if (!ensured.ok) {
+		throw new Error(ensured.error ?? "Could not ensure task workspace.");
+	}
+	const claimed = await transitionExternalTask({
+		cwd: input.cwd,
+		taskId: input.taskId,
+		projectPath: workspaceRepoPath,
+		action: "claim",
+	});
+
+	return {
+		ok: true,
+		task: {
+			...formatTaskRecord(runtimeState, record.task, "in_progress"),
+			column: "in_progress",
+			projectPath: workspaceRepoPath,
+			taskWorkspacePath: ensured.path,
+		},
+		claim: claimed.task,
+	};
+}
+
 async function transitionExternalTask(input: {
 	cwd: string;
 	taskId: string;
@@ -1240,10 +1281,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
-		.option(
-			"--agent-id <id>",
-			`Agent override: ${VALID_AGENT_IDS.join(" | ")}. Use "default" to clear.`,
-		)
+		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")}. Use "default" to clear.`)
 		.option(
 			"--cline-provider <id>",
 			'Cline provider override (e.g. anthropic, openai, cline). Use "default" to clear.',
@@ -1414,6 +1452,22 @@ export function registerTaskCommand(program: Command): void {
 						taskId: options.taskId,
 						projectPath: options.projectPath,
 						action: "submit",
+					}),
+			);
+		});
+
+	task
+		.command("prepare")
+		.description("Ensure a task workspace and claim it for an external interactive executor.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await prepareExternalTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
 					}),
 			);
 		});

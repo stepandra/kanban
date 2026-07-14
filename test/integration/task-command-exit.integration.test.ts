@@ -469,6 +469,23 @@ describe("source task commands", () => {
 				}
 				expect(taskIds).toHaveLength(3);
 
+				const prepared = await runCliCommandAndCollectOutput({
+					args: ["task", "prepare", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+				});
+				expect(prepared.didExit).toBe(true);
+				expect(prepared.exitCode).toBe(0);
+				const preparedPayload = JSON.parse(prepared.stdout) as {
+					ok?: boolean;
+					task?: { column?: string; projectPath?: string; taskWorkspacePath?: string };
+				};
+				expect(preparedPayload.ok).toBe(true);
+				expect(preparedPayload.task?.column).toBe("in_progress");
+				expect(preparedPayload.task?.projectPath).toBe(projectPath);
+				expect(preparedPayload.task?.taskWorkspacePath).toBeTruthy();
+				expect(existsSync(preparedPayload.task?.taskWorkspacePath ?? "")).toBe(true);
+
 				const claimed = await runCliCommandAndCollectOutput({
 					args: ["task", "claim", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
 					cwd: projectPath,

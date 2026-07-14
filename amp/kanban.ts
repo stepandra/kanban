@@ -5,12 +5,20 @@ import type { PluginAPI } from "@ampcode/plugin";
 
 const KANBAN_TOOL_NAME = "kanban_tasks";
 const KANBAN_BIN_ENV = "KANBAN_BIN";
+const ZJ_AGENT_BIN_ENV = "ZJ_AGENT_BIN";
+const INTERACTIVE_ZELLIJ_AGENTS = new Set(["claude", "codex", "grok", "kimi"]);
 
 interface KanbanTask {
 	id: string;
 	prompt: string;
 	title?: string;
 	agentId?: string;
+	startInPlanMode?: boolean;
+}
+
+interface PreparedKanbanTask extends KanbanTask {
+	projectPath: string;
+	taskWorkspacePath: string;
 }
 
 type ProcessResult = {
@@ -94,9 +102,51 @@ export default function (amp: PluginAPI): void {
 						threadId: thread.id,
 					});
 				}
+				if (task.agentId && INTERACTIVE_ZELLIJ_AGENTS.has(task.agentId)) {
+					await runZjAgentChecked(["controller", "inspect", task.agentId], workspacePath);
+					const prepared = await prepareInteractiveTask(taskId, workspacePath);
+					const workerPrompt = buildInteractiveTaskPrompt(prepared);
+					const result = await runZjAgentChecked(
+						[
+							"controller",
+							"spawn",
+							"--agent",
+							task.agentId,
+							"--lane",
+							task.agentId,
+							"--cwd",
+							prepared.taskWorkspacePath,
+							"--task-id",
+							taskId,
+							"--project-path",
+							workspacePath,
+							"--prompt-file",
+							"-",
+						],
+						workspacePath,
+						prepared.startInPlanMode ? `/plan ${workerPrompt}` : workerPrompt,
+					);
+					return result.stdout.trim() || "Interactive Zellij worker started.";
+				}
 			}
+			const completedTask =
+				action === "done" && typeof input.taskId === "string"
+					? await getTask(input.taskId, workspacePath)
+					: undefined;
 			const args = buildTaskArgs(input, workspacePath);
 			const result = await runKanbanChecked(args, workspacePath);
+			if (completedTask?.agentId && INTERACTIVE_ZELLIJ_AGENTS.has(completedTask.agentId)) {
+				try {
+					await runZjAgentChecked(
+						["controller", "release", "--task-id", completedTask.id],
+						workspacePath,
+					);
+				} catch (error) {
+					amp.logger.log(
+						`Kanban accepted task ${completedTask.id}, but its Zellij lane could not be released: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
 			return result.stdout.trim() || "Kanban command completed.";
 		},
 	});
@@ -265,6 +315,32 @@ async function getTask(taskId: string, workspacePath: string): Promise<KanbanTas
 	return task;
 }
 
+async function prepareInteractiveTask(taskId: string, workspacePath: string): Promise<PreparedKanbanTask> {
+	const result = await runKanbanChecked(
+		["task", "prepare", "--task-id", taskId, "--project-path", workspacePath],
+		workspacePath,
+	);
+	let payload: unknown;
+	try {
+		payload = JSON.parse(result.stdout);
+	} catch {
+		throw new Error("Kanban returned invalid JSON while preparing the task workspace.");
+	}
+	if (!isRecord(payload) || !isRecord(payload.task)) {
+		throw new Error("Kanban task prepare response is missing the task.");
+	}
+	const task = payload.task;
+	if (
+		typeof task.id !== "string" ||
+		typeof task.prompt !== "string" ||
+		typeof task.projectPath !== "string" ||
+		typeof task.taskWorkspacePath !== "string"
+	) {
+		throw new Error("Kanban task prepare response has an invalid task shape.");
+	}
+	return task as unknown as PreparedKanbanTask;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -279,6 +355,25 @@ function buildAmpTaskPrompt(task: KanbanTask, completionReceipt: string): string
 		"Read/write authority: you may edit only files needed for this task. Preserve concurrent user and agent changes.",
 		`If and only if the implementation is complete and validation passes, put this receipt on the final line of your final response: ${completionReceipt}`,
 		"Do not emit the receipt when blocked, incomplete, cancelled, or validation fails.",
+	].join("\n\n");
+}
+
+function buildInteractiveTaskPrompt(task: PreparedKanbanTask): string {
+	const submitCommand = [
+		"kanban task submit",
+		`--task-id ${shellQuote(task.id)}`,
+		`--project-path ${shellQuote(task.projectPath)}`,
+	].join(" ");
+	return [
+		"Role: bounded implementation worker in an interactive Zellij lane.",
+		`Goal: ${task.title?.trim() || task.prompt.trim()}`,
+		`Scope: implement only this Kanban task in the current task workspace.\n\n${task.prompt.trim()}`,
+		"Non-goals: do not create, accept, or mark Kanban tasks done; do not broaden scope or modify unrelated work.",
+		"Expected output: the implementation, the narrowest relevant validation, and a concise handoff with files changed and any blocker.",
+		"Read/write authority: you may edit only files needed for this task. Preserve concurrent user and agent changes.",
+		`When and only when implementation and validation are complete, submit the task for human/Amp review with:\n${submitCommand}`,
+		`Then update the ephemeral cockpit indicator (best effort only):\nzj-agent controller review --task-id ${shellQuote(task.id)} || true`,
+		"If blocked, incomplete, cancelled, or validation fails, leave the task in progress and report the blocker. Never run `kanban task done`; acceptance belongs to the reviewer.",
 	].join("\n\n");
 }
 
@@ -330,12 +425,28 @@ async function runKanban(args: string[], cwd: string): Promise<ProcessResult> {
 	return npxResult;
 }
 
-async function runProcess(command: string, args: string[], cwd: string): Promise<ProcessResult> {
+async function runZjAgentChecked(args: string[], cwd: string, stdin?: string): Promise<ProcessResult> {
+	const command = process.env[ZJ_AGENT_BIN_ENV]?.trim() || "zj-agent";
+	const result = await runProcess(command, args, cwd, stdin);
+	if (result.notFound) {
+		throw new Error(`${command} is not available on Amp's PATH.`);
+	}
+	if (result.exitCode !== 0) {
+		throw new Error(result.stderr.trim() || result.stdout.trim() || `zj-agent exited with code ${result.exitCode}.`);
+	}
+	return result;
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+async function runProcess(command: string, args: string[], cwd: string, stdin?: string): Promise<ProcessResult> {
 	return await new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd,
 			env: process.env,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 		});
 		let stdout = "";
 		let stderr = "";
@@ -349,6 +460,9 @@ async function runProcess(command: string, args: string[], cwd: string): Promise
 		child.stderr.on("data", (chunk: string) => {
 			stderr += chunk;
 		});
+		if (stdin !== undefined) {
+			child.stdin?.end(stdin);
+		}
 		child.on("error", (error: NodeJS.ErrnoException) => {
 			if (settled) {
 				return;
