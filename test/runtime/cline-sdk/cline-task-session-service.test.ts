@@ -14,10 +14,6 @@ import { createInMemoryClineTaskSessionService } from "../../../src/cline-sdk/cl
 import { createClineWatcherRegistry } from "../../../src/cline-sdk/cline-watcher-registry";
 import type { RuntimeTaskImage, RuntimeTaskSessionMode } from "../../../src/core/api-contract";
 
-const originalArgv = [...process.argv];
-const originalExecArgv = [...process.execArgv];
-const originalExecPath = process.execPath;
-
 const turnCheckpointMocks = vi.hoisted(() => ({
 	captureTaskTurnCheckpoint: vi.fn(),
 	deleteTaskTurnCheckpointRef: vi.fn(),
@@ -340,16 +336,6 @@ async function waitForTaskSessionId(runtime: FakeClineSessionRuntimeController, 
 	});
 	return runtime.getTaskSessionId(taskId) ?? "session-1";
 }
-
-function setKanbanProcessContext(): void {
-	process.argv = ["node", "/Users/example/repo/dist/cli.js"];
-	process.execArgv = [];
-	Object.defineProperty(process, "execPath", {
-		configurable: true,
-		value: "/usr/local/bin/node",
-	});
-}
-
 describe("InMemoryClineTaskSessionService", () => {
 	const services: ClineTaskSessionService[] = [];
 
@@ -390,12 +376,6 @@ describe("InMemoryClineTaskSessionService", () => {
 				await service.dispose();
 			}),
 		);
-		process.argv = [...originalArgv];
-		process.execArgv = [...originalExecArgv];
-		Object.defineProperty(process, "execPath", {
-			configurable: true,
-			value: originalExecPath,
-		});
 	});
 
 	it("starts a cline session and captures initial prompt as a user message", async () => {
@@ -975,38 +955,6 @@ describe("InMemoryClineTaskSessionService", () => {
 		});
 
 		expect(summary.warningMessage).toBeNull();
-	});
-
-	it("appends Kanban sidebar instructions for home sessions", async () => {
-		const { service, runtime } = createTrackedService();
-		setKanbanProcessContext();
-
-		await service.startTaskSession({
-			taskId: "__home_agent__:workspace-1:cline",
-			cwd: "/tmp/worktree",
-			prompt: "Add a task",
-		});
-		await vi.waitFor(() => {
-			expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(1);
-		});
-
-		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
-			expect.objectContaining({
-				systemPrompt: expect.stringContaining("You are Cline, an AI coding agent."),
-			}),
-		);
-		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
-			expect.objectContaining({
-				systemPrompt: expect.stringContaining("Kanban sidebar agent"),
-			}),
-		);
-		expect(runtime.startTaskSessionMock).toHaveBeenCalledWith(
-			expect.objectContaining({
-				systemPrompt: expect.stringContaining(
-					"'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create",
-				),
-			}),
-		);
 	});
 
 	it("mirrors runtime prompt resolution, rules, and approval wiring into the SDK start call", async () => {

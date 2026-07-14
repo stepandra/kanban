@@ -41,7 +41,6 @@ import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
-import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useOpenWorkspace } from "@/hooks/use-open-workspace";
 import { parseRemovedProjectPathFromStreamError, useProjectNavigation } from "@/hooks/use-project-navigation";
@@ -86,7 +85,6 @@ export default function App(): ReactElement {
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
-	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
@@ -107,7 +105,6 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		latestMcpAuthStatuses,
-		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
@@ -438,16 +435,6 @@ export default function App(): ReactElement {
 		sendTaskSessionInput,
 	});
 	const homeTerminalSummary = sessions[homeTerminalTaskId] ?? null;
-	const homeSidebarAgentPanel = useHomeSidebarAgentPanel({
-		currentProjectId,
-		hasNoProjects,
-		runtimeProjectConfig,
-		clineSessionContextVersion,
-		taskSessions: sessions,
-		workspaceGit,
-		latestTaskChatMessage,
-		taskChatMessagesByTaskId,
-	});
 	const { runningShortcutLabel, handleSelectShortcutLabel, handleRunShortcut, handleCreateShortcut } =
 		useShortcutActions({
 			currentProjectId,
@@ -819,10 +806,6 @@ export default function App(): ReactElement {
 						isLoadingProjects={isProjectListLoading}
 						currentProjectId={navigationCurrentProjectId}
 						removingProjectId={removingProjectId}
-						activeSection={homeSidebarSection}
-						onActiveSectionChange={setHomeSidebarSection}
-						canShowAgentSection={!hasNoProjects && Boolean(currentProjectId)}
-						agentSectionContent={homeSidebarAgentPanel}
 						selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
 						clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
 						featurebaseFeedbackState={featurebaseFeedbackState}

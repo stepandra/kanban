@@ -12,7 +12,6 @@ import type {
 import { buildKanbanCommandParts } from "../core/kanban-command";
 import { quoteShellArg } from "../core/shell";
 import { lockedFileSystem } from "../fs/locked-file-system";
-import { resolveHomeAgentAppendSystemPrompt } from "../prompts/append-system-prompt";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { configureCodexHooks, hasCodexConfigOverride } from "./codex-hook-config";
 import { createHookRuntimeEnv } from "./hook-runtime-context";
@@ -609,7 +608,6 @@ const claudeAdapter: AgentSessionAdapter = {
 		const env: Record<string, string | undefined> = {
 			FORCE_HYPERLINK: "1",
 		};
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
 		if (input.autonomousModeEnabled) {
 			// Auto mode is gated behind this env var on Bedrock/Vertex/Foundry; the Anthropic API ignores it.
 			env.CLAUDE_CODE_ENABLE_AUTO_MODE = "1";
@@ -693,14 +691,6 @@ const claudeAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		if (
-			appendedSystemPrompt &&
-			!hasCliOption(args, "--append-system-prompt") &&
-			!hasCliOption(args, "--system-prompt")
-		) {
-			args.push("--append-system-prompt", appendedSystemPrompt);
-		}
-
 		const withPromptLaunch = withPrompt(args, input.prompt, "append");
 		return {
 			...withPromptLaunch,
@@ -739,7 +729,6 @@ const codexAdapter: AgentSessionAdapter = {
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
 		let deferredStartupInput: string | undefined;
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
 
 		if (!hasCodexConfigOverride(codexArgs, "check_for_update_on_startup")) {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
@@ -756,10 +745,6 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
 			}
-		}
-
-		if (appendedSystemPrompt && !hasCodexConfigOverride(codexArgs, "developer_instructions")) {
-			codexArgs.push("-c", `developer_instructions=${JSON.stringify(appendedSystemPrompt)}`);
 		}
 
 		const hooks = resolveHookContext(input);
@@ -1238,15 +1223,6 @@ const droidAdapter: AgentSessionAdapter = {
 			}
 		}
 
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
-		if (
-			appendedSystemPrompt &&
-			!hasCliOption(args, "--append-system-prompt") &&
-			!hasCliOption(args, "--system-prompt")
-		) {
-			args.push("--append-system-prompt", appendedSystemPrompt);
-		}
-
 		const withPromptLaunch = withPrompt(args, input.prompt, "append");
 		return {
 			...withPromptLaunch,
@@ -1272,8 +1248,7 @@ const kiroAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
-		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
-		if (hooks || appendedSystemPrompt) {
+		if (hooks) {
 			const configPath = getKiroAgentConfigPath();
 			const config: Record<string, unknown> = {
 				name: KIRO_KANBAN_AGENT_NAME,
@@ -1338,10 +1313,6 @@ const kiroAdapter: AgentSessionAdapter = {
 						workspaceId: hooks.workspaceId,
 					}),
 				);
-			}
-
-			if (appendedSystemPrompt) {
-				config.prompt = appendedSystemPrompt;
 			}
 
 			await ensureTextFile(configPath, JSON.stringify(config, null, 2));

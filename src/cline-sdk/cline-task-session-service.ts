@@ -10,7 +10,6 @@ import type {
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
-import { resolveHomeAgentAppendSystemPrompt } from "../prompts/append-system-prompt";
 import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
 import {
 	compactPersistedMessagesForContextOverflow,
@@ -403,17 +402,13 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 				const runtimePrompt = runtimeSetup.resolvePrompt(
 					buildClineStartPrompt(request.prompt, request.startInPlanMode),
 				);
-				let systemPrompt =
+				const systemPrompt =
 					request.systemPrompt?.trim() ||
 					(await resolveClineSdkSystemPrompt({
 						cwd: request.cwd,
 						providerId,
 						rules: runtimeSetup.loadRules(),
 					}));
-				const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(request.taskId);
-				if (appendedSystemPrompt) {
-					systemPrompt = `${systemPrompt}\n\n${appendedSystemPrompt}`;
-				}
 
 				const startResult = await this.sessionRuntime.startTaskSession({
 					taskId: request.taskId,

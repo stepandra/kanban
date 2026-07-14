@@ -1,6 +1,4 @@
-// Shared TRPC action hook for every native Cline chat surface.
-// Detail view and home sidebar both use this to send messages, cancel turns,
-// and load history through one runtime contract.
+// Shared TRPC action hook for native Cline task chat.
 import { useCallback } from "react";
 
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
