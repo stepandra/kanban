@@ -598,6 +598,14 @@ function withPrompt(args: string[], prompt: string, mode: "append" | "flag", fla
 	};
 }
 
+function withReviewSubmission(prompt: string, source: "grok" | "kimi"): string {
+	return [
+		prompt.trim(),
+		"When implementation and validation are complete, submit this Kanban task for review before your final response:",
+		buildHookCommand("to_review", { source }),
+	].join("\n\n");
+}
+
 function toBracketedPasteSubmission(command: string): string {
 	return `\u001b[200~${command}\u001b[201~\r`;
 }
@@ -699,6 +707,84 @@ const claudeAdapter: AgentSessionAdapter = {
 				...env,
 			},
 		};
+	},
+};
+
+const grokAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const env: Record<string, string | undefined> = {};
+		if (input.autonomousModeEnabled && !hasCliOption(args, "--always-approve")) {
+			args.push("--always-approve");
+		}
+		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
+			args.push("--continue");
+		}
+
+		const hooks = resolveHookContext(input);
+		if (hooks) {
+			Object.assign(env, createHookRuntimeEnv(hooks));
+		}
+		const prompt = hooks ? withReviewSubmission(input.prompt, "grok") : input.prompt;
+		if (input.startInPlanMode) {
+			return {
+				binary: input.binary,
+				args,
+				env,
+				deferredStartupInput: toBracketedPasteSubmission(`/plan ${prompt}`),
+			};
+		}
+		const launch = withPrompt(args, prompt, "flag", "--prompt");
+		return {
+			...launch,
+			env: { ...launch.env, ...env },
+		};
+	},
+};
+
+const kimiAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const env: Record<string, string | undefined> = {};
+		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
+			args.push("--continue");
+		}
+
+		const hooks = resolveHookContext(input);
+		if (hooks) {
+			Object.assign(env, createHookRuntimeEnv(hooks));
+		}
+		const prompt = hooks ? withReviewSubmission(input.prompt, "kimi") : input.prompt;
+		if (input.startInPlanMode) {
+			if (!hasCliOption(args, "--plan")) {
+				args.push("--plan");
+			}
+			return {
+				binary: input.binary,
+				args,
+				env,
+				deferredStartupInput: toBracketedPasteSubmission(prompt),
+			};
+		}
+		if (!input.autonomousModeEnabled) {
+			return {
+				binary: input.binary,
+				args,
+				env,
+				deferredStartupInput: toBracketedPasteSubmission(prompt),
+			};
+		}
+		const launch = withPrompt(args, prompt, "flag", "--prompt");
+		return {
+			...launch,
+			env: { ...launch.env, ...env },
+		};
+	},
+};
+
+const ampAdapter: AgentSessionAdapter = {
+	async prepare() {
+		throw new Error("Amp tasks must be started through the Amp plugin so they can run in an Orb.");
 	},
 };
 
@@ -1401,8 +1487,11 @@ const clineAdapter: AgentSessionAdapter = {
 };
 
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
+	amp: ampAdapter,
 	claude: claudeAdapter,
 	codex: codexAdapter,
+	grok: grokAdapter,
+	kimi: kimiAdapter,
 	gemini: geminiAdapter,
 	opencode: opencodeAdapter,
 	droid: droidAdapter,

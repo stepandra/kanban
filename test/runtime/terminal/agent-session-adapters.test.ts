@@ -10,25 +10,12 @@ const originalHome = process.env.HOME;
 const originalAppData = process.env.APPDATA;
 const originalLocalAppData = process.env.LOCALAPPDATA;
 let tempHome: string | null = null;
-const originalArgv = [...process.argv];
-const originalExecArgv = [...process.execArgv];
-const originalExecPath = process.execPath;
 
 function setupTempHome(): string {
 	tempHome = mkdtempSync(join(tmpdir(), "kanban-agent-adapters-"));
 	process.env.HOME = tempHome;
 	return tempHome;
 }
-
-function setKanbanProcessContext(): void {
-	process.argv = ["node", "/Users/example/repo/dist/cli.js"];
-	process.execArgv = [];
-	Object.defineProperty(process, "execPath", {
-		configurable: true,
-		value: "/usr/local/bin/node",
-	});
-}
-
 function getCodexConfigOverrideValues(args: string[], key: string): string[] {
 	const values: string[] = [];
 	for (let index = 0; index < args.length; index += 1) {
@@ -72,12 +59,6 @@ afterEach(() => {
 	} else {
 		process.env.LOCALAPPDATA = originalLocalAppData;
 	}
-	process.argv = [...originalArgv];
-	process.execArgv = [...originalExecArgv];
-	Object.defineProperty(process, "execPath", {
-		configurable: true,
-		value: originalExecPath,
-	});
 });
 
 describe("prepareAgentLaunch hook strategies", () => {
@@ -118,45 +99,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 
 		const wrapperPath = join(homedir(), ".cline", "kanban", "hooks", "codex", "codex-wrapper.mjs");
 		expect(existsSync(wrapperPath)).toBe(false);
-	});
-
-	it("appends Kanban sidebar instructions for home Claude sessions", async () => {
-		setupTempHome();
-		setKanbanProcessContext();
-		const launch = await prepareAgentLaunch({
-			taskId: "__home_agent__:workspace-1:claude",
-			agentId: "claude",
-			binary: "claude",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-		});
-
-		const appendPromptIndex = launch.args.indexOf("--append-system-prompt");
-		expect(appendPromptIndex).toBeGreaterThanOrEqual(0);
-		expect(launch.args[appendPromptIndex + 1]).toContain("Kanban sidebar agent");
-		expect(launch.args[appendPromptIndex + 1]).toContain(
-			"'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create",
-		);
-	});
-
-	it("appends Kanban sidebar instructions for home Codex sessions", async () => {
-		setupTempHome();
-		setKanbanProcessContext();
-		const launch = await prepareAgentLaunch({
-			taskId: "__home_agent__:workspace-1:codex",
-			agentId: "codex",
-			binary: "codex",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-		});
-
-		const developerInstructions = getCodexConfigOverrideValues(launch.args, "developer_instructions");
-		expect(developerInstructions).toHaveLength(1);
-		expect(developerInstructions[0]).toContain("Kanban sidebar agent");
-		expect(developerInstructions[0]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js' task create");
-		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
 
 	it("disables Codex startup update checks for Kanban-launched sessions", async () => {
@@ -207,6 +149,107 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(settings.hooks?.PreToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUse).toBeDefined();
 		expect(settings.hooks?.PostToolUseFailure).toBeDefined();
+	});
+
+	it("gives Grok and Kimi a task-scoped review submission command", async () => {
+		setupTempHome();
+		const grokLaunch = await prepareAgentLaunch({
+			taskId: "task-grok",
+			agentId: "grok",
+			binary: "grok",
+			args: [],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Implement Grok task",
+			workspaceId: "workspace-1",
+		});
+		const kimiLaunch = await prepareAgentLaunch({
+			taskId: "task-kimi",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Implement Kimi task",
+			workspaceId: "workspace-1",
+		});
+
+		expect(grokLaunch.args).toContain("--always-approve");
+		expect(grokLaunch.args).not.toContain("--permission-mode");
+		expect(grokLaunch.args).toContain("--prompt");
+		expect(grokLaunch.args.at(-1)).toContain("hooks");
+		expect(grokLaunch.args.at(-1)).toContain("ingest");
+		expect(grokLaunch.args.at(-1)).toContain("to_review");
+		expect(grokLaunch.args.at(-1)).toContain("grok");
+		expect(grokLaunch.env.KANBAN_HOOK_TASK_ID).toBe("task-grok");
+		expect(kimiLaunch.args).not.toContain("--yolo");
+		expect(kimiLaunch.args).toContain("--prompt");
+		expect(kimiLaunch.args.at(-1)).toContain("hooks");
+		expect(kimiLaunch.args.at(-1)).toContain("ingest");
+		expect(kimiLaunch.args.at(-1)).toContain("to_review");
+		expect(kimiLaunch.args.at(-1)).toContain("kimi");
+		expect(kimiLaunch.env.KANBAN_HOOK_TASK_ID).toBe("task-kimi");
+	});
+
+	it("starts Grok plan mode through its supported slash command", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-grok-plan",
+			agentId: "grok",
+			binary: "grok",
+			args: [],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Plan the Grok task",
+			startInPlanMode: true,
+			workspaceId: "workspace-1",
+		});
+
+		expect(launch.args).toContain("--always-approve");
+		expect(launch.args).not.toContain("--prompt");
+		expect(launch.args).not.toContain("--permission-mode");
+		expect(launch.deferredStartupInput).toContain("/plan Plan the Grok task");
+		expect(launch.deferredStartupInput).toContain("to_review");
+		expect(launch.deferredStartupInput).toContain("grok");
+	});
+
+	it("defers Kimi plan prompts instead of combining conflicting flags", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-plan",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			autonomousModeEnabled: true,
+			cwd: "/tmp",
+			prompt: "Plan the Kimi task",
+			startInPlanMode: true,
+			workspaceId: "workspace-1",
+		});
+
+		expect(launch.args).toContain("--plan");
+		expect(launch.args).not.toContain("--prompt");
+		expect(launch.args).not.toContain("--yolo");
+		expect(launch.deferredStartupInput).toContain("Plan the Kimi task");
+		expect(launch.deferredStartupInput).toContain("to_review");
+		expect(launch.deferredStartupInput).toContain("kimi");
+	});
+
+	it("keeps Kimi interactive when autonomous mode is disabled", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-kimi-manual",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			autonomousModeEnabled: false,
+			cwd: "/tmp",
+			prompt: "Implement with approvals",
+			workspaceId: "workspace-1",
+		});
+
+		expect(launch.args).not.toContain("--prompt");
+		expect(launch.deferredStartupInput).toContain("Implement with approvals");
 	});
 
 	it("writes Gemini settings with AfterTool mapped to to_in_progress", async () => {

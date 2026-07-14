@@ -195,4 +195,41 @@ describe("TerminalSessionManager auto-restart", () => {
 		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
 		expect(session.write).toHaveBeenCalledTimes(1);
 	});
+
+	it.each(["grok", "kimi"] as const)("sends deferred %s input after its TUI starts rendering", async (agentId) => {
+		const deferredStartupInput = `\u001b[200~Start ${agentId}\u001b[201~\r`;
+		prepareAgentLaunchMock.mockResolvedValue({
+			binary: agentId,
+			args: [],
+			env: {},
+			deferredStartupInput,
+		});
+
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(111, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: `task-${agentId}`,
+			agentId,
+			binary: agentId,
+			args: [],
+			cwd: `/tmp/task-${agentId}`,
+			prompt: `Start ${agentId}`,
+		});
+
+		const session = spawnedSessions[0];
+		expect(session).toBeDefined();
+		if (!session) {
+			return;
+		}
+
+		session.triggerData(`Starting ${agentId}\n`);
+		expect(session.write).toHaveBeenCalledWith(deferredStartupInput);
+		expect(session.write).toHaveBeenCalledTimes(1);
+	});
 });

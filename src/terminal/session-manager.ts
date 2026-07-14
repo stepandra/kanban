@@ -206,17 +206,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly entries = new Map<string, SessionEntry>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
 
-	private trySendDeferredCodexStartupInput(taskId: string): boolean {
+	private trySendDeferredStartupInput(taskId: string): boolean {
 		const entry = this.entries.get(taskId);
 		const active = entry?.active;
-		if (!entry || !active || entry.summary.agentId !== "codex") {
+		if (
+			!entry ||
+			!active ||
+			(entry.summary.agentId !== "codex" && entry.summary.agentId !== "grok" && entry.summary.agentId !== "kimi")
+		) {
 			return false;
 		}
 		if (active.deferredStartupInput === null) {
 			return false;
 		}
 		const trustPromptVisible =
-			active.workspaceTrustBuffer !== null && hasCodexWorkspaceTrustPrompt(active.workspaceTrustBuffer);
+			entry.summary.agentId === "codex" &&
+			active.workspaceTrustBuffer !== null &&
+			hasCodexWorkspaceTrustPrompt(active.workspaceTrustBuffer);
 		if (trustPromptVisible) {
 			return false;
 		}
@@ -370,6 +376,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 					const needsDecodedOutput =
 						entry.active.workspaceTrustBuffer !== null ||
+						entry.active.deferredStartupInput !== null ||
 						(entry.active.detectOutputTransition !== null &&
 							(entry.active.shouldInspectOutputForTransition?.(entry.summary) ?? true));
 					const data = needsDecodedOutput ? filteredChunk.toString("utf8") : "";
@@ -405,19 +412,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					updateSummary(entry, { lastOutputAt: now() });
 
-					// Codex plan-mode startup input is deferred until we know the TUI rendered.
-					// Trigger on either the interactive prompt marker or the startup header text.
+					// Plan-mode startup input is deferred until the interactive TUI starts rendering.
 					if (
-						entry.summary.agentId === "codex" &&
 						entry.active.deferredStartupInput !== null &&
 						data.length > 0 &&
-						(hasCodexInteractivePrompt(data) ||
-							hasCodexStartupUiRendered(data) ||
-							(entry.active.workspaceTrustBuffer !== null &&
-								(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
-									hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))))
+						(entry.summary.agentId === "grok" ||
+							entry.summary.agentId === "kimi" ||
+							(entry.summary.agentId === "codex" &&
+								(hasCodexInteractivePrompt(data) ||
+									hasCodexStartupUiRendered(data) ||
+									(entry.active.workspaceTrustBuffer !== null &&
+										(hasCodexInteractivePrompt(entry.active.workspaceTrustBuffer) ||
+											hasCodexStartupUiRendered(entry.active.workspaceTrustBuffer))))))
 					) {
-						this.trySendDeferredCodexStartupInput(request.taskId);
+						this.trySendDeferredStartupInput(request.taskId);
 					}
 
 					const adapterEvent = entry.active.detectOutputTransition?.(data, entry.summary) ?? null;

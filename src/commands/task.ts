@@ -759,6 +759,61 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 	};
 }
 
+async function transitionExternalTask(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	action: "claim" | "submit";
+}): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const targetColumnId: RuntimeBoardColumnId = input.action === "claim" ? "in_progress" : "review";
+	const allowedSourceColumns: RuntimeBoardColumnId[] =
+		input.action === "claim" ? ["backlog", "in_progress", "review"] : ["in_progress", "review"];
+
+	const mutation = await mutateWorkspaceState(workspaceRepoPath, (latestState) => {
+		const record = findTaskRecord(latestState, input.taskId);
+		if (!record) {
+			throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+		}
+		if (!allowedSourceColumns.includes(record.columnId)) {
+			throw new Error(
+				`Task "${input.taskId}" is in "${record.columnId}" and cannot be ${input.action === "claim" ? "claimed" : "submitted"}.`,
+			);
+		}
+		if (record.columnId === targetColumnId) {
+			return {
+				board: latestState.board,
+				value: formatTaskRecord(latestState, record.task, record.columnId),
+				save: false,
+			};
+		}
+
+		const moved = moveTaskToColumn(latestState.board, input.taskId, targetColumnId);
+		if (!moved.moved || !moved.task) {
+			throw new Error(`Task "${input.taskId}" could not be moved to ${targetColumnId}.`);
+		}
+		const nextState: RuntimeWorkspaceStateResponse = {
+			...latestState,
+			board: moved.board,
+		};
+		return {
+			board: moved.board,
+			value: formatTaskRecord(nextState, moved.task, targetColumnId),
+		};
+	});
+
+	if (mutation.saved) {
+		await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
+	}
+	return {
+		ok: true,
+		task: mutation.value,
+		workspacePath: workspaceRepoPath,
+	};
+}
+
 interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
@@ -1125,7 +1180,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
-		.option("--agent-id <id>", "Agent override: cline | claude | codex | droid | gemini | opencode | default.")
+		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")} | default.`)
 		.option(
 			"--cline-provider <id>",
 			'Cline provider override (e.g. anthropic, openai, cline). Use "default" for workspace default.',
@@ -1187,7 +1242,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option(
 			"--agent-id <id>",
-			'Agent override: cline | claude | codex | droid | gemini | opencode. Use "default" to clear.',
+			`Agent override: ${VALID_AGENT_IDS.join(" | ")}. Use "default" to clear.`,
 		)
 		.option(
 			"--cline-provider <id>",
@@ -1325,6 +1380,40 @@ export function registerTaskCommand(program: Command): void {
 						cwd: process.cwd(),
 						dependencyId: options.dependencyId,
 						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	task
+		.command("claim")
+		.description("Move a task to in_progress without starting a local agent session.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await transitionExternalTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
+						action: "claim",
+					}),
+			);
+		});
+
+	task
+		.command("submit")
+		.description("Submit an in-progress task for review without accepting or cleaning it up.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await transitionExternalTask({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
+						action: "submit",
 					}),
 			);
 		});

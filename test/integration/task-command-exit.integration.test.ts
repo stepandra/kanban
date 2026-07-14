@@ -404,7 +404,7 @@ describe("source task commands", () => {
 		}
 	});
 
-	it("supports done and trash aliases when moving and deleting tasks", { timeout: 60_000 }, async () => {
+	it("supports claim, submit, done, and trash lifecycle commands", { timeout: 90_000 }, async () => {
 		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-done-delete-");
 		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-done-delete-");
 
@@ -438,7 +438,7 @@ describe("source task commands", () => {
 			);
 
 			try {
-				await waitForServerStart(serverProcess);
+				await waitForServerStart(serverProcess, 30_000);
 
 				const taskIds: string[] = [];
 				for (const prompt of [
@@ -468,6 +468,24 @@ describe("source task commands", () => {
 					}
 				}
 				expect(taskIds).toHaveLength(3);
+
+				const claimed = await runCliCommandAndCollectOutput({
+					args: ["task", "claim", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+				});
+				expect(claimed.didExit).toBe(true);
+				expect(claimed.exitCode).toBe(0);
+				expect(claimed.stdout).toContain('"column": "in_progress"');
+
+				const submitted = await runCliCommandAndCollectOutput({
+					args: ["task", "submit", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+				});
+				expect(submitted.didExit).toBe(true);
+				expect(submitted.exitCode).toBe(0);
+				expect(submitted.stdout).toContain('"column": "review"');
 
 				const movedByDoneAlias = await runCliCommandAndCollectOutput({
 					args: ["task", "done", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],

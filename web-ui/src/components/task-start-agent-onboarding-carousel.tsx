@@ -48,16 +48,6 @@ interface OnboardingDoneResult {
 export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	{
 		kind: "media",
-		title: "Create tasks with Kanban",
-		description:
-			"Press c to create a task yourself, or talk to the sidebar Kanban agent to plan work for you. It can pull projects and issues from Linear and GitHub, then turn them into tasks your coding agent can pick up.",
-		assetVideoUrl: "https://github.com/user-attachments/assets/4408930c-33cd-4af9-a343-e82b099eab8c",
-		assetAlt: "Talking to the sidebar Kanban agent to create tasks from Linear and GitHub",
-		assetWidthPx: 1908,
-		assetHeightPx: 720,
-	},
-	{
-		kind: "media",
 		title: "Auto commit and link",
 		description:
 			"Create dependency chains of linked tasks that start one another automatically. Agents can auto commit their work as they finish, so you can orchestrate tasks in order and watch the board burn them down automatically.",
@@ -83,7 +73,7 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	},
 ];
 
-const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "droid", "kiro"];
+const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "grok", "kimi", "droid", "kiro"];
 const FALLBACK_ONBOARDING_SLIDE: OnboardingSlide = {
 	kind: "agent-selection",
 	title: "",
@@ -298,6 +288,12 @@ function resolveInstallInstructions(agentId: RuntimeAgentId): string {
 	}
 	if (agentId === "codex") {
 		return "OpenAI's coding agent CLI with access to the latest GPT models.";
+	}
+	if (agentId === "grok") {
+		return "xAI's coding agent CLI for fast implementation work.";
+	}
+	if (agentId === "kimi") {
+		return "Moonshot AI's coding agent CLI with autonomous coding support.";
 	}
 	if (agentId === "droid") {
 		return "Factory's coding agent with access to the latest frontier models.";
