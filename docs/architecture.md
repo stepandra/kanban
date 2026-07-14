@@ -98,7 +98,7 @@ websocket stream
 browser runtime state hooks
     |
     v
-board, detail view, sidebar, and terminal panels
+board, detail view, and terminal panels
 ```
 
 ## The Mental Model
@@ -123,7 +123,7 @@ Kanban currently supports three runtime modes.
 
 | Runtime mode | Used for | Scope | Backing implementation | Why it exists |
 | --- | --- | --- | --- | --- |
-| Native Cline chat | Cline | task-scoped, plus a project-scoped sidebar surface | Cline SDK session host | Cline exposes richer chat semantics, provider settings, OAuth, and persisted session history |
+| Native Cline chat | Cline | task-scoped | Cline SDK session host | Cline exposes richer chat semantics, provider settings, OAuth, and persisted session history |
 | CLI-backed task terminal | Claude Code, Codex, Gemini, OpenCode, Droid, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
 | Workspace shell terminal | the bottom shell panel | workspace-scoped | PTY-backed shell process | this is for manual commands in the repo, not task execution |
 
@@ -160,7 +160,6 @@ These terms come up everywhere in the codebase.
 | Task card | a board item with a prompt, base ref, and review settings | a task is the unit of work the board cares about |
 | Worktree | a per-task git worktree | most task agents run inside one |
 | Task session | the live runtime attached to a task card | this may be a PTY process or a native Cline session |
-| Home agent session | a synthetic, project-scoped session used by the sidebar agent surface | this lets the sidebar reuse existing runtime primitives without creating a real task card |
 | Runtime summary | the small state object the board uses to know whether a session is idle, running, awaiting review, interrupted, or failed | this is the bridge between long-running agent work and the UI |
 
 ## Who Owns What
@@ -176,7 +175,7 @@ One of the biggest cleanup themes was making ownership clearer. The system is mu
 | Cline OAuth state and refresh | Cline SDK | Kanban delegates through a provider service |
 | Cline session persistence and history | Cline SDK | Kanban hydrates from SDK artifacts instead of reinventing persistence |
 | mapping SDK sessions into Kanban task semantics | Kanban integration layer | this is what `src/cline-sdk/` exists to do |
-| UI rendering state for detail view and sidebar | browser hooks and components | local UI state belongs in the frontend |
+| UI rendering state for detail view | browser hooks and components | local UI state belongs in the frontend |
 | live state fanout to the browser | `runtime-state-hub.ts` | the browser should react to streamed state, not poll |
 
 If a change feels awkward, it is often because ownership is being blurred.
@@ -232,7 +231,7 @@ The frontend is also easier to navigate if you think in responsibilities instead
 
 `App.tsx` is the composition root. It wires together the major hooks, determines which high-level surfaces are visible, and hands state down into the board, detail view, dialogs, and terminal areas. It should not become a second runtime orchestrator.
 
-Hooks in `web-ui/src/hooks/` are where most domain logic lives. This includes project navigation, workspace synchronization, task-session actions, review behavior, Cline chat state, and the home sidebar agent lifecycle. If you are looking for "how does this behavior actually work?", the answer is usually in a hook, not a component.
+Hooks in `web-ui/src/hooks/` are where most domain logic lives. This includes project navigation, workspace synchronization, task-session actions, review behavior, and Cline chat state. If you are looking for "how does this behavior actually work?", the answer is usually in a hook, not a component.
 
 Components in `web-ui/src/components/` are mostly rendering and composition. Good frontend changes often mean moving runtime-aware logic into hooks and leaving the component to render a view model.
 
@@ -292,7 +291,6 @@ This split matters because the biggest failure mode in this area is accidental d
 
 - duplicating SDK-owned settings in Kanban config
 - duplicating SDK event logic in multiple places
-- duplicating chat behavior between detail view and sidebar
 - duplicating direct SDK imports throughout the codebase
 
 ## Configuration and Persistence
@@ -311,25 +309,13 @@ One very important rule falls out of that table:
 
 Do not put Cline provider secrets or OAuth tokens back into `runtime-config.ts`.
 
-## The Home Sidebar Agent Surface
+## Amp Task Planning
 
-The home sidebar agent surface is one of the less obvious parts of the architecture.
+Task decomposition lives in Amp through the self-contained `amp/kanban.ts` plugin. The plugin exposes typed Kanban task operations to the active Amp thread and a command-palette action that opens a native `medium` thread for focused decomposition. It can also start cards assigned to `amp` in an Orb and watches the native thread response before submitting successful work to review. Kanban does not embed a separate planning agent in the project sidebar.
 
-It looks like a task panel, but it is not backed by a real task card and it does not create a task worktree. Instead, the system creates a synthetic home agent session id and runs a project-scoped session behind that identity.
+Task completion has two deliberately separate operations. `submit` moves in-progress work to review without cleanup or dependency unblocking; executors and runtime hooks use it when implementation is ready for inspection. `done` is the acceptance operation: it stops the session, removes the task workspace where appropriate, and unblocks linked work. An executor must not collapse those gates by calling `done` itself.
 
-That design is a deliberate compromise.
-
-It lets the sidebar reuse the same runtime primitives that already exist for task-scoped chat and terminal panels, but without pretending the sidebar is a normal task with a prompt card and a worktree-backed lifecycle.
-
-The current behavior is:
-
-- when the selected sidebar agent is Cline, the sidebar renders native chat
-- when the selected sidebar agent is another provider, the sidebar renders a terminal panel
-- the home session is keyed to the current workspace and relevant agent descriptor
-- switching between Projects and Agent in the sidebar should not restart the session
-- switching to a different project or materially different agent configuration should rotate the session
-
-This is one of the places where the architecture still has a little intentional weirdness. It is not a first-class workspace-native session type yet, but it is now documented and contained.
+A small backend compatibility check still recognizes synthetic session IDs saved by older Kanban versions, but the sidebar runtime and its prompt injection are gone.
 
 ## Main Flows
 
@@ -341,9 +327,7 @@ This is the "classic Kanban" path.
 
 ### Sending a Cline chat message
 
-When the user sends a Cline message from the detail view or the home sidebar, the browser goes through shared Cline runtime actions instead of inventing two separate flows. The request reaches `runtime-api.ts`, which delegates to the task-oriented Cline session service. That service makes sure the right native session exists, applies chat turns to it, listens to SDK events, updates the message repository and summary state, and lets the runtime state hub stream those updates back to the browser.
-
-The important architectural point is that detail view and sidebar are two surfaces over the same underlying Cline runtime model.
+When the user sends a Cline message from the detail view, the request reaches `runtime-api.ts`, which delegates to the task-oriented Cline session service. That service makes sure the right native session exists, applies chat turns to it, listens to SDK events, updates the message repository and summary state, and lets the runtime state hub stream those updates back to the browser.
 
 ### Opening settings and changing Cline provider state
 
@@ -359,7 +343,6 @@ These are the architectural rules that are most important to preserve.
 - keep the SDK behind the Cline boundary modules
 - keep `runtime-api.ts` as a coordinator, not a god file
 - do not store Cline auth or provider secrets in Kanban runtime config
-- prefer sharing runtime-aware hooks between detail view and sidebar instead of letting the two diverge
 - treat the browser as a client of streamed runtime state, not the source of truth for long-running sessions
 - when adding new agent behavior, prefer capability-oriented reasoning over sprinkling more `selectedAgentId === "cline"` checks
 - because this feature area currently has zero users to migrate, prefer clean replacement over backward-compatibility scaffolding
@@ -378,7 +361,6 @@ These rules are intentionally narrow. They exist to protect the seams that are e
 
 Not everything is perfectly generalized, and that is okay. Some current tradeoffs are intentional.
 
-- the home sidebar uses a synthetic session identity instead of a first-class workspace-native session type
 - some agent-selection code still branches on `"cline"` directly, even though the long-term direction is more capability-based routing
 - the published SDK packages are still a real dependency boundary, so the local boundary modules matter a lot
 - Cline is native chat while the rest of the catalog is still command-driven, which means some parallel abstractions are similar but not identical
@@ -391,11 +373,11 @@ When you are making a change, this table is often more useful than a file list.
 
 | If you are changing... | Think about this first | Common mistake to avoid |
 | --- | --- | --- |
-| task startup for Claude Code, Codex, Gemini, OpenCode, or Droid | the PTY runtime and agent launch path | accidentally adding special logic to the Cline path |
+| task startup for Claude Code, Codex, Grok, Kimi, Gemini, OpenCode, or Droid | the PTY runtime and agent launch path | accidentally adding special logic to the Cline path |
+| Amp Orb task startup | the Amp plugin and its native thread watcher | inventing a second worker runtime or letting the worker accept its own card |
 | Cline provider settings, models, or OAuth | the Cline provider service and SDK provider boundary | storing secrets in Kanban config or duplicating OAuth policy |
-| Cline message rendering or send/cancel behavior | the shared Cline hooks and task-session service | making detail view and sidebar behave differently |
+| Cline message rendering or send/cancel behavior | the Cline hooks and task-session service | duplicating SDK event or session logic in the component |
 | live board updates | the runtime state hub and browser stream consumers | falling back to polling or duplicating summary logic |
-| home sidebar agent behavior | the synthetic home session lifecycle | treating the sidebar like a normal task with a real worktree |
 | new architectural boundaries | the existing lint rules and ownership model | adding a rule that is too broad and becomes a nuisance |
 
 ## What A New Engineer Should Expect

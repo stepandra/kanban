@@ -46,7 +46,15 @@ kanban
 Run this from the root of any git repo. Kanban will detect your installed CLI agent and launch a local running webserver in your browser. No account or setup required, it works right out of the box.
 
 ### 2. Create tasks
-Create a task card manually, or open the sidebar chat and ask your agent to break work down into tasks for you. Kanban injects board-management instructions into that session so you can simply ask it to add tasks, link tasks, or start work on your board.
+Create a task card manually, or install the Amp plugin once:
+
+```bash
+amp plugins add https://raw.githubusercontent.com/stepandra/kanban/main/amp/kanban.ts --auto-update
+```
+
+Then ask Amp to add, assign, link, or start Kanban tasks from any thread. Assign `amp` to run a task in a background Orb with Amp's built-in `medium` agent, or assign a local CLI such as Claude, Codex, Grok, or Kimi. For a dedicated planning thread, run **Kanban: Decompose into tasks** from Amp's command palette. It opens a native Amp `medium` thread rather than embedding another agent runtime in Kanban.
+
+Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. The Amp plugin watches Orb threads and submits only when the worker reports successful implementation and validation. After review, `done` remains the acceptance step that cleans up the task workspace and unblocks dependencies.
 
 ### 3. Link and automate
 <kbd>⌘</kbd> + click a card to link it to another task. When a card is completed and moved to trash, linked tasks auto-start. Combine with auto-commit for fully autonomous dependency chains: one task completes → commits → kicks off the next → repeat. It’s a pretty magical experience asking your agent to decompose a big task into subtasks that auto-commit - he’ll cleverly do it in a way that parallelizes for maximum efficiency and links tasks together for end-to-end autonomy.
