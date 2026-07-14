@@ -701,7 +701,7 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			baseRef: task.baseRef,
 		});
 		if (!ensured.ok) {
-			throw new Error(ensured.error ?? "Could not ensure task worktree.");
+			throw new Error(ensured.error ?? "Could not ensure task workspace.");
 		}
 
 		const started = await runtimeClient.runtime.startTaskSession.mutate({
