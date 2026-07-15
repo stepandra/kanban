@@ -53,7 +53,7 @@ Press enter to continue`;
 
 	it("auto-confirms all codex sessions", () => {
 		const home = setupTempHome();
-		const taskWorktreePath = join(home, ".cline", "worktrees", "task-123", "context");
+		const taskWorktreePath = join(home, ".local", "share", "kanban", "task-workspaces", "task-123", "context");
 		const externalPath = join(home, "projects", "repo");
 
 		expect(shouldAutoConfirmCodexWorkspaceTrust("codex", taskWorktreePath)).toBe(true);

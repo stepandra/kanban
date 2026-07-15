@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 
 import type { PluginAPI } from "@ampcode/plugin";
 
@@ -7,6 +8,12 @@ const KANBAN_TOOL_NAME = "kanban_tasks";
 const KANBAN_BIN_ENV = "KANBAN_BIN";
 const ZJ_AGENT_BIN_ENV = "ZJ_AGENT_BIN";
 const INTERACTIVE_ZELLIJ_AGENTS = new Set(["claude", "codex", "grok", "kimi"]);
+const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
+const KANBAN_CONTEXT = `[stepandra/kanban]
+In this environment, Kanban means the installed stepandra/kanban fork of cline/kanban, not upstream cline/kanban and not Hermes.
+The kanban_tasks tool and local kanban CLI are the durable source of truth for tasks, dependencies, task workspaces, review, and acceptance.
+Interactive Codex, Claude, Grok, and Kimi task execution is handed to the zj-agent native Zellij controller after Kanban prepares the task workspace.
+Submitting a task to Review hands it to an isolated per-task Fixer Amp thread; the worker never accepts its own task.`;
 
 interface KanbanTask {
 	id: string;
@@ -14,6 +21,8 @@ interface KanbanTask {
 	title?: string;
 	agentId?: string;
 	startInPlanMode?: boolean;
+	taskWorkspacePath?: string;
+	taskWorkspaceExists?: boolean;
 }
 
 interface PreparedKanbanTask extends KanbanTask {
@@ -31,10 +40,17 @@ type ProcessResult = {
 export default function (amp: PluginAPI): void {
 	const mediumAgent = amp.getBuiltinAgent("medium");
 
+	amp.on("agent.start", async () => ({
+		message: {
+			content: KANBAN_CONTEXT,
+			display: false,
+		},
+	}));
+
 	amp.registerTool({
 		name: KANBAN_TOOL_NAME,
 		description:
-			"Manage tasks on the Kanban board for Amp's current workspace. Use this when the user explicitly asks to list, create, update, link, start, submit for review, accept, or delete Kanban tasks. Assign Amp Orb work with agentId=amp; Claude, Codex, Grok, Kimi, and other local agents use their matching agentId. Executors submit completed work to review; only an accepting reviewer uses done. For decomposition, create concrete independently executable tasks and link only real prerequisites: taskId waits on linkedTaskId. Actions other than list mutate the board.",
+			`Manage tasks with the installed stepandra/kanban fork of cline/kanban (${KANBAN_REPOSITORY}) for Amp's current workspace or an explicit Kanban project path. This never means Hermes or upstream cline/kanban. Use this when the user explicitly asks to list, create, update, link, start, submit for review, accept, or delete Kanban tasks. Assign Amp Orb work with agentId=amp; Claude, Codex, Grok, Kimi, and other local agents use their matching agentId. Executors submit completed work to review, which hands the task to an isolated per-task Fixer Amp thread; only that accepting reviewer uses done. For decomposition, create concrete independently executable tasks and link only real prerequisites: taskId waits on linkedTaskId. Actions other than list mutate the board.`,
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -72,11 +88,16 @@ export default function (amp: PluginAPI): void {
 					enum: ["commit", "pr"],
 					description: "Automatic review action.",
 				},
+				projectPath: {
+					type: "string",
+					description:
+						"Explicit Kanban project/board root. Use this from a task workspace so board operations remain scoped to the owning project.",
+				},
 			},
 			required: ["action"],
 		},
 		async execute(input, ctx) {
-			const workspacePath = getWorkspacePath(amp);
+			const workspacePath = getProjectPath(input, getWorkspacePath(amp));
 			const action = requiredString(input, "action");
 			if (action === "start") {
 				const taskId = requiredString(input, "taskId");
@@ -129,21 +150,32 @@ export default function (amp: PluginAPI): void {
 					return result.stdout.trim() || "Interactive Zellij worker started.";
 				}
 			}
-			const completedTask =
-				action === "done" && typeof input.taskId === "string"
+			const transitionedTask =
+				(action === "submit" || action === "done") && typeof input.taskId === "string"
 					? await getTask(input.taskId, workspacePath)
 					: undefined;
 			const args = buildTaskArgs(input, workspacePath);
 			const result = await runKanbanChecked(args, workspacePath);
-			if (completedTask?.agentId && INTERACTIVE_ZELLIJ_AGENTS.has(completedTask.agentId)) {
+			// `kanban task submit` owns the isolated per-task review handoff (fail-closed in CLI).
+			// Surface a failed handoff from the CLI JSON when present; do not double-nudge.
+			if (action === "submit") {
+				const handoffStatus = parseReviewHandoffStatus(result.stdout);
+				if (handoffStatus && handoffStatus.ok === false) {
+					amp.logger.log(
+						`Kanban submitted task ${transitionedTask?.id ?? "unknown"} to review, but its isolated Fixer handoff failed: ${String(handoffStatus.error ?? "unknown")}`,
+					);
+				}
+			}
+			if (transitionedTask?.agentId && INTERACTIVE_ZELLIJ_AGENTS.has(transitionedTask.agentId)) {
+				const controllerAction = action === "submit" ? "review" : "release";
 				try {
 					await runZjAgentChecked(
-						["controller", "release", "--task-id", completedTask.id],
+						["controller", controllerAction, "--task-id", transitionedTask.id],
 						workspacePath,
 					);
 				} catch (error) {
 					amp.logger.log(
-						`Kanban accepted task ${completedTask.id}, but its Zellij lane could not be released: ${error instanceof Error ? error.message : String(error)}`,
+						`Kanban moved task ${transitionedTask.id} with ${action}, but its Zellij lane could not enter ${controllerAction}: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
 			}
@@ -194,6 +226,11 @@ function getWorkspacePath(amp: PluginAPI): string {
 		throw new Error("Open a workspace in Amp before using Kanban.");
 	}
 	return amp.helpers.filePathFromURI(workspaceRoot);
+}
+
+function getProjectPath(input: Record<string, unknown>, workspacePath: string): string {
+	const explicitProjectPath = optionalString(input.projectPath);
+	return explicitProjectPath ? resolve(workspacePath, explicitProjectPath) : workspacePath;
 }
 
 function buildTaskArgs(input: Record<string, unknown>, workspacePath: string): string[] {
@@ -352,6 +389,7 @@ function buildAmpTaskPrompt(task: KanbanTask, completionReceipt: string): string
 		`Scope: implement only this Kanban task in the current repository.\n\n${task.prompt.trim()}`,
 		"Non-goals: do not create or accept Kanban tasks, broaden scope, or modify unrelated work.",
 		"Expected output: the implementation, the narrowest relevant validation, and a concise handoff with files changed and any blocker.",
+		"Timeout/budget: one bounded implementation run; stop and report instead of silently broadening scope or looping on a failed check.",
 		"Read/write authority: you may edit only files needed for this task. Preserve concurrent user and agent changes.",
 		`If and only if the implementation is complete and validation passes, put this receipt on the final line of your final response: ${completionReceipt}`,
 		"Do not emit the receipt when blocked, incomplete, cancelled, or validation fails.",
@@ -370,8 +408,11 @@ function buildInteractiveTaskPrompt(task: PreparedKanbanTask): string {
 		`Scope: implement only this Kanban task in the current task workspace.\n\n${task.prompt.trim()}`,
 		"Non-goals: do not create, accept, or mark Kanban tasks done; do not broaden scope or modify unrelated work.",
 		"Expected output: the implementation, the narrowest relevant validation, and a concise handoff with files changed and any blocker.",
+		"Shared-host validation budget: run exact affected tests first (cap Vitest at 2 workers); run a package-wide test suite or production build at most once, only after focused checks pass, and never loop on a saturated or stalled full check. Report shared-host contention honestly instead of spending the task budget rerunning it.",
+		"Timeout/budget: one bounded implementation run; stop and report instead of silently broadening scope or looping on a failed check.",
 		"Read/write authority: you may edit only files needed for this task. Preserve concurrent user and agent changes.",
-		`When and only when implementation and validation are complete, submit the task for human/Amp review with:\n${submitCommand}`,
+		`When and only when implementation and validation are complete, submit the task for review with:\n${submitCommand}`,
+		"That submit moves the card to Review and automatically queues an isolated per-task Fixer thread; do not call review-handoff yourself unless submit reports handoff failure.",
 		`Then update the ephemeral cockpit indicator (best effort only):\nzj-agent controller review --task-id ${shellQuote(task.id)} || true`,
 		"If blocked, incomplete, cancelled, or validation fails, leave the task in progress and report the blocker. Never run `kanban task done`; acceptance belongs to the reviewer.",
 	].join("\n\n");
@@ -394,7 +435,17 @@ async function watchAmpTask(
 			amp.logger.log(`Amp Orb thread ${thread.id} left Kanban task ${taskId} in progress.`);
 			return;
 		}
-		await runKanbanChecked(["task", "submit", "--task-id", taskId, "--project-path", workspacePath], workspacePath);
+		const submitResult = await runKanbanChecked(
+			["task", "submit", "--task-id", taskId, "--project-path", workspacePath],
+			workspacePath,
+		);
+		const handoffStatus = parseReviewHandoffStatus(submitResult.stdout);
+		if (handoffStatus && handoffStatus.ok === false) {
+			amp.logger.log(
+				`Amp Orb thread ${thread.id} submitted Kanban task ${taskId}, but its isolated Fixer did not receive the review handoff: ${String(handoffStatus.error ?? "unknown")}`,
+			);
+			return;
+		}
 		amp.logger.log(`Amp Orb thread ${thread.id} submitted Kanban task ${taskId} for review.`);
 	} catch (error) {
 		amp.logger.log(
@@ -418,11 +469,9 @@ async function runKanban(args: string[], cwd: string): Promise<ProcessResult> {
 		return installedResult;
 	}
 
-	const npxResult = await runProcess("npx", ["-y", "kanban", ...args], cwd);
-	if (npxResult.notFound) {
-		throw new Error("Kanban requires either a `kanban` executable or `npx` on Amp's PATH.");
-	}
-	return npxResult;
+	throw new Error(
+		`The stepandra/kanban fork is not installed on Amp's PATH. Install ${KANBAN_REPOSITORY} or set ${KANBAN_BIN_ENV} to its executable; refusing to fall back to an unrelated npm package.`,
+	);
 }
 
 async function runZjAgentChecked(args: string[], cwd: string, stdin?: string): Promise<ProcessResult> {
@@ -435,6 +484,19 @@ async function runZjAgentChecked(args: string[], cwd: string, stdin?: string): P
 		throw new Error(result.stderr.trim() || result.stdout.trim() || `zj-agent exited with code ${result.exitCode}.`);
 	}
 	return result;
+}
+
+function parseReviewHandoffStatus(stdout: string): { ok?: boolean; error?: unknown } | undefined {
+	const trimmed = stdout.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(trimmed) as { reviewHandoff?: { ok?: boolean; error?: unknown } };
+		return parsed.reviewHandoff;
+	} catch {
+		return undefined;
+	}
 }
 
 function shellQuote(value: string): string {

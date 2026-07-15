@@ -2638,6 +2638,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const debugPaths = [
 			join(tempHome, ".cline", "data"),
 			join(tempHome, ".cline", "kanban"),
+			join(tempHome, ".local", "share", "kanban", "task-workspaces"),
 			join(tempHome, ".cline", "worktrees"),
 		];
 		for (const path of debugPaths) {
@@ -2686,6 +2687,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		const debugPaths = [
 			join(tempHome, ".cline", "data"),
 			join(tempHome, ".cline", "kanban"),
+			join(tempHome, ".local", "share", "kanban", "task-workspaces"),
 			join(tempHome, ".cline", "worktrees"),
 		];
 		for (const path of debugPaths) {

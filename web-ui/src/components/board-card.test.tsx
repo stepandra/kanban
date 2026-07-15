@@ -262,7 +262,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("~/.cline/worktrees/trash-task-1/kanban");
+		expect(container.textContent).toContain("~/.local/share/kanban/task-workspaces/trash-task-1/kanban");
 	});
 
 	it("shows formatted agent override details with model name and reasoning effort", async () => {

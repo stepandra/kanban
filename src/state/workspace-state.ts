@@ -24,7 +24,10 @@ import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 const RUNTIME_HOME_DIR = "kanban";
-const RUNTIME_WORKTREES_DIR = "worktrees";
+const KANBAN_DATA_DIR = "kanban";
+const TASK_WORKSPACES_DIR = "task-workspaces";
+const LEGACY_TASK_WORKTREES_PARENT_DIR = ".cline";
+const LEGACY_TASK_WORKTREES_DIR = "worktrees";
 const WORKSPACES_DIR = "workspaces";
 const INDEX_FILENAME = "index.json";
 const BOARD_FILENAME = "board.json";
@@ -165,8 +168,14 @@ export function getRuntimeHomePath(): string {
 	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_HOME_DIR);
 }
 
-export function getTaskWorktreesHomePath(): string {
-	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_WORKTREES_DIR);
+export function getTaskWorkspacesHomePath(): string {
+	const configuredDataHome = process.env.XDG_DATA_HOME?.trim();
+	const dataHome = configuredDataHome ? resolve(configuredDataHome) : join(homedir(), ".local", "share");
+	return join(dataHome, KANBAN_DATA_DIR, TASK_WORKSPACES_DIR);
+}
+
+export function getLegacyTaskWorktreesHomePath(): string {
+	return join(homedir(), LEGACY_TASK_WORKTREES_PARENT_DIR, LEGACY_TASK_WORKTREES_DIR);
 }
 
 export function getWorkspacesRootPath(): string {

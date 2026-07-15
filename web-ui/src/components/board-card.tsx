@@ -1,7 +1,7 @@
 import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
-import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
+import { buildTaskWorkspaceDisplayPath } from "@runtime-task-worktree-path";
 import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -56,7 +56,7 @@ function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: strin
 		return null;
 	}
 	try {
-		return buildTaskWorktreeDisplayPath(taskId, workspacePath);
+		return buildTaskWorkspaceDisplayPath(taskId, workspacePath);
 	} catch {
 		return null;
 	}

@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
 
@@ -26,6 +28,7 @@ import {
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
 type ListTaskColumn = (typeof LIST_TASK_COLUMNS)[number];
@@ -370,6 +373,24 @@ function formatTaskRecord(
 	};
 }
 
+async function formatTaskRecordWithWorkspace(
+	state: RuntimeWorkspaceStateResponse,
+	task: RuntimeBoardCard,
+	columnId: RuntimeBoardColumnId,
+	workspaceRepoPath: string,
+): Promise<JsonRecord> {
+	const taskWorkspace = await getTaskWorkspacePathInfo({
+		cwd: workspaceRepoPath,
+		taskId: task.id,
+		baseRef: task.baseRef,
+	});
+	return {
+		...formatTaskRecord(state, task, columnId),
+		taskWorkspacePath: taskWorkspace.path,
+		taskWorkspaceExists: taskWorkspace.exists,
+	};
+}
+
 function formatDependencyRecord(
 	state: RuntimeWorkspaceStateResponse,
 	dependency: RuntimeBoardDependency,
@@ -421,15 +442,20 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
 	const state = await runtimeClient.workspace.getState.query();
 
-	const tasks = state.board.columns.flatMap((boardColumn) => {
+	const taskRecords = state.board.columns.flatMap((boardColumn) => {
 		if (!input.column && boardColumn.id === "trash") {
 			return [];
 		}
 		if (input.column && boardColumn.id !== input.column) {
 			return [];
 		}
-		return boardColumn.cards.map((task) => formatTaskRecord(state, task, boardColumn.id));
+		return boardColumn.cards.map((task) => ({ task, columnId: boardColumn.id }));
 	});
+	const tasks = await Promise.all(
+		taskRecords.map(
+			async ({ task, columnId }) => await formatTaskRecordWithWorkspace(state, task, columnId, workspace.repoPath),
+		),
+	);
 
 	return {
 		ok: true,
@@ -813,6 +839,8 @@ async function transitionExternalTask(input: {
 	const allowedSourceColumns: RuntimeBoardColumnId[] =
 		input.action === "claim" ? ["backlog", "in_progress", "review"] : ["in_progress", "review"];
 
+	let taskTitle: string | undefined;
+	let taskBaseRef = "";
 	const mutation = await mutateWorkspaceState(workspaceRepoPath, (latestState) => {
 		const record = findTaskRecord(latestState, input.taskId);
 		if (!record) {
@@ -823,6 +851,8 @@ async function transitionExternalTask(input: {
 				`Task "${input.taskId}" is in "${record.columnId}" and cannot be ${input.action === "claim" ? "claimed" : "submitted"}.`,
 			);
 		}
+		taskTitle = typeof record.task.title === "string" ? record.task.title.trim() || undefined : undefined;
+		taskBaseRef = record.task.baseRef;
 		if (record.columnId === targetColumnId) {
 			return {
 				board: latestState.board,
@@ -848,11 +878,86 @@ async function transitionExternalTask(input: {
 	if (mutation.saved) {
 		await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
 	}
-	return {
+	const taskWorkspace = await getTaskWorkspacePathInfo({
+		cwd: workspaceRepoPath,
+		taskId: input.taskId,
+		baseRef: taskBaseRef,
+	});
+
+	const result: JsonRecord = {
 		ok: true,
-		task: mutation.value,
+		task: {
+			...mutation.value,
+			taskWorkspacePath: taskWorkspace.path,
+			taskWorkspaceExists: taskWorkspace.exists,
+		},
 		workspacePath: workspaceRepoPath,
+		taskWorkspacePath: taskWorkspace.path,
 	};
+
+	// Review handoff is owned by submit so a bare CLI transition cannot orphan a card.
+	// Fail-closed: column is already Review; surface handoff failure without rolling back.
+	if (input.action === "submit") {
+		result.reviewHandoff = handoffReviewToFixer({
+			taskId: input.taskId,
+			projectPath: workspaceRepoPath,
+			taskWorkspacePath: taskWorkspace.exists ? taskWorkspace.path : undefined,
+			title: taskTitle,
+			cwd: input.cwd,
+		});
+	}
+
+	return result;
+}
+
+/**
+ * Queue an isolated per-task Fixer after a task enters Review.
+ * Never accepts the task here; Fixer/Integrator owns done/commit/push.
+ */
+function handoffReviewToFixer(input: {
+	taskId: string;
+	projectPath: string;
+	taskWorkspacePath?: string;
+	title?: string;
+	cwd: string;
+}): JsonRecord {
+	const command = process.env.ZJ_AGENT_BIN?.trim() || "zj-agent";
+	const args = ["review-handoff", "--task-id", input.taskId, "--project-path", input.projectPath];
+	if (input.taskWorkspacePath) {
+		args.push("--task-workspace-path", input.taskWorkspacePath);
+	}
+	if (input.title) {
+		args.push("--title", input.title);
+	}
+	const result = spawnSync(command, args, {
+		cwd: input.cwd,
+		encoding: "utf8",
+		env: process.env,
+	});
+	if (result.error) {
+		const notFound = "code" in result.error && result.error.code === "ENOENT";
+		return {
+			ok: false,
+			error: notFound
+				? `${command} is not available on PATH; task is in review but its isolated Fixer was not queued`
+				: result.error.message,
+		};
+	}
+	if (result.status !== 0) {
+		const detail = (result.stderr || result.stdout || "").trim();
+		return {
+			ok: false,
+			error:
+				detail ||
+				`${command} review-handoff exited with code ${result.status ?? "unknown"}; task is in review but its isolated Fixer was not queued`,
+		};
+	}
+	const stdout = (result.stdout || "").trim();
+	try {
+		return stdout ? (JSON.parse(stdout) as JsonRecord) : { ok: true, action: "review_handoff" };
+	} catch {
+		return { ok: true, action: "review_handoff", raw: stdout };
+	}
 }
 
 interface TrashTaskExecutionResult {

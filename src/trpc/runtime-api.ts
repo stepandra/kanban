@@ -44,6 +44,7 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
+import { getLegacyTaskWorktreesHomePath, getTaskWorkspacesHomePath } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { resolveTaskCwd } from "../workspace/task-worktree";
@@ -102,7 +103,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 	const debugResetTargetPaths = [
 		join(homedir(), ".cline", "data"),
 		join(homedir(), ".cline", "kanban"),
-		join(homedir(), ".cline", "worktrees"),
+		getTaskWorkspacesHomePath(),
+		getLegacyTaskWorktreesHomePath(),
 	] as const;
 
 	const buildConfigResponse = (runtimeConfig: RuntimeConfigState) =>

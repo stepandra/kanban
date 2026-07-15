@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -482,9 +482,23 @@ describe("source task commands", () => {
 				};
 				expect(preparedPayload.ok).toBe(true);
 				expect(preparedPayload.task?.column).toBe("in_progress");
-				expect(preparedPayload.task?.projectPath).toBe(projectPath);
+				expect(preparedPayload.task?.projectPath).toBe(realpathSync(projectPath));
 				expect(preparedPayload.task?.taskWorkspacePath).toBeTruthy();
 				expect(existsSync(preparedPayload.task?.taskWorkspacePath ?? "")).toBe(true);
+
+				const listedPrepared = await runCliCommandAndCollectOutput({
+					args: ["task", "list", "--column", "in_progress", "--project-path", projectPath],
+					cwd: projectPath,
+					env,
+				});
+				expect(listedPrepared.didExit).toBe(true);
+				expect(listedPrepared.exitCode).toBe(0);
+				const listedPreparedPayload = JSON.parse(listedPrepared.stdout) as {
+					tasks?: Array<{ id?: string; taskWorkspacePath?: string; taskWorkspaceExists?: boolean }>;
+				};
+				const listedPreparedTask = listedPreparedPayload.tasks?.find((task) => task.id === taskIds[0]);
+				expect(listedPreparedTask?.taskWorkspacePath).toBe(preparedPayload.task?.taskWorkspacePath);
+				expect(listedPreparedTask?.taskWorkspaceExists).toBe(true);
 
 				const claimed = await runCliCommandAndCollectOutput({
 					args: ["task", "claim", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],

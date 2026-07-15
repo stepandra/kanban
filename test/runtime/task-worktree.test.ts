@@ -17,8 +17,9 @@ const lockedFileSystemMocks = vi.hoisted(() => ({
 }));
 
 const workspaceStateMocks = vi.hoisted(() => ({
+	getLegacyTaskWorktreesHomePath: vi.fn(),
 	getRuntimeHomePath: vi.fn(),
-	getTaskWorktreesHomePath: vi.fn(),
+	getTaskWorkspacesHomePath: vi.fn(),
 	loadWorkspaceContext: vi.fn(),
 }));
 
@@ -41,14 +42,14 @@ vi.mock("../../src/fs/locked-file-system.js", () => ({
 }));
 
 vi.mock("../../src/state/workspace-state.js", () => ({
+	getLegacyTaskWorktreesHomePath: workspaceStateMocks.getLegacyTaskWorktreesHomePath,
 	getRuntimeHomePath: workspaceStateMocks.getRuntimeHomePath,
-	getTaskWorktreesHomePath: workspaceStateMocks.getTaskWorktreesHomePath,
+	getTaskWorkspacesHomePath: workspaceStateMocks.getTaskWorkspacesHomePath,
 	loadWorkspaceContext: workspaceStateMocks.loadWorkspaceContext,
 }));
 
 vi.mock("../../src/workspace/task-worktree-path.js", () => ({
 	getWorkspaceFolderLabelForWorktreePath: taskWorktreePathMocks.getWorkspaceFolderLabelForWorktreePath,
-	KANBAN_TASK_WORKTREES_DIR_NAME: "worktrees",
 	normalizeTaskIdForWorktreePath: taskWorktreePathMocks.normalizeTaskIdForWorktreePath,
 }));
 
@@ -106,8 +107,9 @@ describe.sequential("task-worktree serialization", () => {
 		childProcessMocks.execFilePromise.mockReset();
 		lockedFileSystemMocks.withLock.mockReset();
 		lockedFileSystemMocks.writeTextFileAtomic.mockReset();
+		workspaceStateMocks.getLegacyTaskWorktreesHomePath.mockReset();
 		workspaceStateMocks.getRuntimeHomePath.mockReset();
-		workspaceStateMocks.getTaskWorktreesHomePath.mockReset();
+		workspaceStateMocks.getTaskWorkspacesHomePath.mockReset();
 		workspaceStateMocks.loadWorkspaceContext.mockReset();
 		taskWorktreePathMocks.getWorkspaceFolderLabelForWorktreePath.mockReset();
 		taskWorktreePathMocks.normalizeTaskIdForWorktreePath.mockReset();
@@ -146,7 +148,8 @@ describe.sequential("task-worktree serialization", () => {
 			mkdirSync(worktreesHomePath, { recursive: true });
 
 			workspaceStateMocks.getRuntimeHomePath.mockReturnValue(runtimeHomePath);
-			workspaceStateMocks.getTaskWorktreesHomePath.mockReturnValue(worktreesHomePath);
+			workspaceStateMocks.getTaskWorkspacesHomePath.mockReturnValue(worktreesHomePath);
+			workspaceStateMocks.getLegacyTaskWorktreesHomePath.mockReturnValue(join(sandboxRoot, "legacy-worktrees"));
 			workspaceStateMocks.loadWorkspaceContext.mockResolvedValue({
 				repoPath,
 			});

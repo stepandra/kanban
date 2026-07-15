@@ -3,6 +3,8 @@
 ## [0.1.70]
 
 - Fixed a freeze that could occur when clearing completed tasks on large boards by limiting cleanup concurrency
+- Store new task workspaces under the XDG data home (`~/.local/share/kanban/task-workspaces` by default) while continuing to resolve existing legacy workspaces
+- Reuse gitignored dependency directories in jj task workspaces instead of requiring each worker to reinstall them
 
 ## [0.1.69]
 

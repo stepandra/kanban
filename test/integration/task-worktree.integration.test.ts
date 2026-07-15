@@ -6,7 +6,11 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeBoardData } from "../../src/core/api-contract";
 import { createWorkspaceMetadataMonitor } from "../../src/server/workspace-metadata-monitor";
 import { readJjWorkspaceState } from "../../src/workspace/jj-utils";
-import { deleteTaskWorktree, ensureTaskWorktreeIfDoesntExist } from "../../src/workspace/task-worktree";
+import {
+	deleteTaskWorktree,
+	ensureTaskWorktreeIfDoesntExist,
+	getTaskWorkspacePathInfo,
+} from "../../src/workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../../src/workspace/turn-checkpoints";
 import { createGitTestEnv } from "../utilities/git-env";
 import { createTempDir } from "../utilities/temp-dir";
@@ -60,8 +64,10 @@ async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
 	const { path: tempHome, cleanup } = createTempDir("kanban-home-");
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
+	const previousXdgDataHome = process.env.XDG_DATA_HOME;
 	process.env.HOME = tempHome;
 	process.env.USERPROFILE = tempHome;
+	delete process.env.XDG_DATA_HOME;
 	try {
 		return await run();
 	} finally {
@@ -75,11 +81,33 @@ async function withTemporaryHome<T>(run: () => Promise<T>): Promise<T> {
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
+		if (previousXdgDataHome === undefined) {
+			delete process.env.XDG_DATA_HOME;
+		} else {
+			process.env.XDG_DATA_HOME = previousXdgDataHome;
+		}
 		cleanup();
 	}
 }
 
 describe.sequential("task-worktree integration", () => {
+	it("resolves a pre-migration task workspace from the legacy location", async () => {
+		await withTemporaryHome(async () => {
+			const repoPath = join(process.env.HOME ?? "", "projects", "repo");
+			const legacyWorkspacePath = join(process.env.HOME ?? "", ".cline", "worktrees", "legacy-task", "repo");
+			mkdirSync(legacyWorkspacePath, { recursive: true });
+
+			await expect(
+				getTaskWorkspacePathInfo({ cwd: repoPath, taskId: "legacy-task", baseRef: "@" }),
+			).resolves.toEqual({
+				taskId: "legacy-task",
+				path: legacyWorkspacePath,
+				exists: true,
+				baseRef: "@",
+			});
+		});
+	});
+
 	it("returns a friendly error when the repository has no initial commit", async () => {
 		await withTemporaryHome(async () => {
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-task-worktree-unborn-");
@@ -475,6 +503,11 @@ describe.sequential("task-worktree integration", () => {
 					throw new Error(initResult.stderr.trim() || "Could not initialize jj test repository.");
 				}
 				writeFileSync(join(repoPath, "README.md"), "hello\n", "utf8");
+				writeFileSync(join(repoPath, ".gitignore"), "node_modules/\ndist/\n", "utf8");
+				mkdirSync(join(repoPath, "node_modules"), { recursive: true });
+				mkdirSync(join(repoPath, "dist"), { recursive: true });
+				writeFileSync(join(repoPath, "node_modules", "cache-marker"), "shared\n", "utf8");
+				writeFileSync(join(repoPath, "dist", "build-marker"), "isolated\n", "utf8");
 				runJj(repoPath, ["describe", "-m", "initial"]);
 
 				const taskId = `task-jj-${Date.now()}`;
@@ -487,7 +520,11 @@ describe.sequential("task-worktree integration", () => {
 				if (!ensured.ok) {
 					throw new Error(ensured.error ?? "jj task workspace was not created");
 				}
+				expect(ensured.path).toContain(join(".local", "share", "kanban", "task-workspaces"));
 				expect(runJj(ensured.path, ["workspace", "root"])).not.toBe("");
+				expectMirroredPathBehavior(join(ensured.path, "node_modules"));
+				expect(readFileSync(join(ensured.path, "node_modules", "cache-marker"), "utf8")).toBe("shared\n");
+				expect(existsSync(join(ensured.path, "dist"))).toBe(false);
 
 				const progressPath = join(ensured.path, "progress.txt");
 				writeFileSync(progressPath, "keep me\n", "utf8");

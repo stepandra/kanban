@@ -9,8 +9,9 @@ import type {
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import {
 	detectRepositoryKind,
+	getLegacyTaskWorktreesHomePath,
 	getRuntimeHomePath,
-	getTaskWorktreesHomePath,
+	getTaskWorkspacesHomePath,
 	loadWorkspaceContext,
 } from "../state/workspace-state";
 import { getGitCommandErrorMessage, getGitStdout, readGitHeadInfo, runGit } from "./git-utils";
@@ -23,6 +24,7 @@ const KANBAN_MANAGED_EXCLUDE_BLOCK_END = "# kanban-managed-symlinked-ignored-pat
 const KANBAN_TRASHED_TASK_PATCHES_DIR_NAME = "trashed-task-patches";
 const KANBAN_TASK_WORKTREE_SETUP_LOCKFILE_NAME = "kanban-task-worktree-setup.lock";
 const TASK_PATCH_FILE_SUFFIX = ".patch";
+const SHARED_DEPENDENCY_DIRECTORY_NAMES = new Set(["node_modules", ".venv", "venv"]);
 
 const SYMLINK_PATH_SEGMENT_BLACKLIST = new Set([
 	".git",
@@ -121,22 +123,36 @@ async function withTaskWorktreeSetupLock<T>(repoPath: string, operation: () => P
 	return await lockedFileSystem.withLock(await getTaskWorktreeSetupLock(repoPath), operation);
 }
 
-function getWorktreesRootPath(taskId: string): string {
+function getWorktreesRootPath(taskId: string, homePath = getTaskWorkspacesHomePath()): string {
 	const normalizedTaskId = normalizeTaskIdForWorktreePath(taskId);
-	return join(getTaskWorktreesHomePath(), normalizedTaskId);
-}
-
-function getWorktreesBaseRootPath(): string {
-	return getTaskWorktreesHomePath();
+	return join(homePath, normalizedTaskId);
 }
 
 function getTrashedTaskPatchesRootPath(): string {
 	return join(getRuntimeHomePath(), KANBAN_TRASHED_TASK_PATCHES_DIR_NAME);
 }
 
-function getTaskWorktreePath(repoPath: string, taskId: string): string {
+function getTaskWorktreePath(repoPath: string, taskId: string, homePath = getTaskWorkspacesHomePath()): string {
 	const workspaceLabel = getWorkspaceFolderLabelForWorktreePath(repoPath);
-	return join(getWorktreesRootPath(taskId), workspaceLabel);
+	return join(getWorktreesRootPath(taskId, homePath), workspaceLabel);
+}
+
+function getTaskWorktreePathCandidates(repoPath: string, taskId: string): string[] {
+	return Array.from(
+		new Set([
+			getTaskWorktreePath(repoPath, taskId),
+			getTaskWorktreePath(repoPath, taskId, getLegacyTaskWorktreesHomePath()),
+		]),
+	);
+}
+
+async function resolveExistingTaskWorktreePath(repoPath: string, taskId: string): Promise<string | null> {
+	for (const candidate of getTaskWorktreePathCandidates(repoPath, taskId)) {
+		if (await pathExists(candidate)) {
+			return candidate;
+		}
+	}
+	return null;
 }
 
 async function readJjCommit(cwd: string, revision: string): Promise<string | null> {
@@ -152,6 +168,7 @@ async function ensureJjTaskWorkspace(options: {
 }): Promise<RuntimeWorktreeEnsureResponse> {
 	const existingRoot = await runJj(options.worktreePath, ["--ignore-working-copy", "workspace", "root"]);
 	if (existingRoot.ok) {
+		await syncIgnoredPathsIntoWorktree(options.repoPath, options.worktreePath, { dependenciesOnly: true });
 		return {
 			ok: true,
 			path: options.worktreePath,
@@ -191,6 +208,7 @@ async function ensureJjTaskWorkspace(options: {
 		async () => {
 			const lockedExistingRoot = await runJj(options.worktreePath, ["--ignore-working-copy", "workspace", "root"]);
 			if (lockedExistingRoot.ok) {
+				await syncIgnoredPathsIntoWorktree(options.repoPath, options.worktreePath, { dependenciesOnly: true });
 				return {
 					ok: true,
 					path: options.worktreePath,
@@ -217,6 +235,7 @@ async function ensureJjTaskWorkspace(options: {
 					error: addResult.stderr || "Could not create jj task workspace.",
 				};
 			}
+			await syncIgnoredPathsIntoWorktree(options.repoPath, options.worktreePath, { dependenciesOnly: true });
 
 			return {
 				ok: true,
@@ -340,6 +359,11 @@ function shouldSkipSymlink(relativePath: string): boolean {
 	return segments.some((segment) => SYMLINK_PATH_SEGMENT_BLACKLIST.has(segment));
 }
 
+function isSharedDependencyPath(relativePath: string): boolean {
+	const name = relativePath.split("/").filter(Boolean).at(-1);
+	return name !== undefined && SHARED_DEPENDENCY_DIRECTORY_NAMES.has(name);
+}
+
 function isPathWithinRoot(path: string, root: string): boolean {
 	return path === root || path.startsWith(`${root}/`);
 }
@@ -450,9 +474,14 @@ async function syncManagedIgnoredPathExcludes(repoPath: string, relativePaths: s
 	await lockedFileSystem.writeTextFileAtomic(excludePath, normalizedNextContent);
 }
 
-async function syncIgnoredPathsIntoWorktree(repoPath: string, worktreePath: string): Promise<void> {
+async function syncIgnoredPathsIntoWorktree(
+	repoPath: string,
+	worktreePath: string,
+	options: { dependenciesOnly?: boolean } = {},
+): Promise<void> {
 	const ignoredPaths = getUniquePaths(await listIgnoredPaths(repoPath)).filter(
-		(relativePath) => !shouldSkipSymlink(relativePath),
+		(relativePath) =>
+			!shouldSkipSymlink(relativePath) && (!options.dependenciesOnly || isSharedDependencyPath(relativePath)),
 	);
 	const turbopackNodeModulesSkipPaths = new Set(await listTurbopackNodeModulesSymlinkSkipPaths(repoPath));
 	const mirroredIgnoredPaths = ignoredPaths.filter((relativePath) => !turbopackNodeModulesSkipPaths.has(relativePath));
@@ -537,7 +566,9 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 	try {
 		const context = await loadWorkspaceContext(options.cwd);
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
-		const worktreePath = getTaskWorktreePath(context.repoPath, taskId);
+		const worktreePath =
+			(await resolveExistingTaskWorktreePath(context.repoPath, taskId)) ??
+			getTaskWorktreePath(context.repoPath, taskId);
 		if (context.vcs === "jj") {
 			return await ensureJjTaskWorkspace({
 				repoPath: context.repoPath,
@@ -678,8 +709,10 @@ export async function deleteTaskWorktree(options: {
 			};
 		}
 		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
-		const rootPath = getWorktreesBaseRootPath();
-		const worktreePath = getTaskWorktreePath(options.repoPath, taskId);
+		const worktreePath =
+			(await resolveExistingTaskWorktreePath(options.repoPath, taskId)) ??
+			getTaskWorktreePath(options.repoPath, taskId);
+		const rootPath = dirname(dirname(worktreePath));
 		if (!(await pathExists(worktreePath))) {
 			await deleteTaskPatchFiles(taskId);
 			await pruneEmptyParents(rootPath, dirname(worktreePath));
@@ -741,8 +774,8 @@ export async function resolveTaskCwd(options: {
 		return ensured.path;
 	}
 
-	const worktreePath = getTaskWorktreePath(context.repoPath, options.taskId);
-	if (await pathExists(worktreePath)) {
+	const worktreePath = await resolveExistingTaskWorktreePath(context.repoPath, options.taskId);
+	if (worktreePath) {
 		return worktreePath;
 	}
 	throw new Error(`Task worktree not found for task "${options.taskId}".`);
@@ -765,7 +798,8 @@ export async function getTaskWorkspacePathInfo(options: {
 		throw new Error("Task base revision is required for task workspace info.");
 	}
 
-	const worktreePath = getTaskWorktreePath(repoPath, taskId);
+	const worktreePath =
+		(await resolveExistingTaskWorktreePath(repoPath, taskId)) ?? getTaskWorktreePath(repoPath, taskId);
 	return {
 		taskId,
 		path: worktreePath,

@@ -1,9 +1,7 @@
 const WORKTREE_TASK_ID_INVALID_MESSAGE = "Invalid task id for worktree path.";
 
 export const KANBAN_RUNTIME_HOME_DIR_NAME = ".cline/kanban";
-export const KANBAN_TASK_WORKTREES_HOME_DIR_NAME = ".cline/worktrees";
-export const KANBAN_TASK_WORKTREES_DIR_NAME = "worktrees";
-export const KANBAN_TASK_WORKTREES_DISPLAY_ROOT = `~/${KANBAN_TASK_WORKTREES_HOME_DIR_NAME}`;
+export const KANBAN_TASK_WORKSPACES_DISPLAY_ROOT = "~/.local/share/kanban/task-workspaces";
 
 export function normalizeTaskIdForWorktreePath(taskId: string): string {
 	const normalized = taskId.trim();
@@ -30,8 +28,8 @@ export function getWorkspaceFolderLabelForWorktreePath(repoPath: string): string
 	return cleaned || "workspace";
 }
 
-export function buildTaskWorktreeDisplayPath(taskId: string, repoPath: string): string {
+export function buildTaskWorkspaceDisplayPath(taskId: string, repoPath: string): string {
 	const normalizedTaskId = normalizeTaskIdForWorktreePath(taskId);
 	const workspaceLabel = getWorkspaceFolderLabelForWorktreePath(repoPath);
-	return `${KANBAN_TASK_WORKTREES_DISPLAY_ROOT}/${normalizedTaskId}/${workspaceLabel}`;
+	return `${KANBAN_TASK_WORKSPACES_DISPLAY_ROOT}/${normalizedTaskId}/${workspaceLabel}`;
 }
