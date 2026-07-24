@@ -3,3 +3,8 @@ export * from "./domain/kanban-generation";
 export * from "./domain/kanban-generation-lifecycle";
 export * from "./domain/kanban-leases";
 export * from "./domain/kanban-submission";
+export * from "./persistence/board-repository";
+export * from "./persistence/legacy-json-importer";
+export * from "./persistence/postgres/postgres-board-repository";
+export * from "./persistence/postgres/postgres-config";
+export * from "./persistence/postgres/postgres-migrations";
