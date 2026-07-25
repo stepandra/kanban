@@ -530,7 +530,10 @@ export function createTerminalWebSocketBridge({
 			}
 
 			if (message.type === "stop") {
-				terminalManager.stopTaskSession(taskId);
+				void terminalManager.stopTaskSession(taskId).catch((error: unknown) => {
+					const detail = error instanceof Error ? error.message : String(error);
+					sendControlMessage(ws, { type: "error", message: `Could not stop terminal session: ${detail}` });
+				});
 				return;
 			}
 

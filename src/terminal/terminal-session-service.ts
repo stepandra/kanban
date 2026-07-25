@@ -15,5 +15,5 @@ export interface TerminalSessionService {
 	resize(taskId: string, cols: number, rows: number, pixelWidth?: number, pixelHeight?: number): boolean;
 	pauseOutput(taskId: string): boolean;
 	resumeOutput(taskId: string): boolean;
-	stopTaskSession(taskId: string): RuntimeTaskSessionSummary | null;
+	stopTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null>;
 }

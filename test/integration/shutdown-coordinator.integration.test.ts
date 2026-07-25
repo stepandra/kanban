@@ -135,6 +135,7 @@ describe.sequential("shutdown coordinator integration", () => {
 				const managedTerminalManager = {
 					markInterruptedAndStopAll: () => [createSession("managed-running", "running")],
 					listSummaries: () => [createSession("managed-running", "running")],
+					isDurableTaskSession: () => false,
 					getSummary: (taskId: string) => {
 						if (taskId === "managed-running") {
 							return createSession("managed-running", "running");

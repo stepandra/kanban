@@ -1,3 +1,6 @@
+import { type FSWatcher, watch as fsWatch } from "node:fs";
+import { join } from "node:path";
+
 import type {
 	RuntimeBoardData,
 	RuntimeGitSyncSummary,
@@ -10,7 +13,9 @@ import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync
 import { readJjWorkspaceState } from "../workspace/jj-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
-const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
+const WORKSPACE_METADATA_MIN_POLL_INTERVAL_MS = 1_000;
+const WORKSPACE_METADATA_MAX_POLL_INTERVAL_MS = 10_000;
+const WORKSPACE_METADATA_WATCH_DEBOUNCE_MS = 150;
 
 interface TrackedTaskWorkspace {
 	taskId: string;
@@ -34,6 +39,10 @@ interface WorkspaceMetadataEntry {
 	trackedTasks: TrackedTaskWorkspace[];
 	subscriberCount: number;
 	pollTimer: NodeJS.Timeout | null;
+	pollDelayMs: number;
+	lastRefreshHadChanges: boolean;
+	watchers: Map<string, FSWatcher>;
+	watchRefreshTimer: NodeJS.Timeout | null;
 	refreshPromise: Promise<RuntimeWorkspaceMetadata> | null;
 	homeGit: CachedHomeGitMetadata;
 	taskMetadataByTaskId: Map<string, CachedTaskWorkspaceMetadata>;
@@ -147,6 +156,10 @@ function createWorkspaceEntry(workspacePath: string): WorkspaceMetadataEntry {
 		trackedTasks: [],
 		subscriberCount: 0,
 		pollTimer: null,
+		pollDelayMs: WORKSPACE_METADATA_MIN_POLL_INTERVAL_MS,
+		lastRefreshHadChanges: false,
+		watchers: new Map<string, FSWatcher>(),
+		watchRefreshTimer: null,
 		refreshPromise: null,
 		homeGit: {
 			summary: null,
@@ -310,8 +323,19 @@ export function createWorkspaceMetadataMonitor(
 		if (!entry.pollTimer) {
 			return;
 		}
-		clearInterval(entry.pollTimer);
+		clearTimeout(entry.pollTimer);
 		entry.pollTimer = null;
+	};
+
+	const stopWorkspaceWatchers = (entry: WorkspaceMetadataEntry) => {
+		if (entry.watchRefreshTimer) {
+			clearTimeout(entry.watchRefreshTimer);
+			entry.watchRefreshTimer = null;
+		}
+		for (const watcher of entry.watchers.values()) {
+			watcher.close();
+		}
+		entry.watchers.clear();
 	};
 
 	const refreshWorkspace = async (workspaceId: string): Promise<RuntimeWorkspaceMetadata> => {
@@ -344,8 +368,12 @@ export function createWorkspaceMetadataMonitor(
 			);
 
 			const nextSnapshot = buildWorkspaceMetadataSnapshot(entry);
-			if (!areWorkspaceMetadataEqual(previousSnapshot, nextSnapshot)) {
+			entry.lastRefreshHadChanges = !areWorkspaceMetadataEqual(previousSnapshot, nextSnapshot);
+			if (entry.lastRefreshHadChanges) {
 				deps.onMetadataUpdated(workspaceId, nextSnapshot);
+			}
+			if (entry.subscriberCount > 0) {
+				syncWatchers(workspaceId, entry);
 			}
 			return nextSnapshot;
 		})().finally(() => {
@@ -357,6 +385,97 @@ export function createWorkspaceMetadataMonitor(
 
 		return await entry.refreshPromise;
 	};
+
+	const scheduleNextPoll = (workspaceId: string, entry: WorkspaceMetadataEntry) => {
+		stopWorkspaceTimer(entry);
+		const timer = setTimeout(() => {
+			entry.pollTimer = null;
+			void runPollCycle(workspaceId);
+		}, entry.pollDelayMs);
+		timer.unref();
+		entry.pollTimer = timer;
+	};
+
+	const runPollCycle = async (workspaceId: string): Promise<void> => {
+		const entry = workspaces.get(workspaceId);
+		if (!entry || entry.subscriberCount === 0) {
+			return;
+		}
+		await refreshWorkspace(workspaceId);
+		const current = workspaces.get(workspaceId);
+		if (!current || current.subscriberCount === 0) {
+			return;
+		}
+		// Adaptive backoff: keep the 1s cadence while changes are being detected,
+		// and back off exponentially (up to a cap) while the workspace is idle so
+		// we do not spawn a git/jj subprocess every second for nothing.
+		current.pollDelayMs = current.lastRefreshHadChanges
+			? WORKSPACE_METADATA_MIN_POLL_INTERVAL_MS
+			: Math.min(current.pollDelayMs * 2, WORKSPACE_METADATA_MAX_POLL_INTERVAL_MS);
+		scheduleNextPoll(workspaceId, current);
+	};
+
+	const handleWatchEvent = (workspaceId: string) => {
+		const entry = workspaces.get(workspaceId);
+		if (!entry || entry.subscriberCount === 0 || entry.watchRefreshTimer) {
+			return;
+		}
+		const timer = setTimeout(() => {
+			entry.watchRefreshTimer = null;
+			const current = workspaces.get(workspaceId);
+			if (!current || current.subscriberCount === 0) {
+				return;
+			}
+			// VCS activity observed: return to the fast cadence so follow-up
+			// changes (including ones the watcher cannot see, like unstaged
+			// working-tree edits) are detected within ~1s.
+			current.pollDelayMs = WORKSPACE_METADATA_MIN_POLL_INTERVAL_MS;
+			stopWorkspaceTimer(current);
+			void runPollCycle(workspaceId);
+		}, WORKSPACE_METADATA_WATCH_DEBOUNCE_MS);
+		timer.unref();
+		entry.watchRefreshTimer = timer;
+	};
+
+	function syncWatchers(workspaceId: string, entry: WorkspaceMetadataEntry): void {
+		if (entry.subscriberCount === 0) {
+			return;
+		}
+		const vcsDirName = entry.vcs === "jj" ? ".jj" : ".git";
+		const desiredPaths = new Set<string>();
+		desiredPaths.add(join(entry.workspacePath, vcsDirName));
+		for (const cached of entry.taskMetadataByTaskId.values()) {
+			if (cached.data.exists) {
+				desiredPaths.add(join(cached.data.path, vcsDirName));
+			}
+		}
+		for (const [watchedPath, watcher] of entry.watchers) {
+			if (!desiredPaths.has(watchedPath)) {
+				watcher.close();
+				entry.watchers.delete(watchedPath);
+			}
+		}
+		for (const watchedPath of desiredPaths) {
+			if (entry.watchers.has(watchedPath)) {
+				continue;
+			}
+			try {
+				// Best effort: non-recursive watch of the VCS dir catches commits,
+				// checkouts and staging. Anything it misses (e.g. unstaged edits) is
+				// still covered by the backoff polling above.
+				const watcher = fsWatch(watchedPath, { persistent: false }, () => {
+					handleWatchEvent(workspaceId);
+				});
+				watcher.on("error", () => {
+					watcher.close();
+					entry.watchers.delete(watchedPath);
+				});
+				entry.watchers.set(watchedPath, watcher);
+			} catch {
+				// The VCS dir does not exist (yet) or cannot be watched; polling covers it.
+			}
+		}
+	}
 
 	const updateWorkspaceEntry = (input: {
 		workspaceId: string;
@@ -371,23 +490,18 @@ export function createWorkspaceMetadataMonitor(
 		return existing;
 	};
 
-	const ensureWorkspaceTimer = (workspaceId: string, entry: WorkspaceMetadataEntry) => {
-		if (entry.pollTimer) {
-			return;
-		}
-		const timer = setInterval(() => {
-			void refreshWorkspace(workspaceId);
-		}, WORKSPACE_METADATA_POLL_INTERVAL_MS);
-		timer.unref();
-		entry.pollTimer = timer;
-	};
-
 	return {
 		connectWorkspace: async ({ workspaceId, workspacePath, board }) => {
 			const entry = updateWorkspaceEntry({ workspaceId, workspacePath, board });
 			entry.subscriberCount += 1;
-			ensureWorkspaceTimer(workspaceId, entry);
-			return await refreshWorkspace(workspaceId);
+			entry.pollDelayMs = WORKSPACE_METADATA_MIN_POLL_INTERVAL_MS;
+			syncWatchers(workspaceId, entry);
+			const snapshot = await refreshWorkspace(workspaceId);
+			const current = workspaces.get(workspaceId);
+			if (current && current.subscriberCount > 0) {
+				scheduleNextPoll(workspaceId, current);
+			}
+			return snapshot;
 		},
 		updateWorkspaceState: async ({ workspaceId, workspacePath, board }) => {
 			const entry = updateWorkspaceEntry({ workspaceId, workspacePath, board });
@@ -406,6 +520,7 @@ export function createWorkspaceMetadataMonitor(
 				return;
 			}
 			stopWorkspaceTimer(entry);
+			stopWorkspaceWatchers(entry);
 			workspaces.delete(workspaceId);
 		},
 		disposeWorkspace: (workspaceId) => {
@@ -414,11 +529,13 @@ export function createWorkspaceMetadataMonitor(
 				return;
 			}
 			stopWorkspaceTimer(entry);
+			stopWorkspaceWatchers(entry);
 			workspaces.delete(workspaceId);
 		},
 		close: () => {
 			for (const entry of workspaces.values()) {
 				stopWorkspaceTimer(entry);
+				stopWorkspaceWatchers(entry);
 			}
 			workspaces.clear();
 		},

@@ -5,7 +5,6 @@ import type {
 	RuntimeBoardData,
 	RuntimeBoardDependency,
 	RuntimeTaskAutoReviewMode,
-	RuntimeTaskClineSettings,
 	RuntimeTaskImage,
 } from "./api-contract";
 import { createUniqueTaskId } from "./task-id";
@@ -20,7 +19,7 @@ export interface RuntimeCreateTaskInput {
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
-	clineSettings?: RuntimeTaskClineSettings;
+	priority?: number;
 	baseRef: string;
 }
 
@@ -32,7 +31,7 @@ export interface RuntimeUpdateTaskInput {
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
-	clineSettings?: RuntimeTaskClineSettings | null;
+	priority?: number | null;
 	baseRef: string;
 }
 
@@ -46,19 +45,6 @@ function normalizeTaskAutoReviewMode(value: RuntimeTaskAutoReviewMode | null | u
 // Copy image metadata so board tasks do not retain caller-owned array or object references.
 function cloneTaskImages(images?: RuntimeTaskImage[]): RuntimeTaskImage[] | undefined {
 	return images && images.length > 0 ? images.map((image) => ({ ...image })) : undefined;
-}
-
-function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): RuntimeTaskClineSettings | undefined {
-	if (settings === undefined || settings === null) {
-		return undefined;
-	}
-	const providerId = settings.providerId?.trim();
-	const modelId = settings.modelId?.trim();
-	return {
-		...(providerId ? { providerId } : {}),
-		...(modelId ? { modelId } : {}),
-		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-	};
 }
 
 export interface RuntimeCreateTaskResult {
@@ -82,7 +68,7 @@ export interface RuntimeUpdateTaskResult {
 export interface RuntimeAddTaskDependencyResult {
 	board: RuntimeBoardData;
 	added: boolean;
-	reason?: "missing_task" | "same_task" | "duplicate" | "trash_task" | "non_backlog";
+	reason?: "missing_task" | "same_task" | "duplicate" | "trash_task" | "non_backlog" | "cycle";
 	dependency?: RuntimeBoardDependency;
 }
 
@@ -138,6 +124,37 @@ function hasDependencyPair(board: RuntimeBoardData, backlogTaskId: string, linke
 		}
 		if (createDependencyPairKey(existing.backlogTaskId, existing.linkedTaskId) === pairKey) {
 			return true;
+		}
+	}
+	return false;
+}
+
+// Dependency edges point from the dependent (backlog) task to its prerequisite. Adding an edge
+// backlogTaskId -> linkedTaskId would create a cycle when linkedTaskId can already reach
+// backlogTaskId by following existing edges, because the two tasks would then wait on each other.
+function wouldCreateDependencyCycle(board: RuntimeBoardData, backlogTaskId: string, linkedTaskId: string): boolean {
+	const prerequisitesByDependant = new Map<string, string[]>();
+	for (const dependency of board.dependencies) {
+		const prerequisites = prerequisitesByDependant.get(dependency.fromTaskId) ?? [];
+		prerequisites.push(dependency.toTaskId);
+		prerequisitesByDependant.set(dependency.fromTaskId, prerequisites);
+	}
+	const visited = new Set<string>();
+	const pending = [linkedTaskId];
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (current === undefined) {
+			continue;
+		}
+		if (current === backlogTaskId) {
+			return true;
+		}
+		if (visited.has(current)) {
+			continue;
+		}
+		visited.add(current);
+		for (const prerequisite of prerequisitesByDependant.get(current) ?? []) {
+			pending.push(prerequisite);
 		}
 	}
 	return false;
@@ -210,7 +227,11 @@ function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
 	taskId: string,
 	fromColumnId: RuntimeBoardColumnId | null,
 ): string[] {
-	if (!taskId || board.dependencies.length === 0 || fromColumnId !== "review") {
+	// Unblocking semantics: trashing a prerequisite from ANY column (backlog, in_progress, or review)
+	// resolves its dependency edges, because a trashed prerequisite will never be worked on again.
+	// A dependent becomes ready only once ALL of its prerequisite edges are gone. Trashing a task
+	// that is already in the trash (or missing) unblocks nothing.
+	if (!taskId || board.dependencies.length === 0 || !fromColumnId || fromColumnId === "trash") {
 		return [];
 	}
 	const readyTaskIds = new Set<string>();
@@ -219,6 +240,12 @@ function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
 			continue;
 		}
 		if (getTaskColumnId(board, dependency.fromTaskId) !== "backlog") {
+			continue;
+		}
+		const hasOtherPendingDependencies = board.dependencies.some(
+			(candidate) => candidate.id !== dependency.id && candidate.fromTaskId === dependency.fromTaskId,
+		);
+		if (hasOtherPendingDependencies) {
 			continue;
 		}
 		readyTaskIds.add(dependency.fromTaskId);
@@ -308,7 +335,7 @@ export function addTaskToColumn(
 		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
-		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
+		...(input.priority !== undefined ? { priority: input.priority } : {}),
 		baseRef,
 		createdAt: now,
 		updatedAt: now,
@@ -367,6 +394,9 @@ export function addTaskDependency(
 	if (hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId)) {
 		return { board, added: false, reason: "duplicate" };
 	}
+	if (wouldCreateDependencyCycle(board, resolved.backlogTaskId, resolved.linkedTaskId)) {
+		return { board, added: false, reason: "cycle" };
+	}
 	const dependency: RuntimeBoardDependency = {
 		id: createDependencyId(),
 		fromTaskId: resolved.backlogTaskId,
@@ -393,7 +423,10 @@ export function canAddTaskDependency(board: RuntimeBoardData, firstTaskId: strin
 	if ("reason" in resolved) {
 		return false;
 	}
-	return !hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId);
+	return (
+		!hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId) &&
+		!wouldCreateDependencyCycle(board, resolved.backlogTaskId, resolved.linkedTaskId)
+	);
 }
 
 export function removeTaskDependency(board: RuntimeBoardData, dependencyId: string): RuntimeRemoveTaskDependencyResult {
@@ -624,12 +657,7 @@ export function updateTask(
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 				images: input.images === undefined ? card.images : cloneTaskImages(input.images),
 				agentId: input.agentId === undefined ? card.agentId : (input.agentId ?? undefined),
-				clineSettings:
-					input.clineSettings === undefined
-						? cloneTaskClineSettings(card.clineSettings)
-						: input.clineSettings === null
-							? undefined
-							: cloneTaskClineSettings(input.clineSettings),
+					priority: input.priority === undefined ? card.priority : (input.priority ?? undefined),
 				baseRef,
 				updatedAt: now,
 			};

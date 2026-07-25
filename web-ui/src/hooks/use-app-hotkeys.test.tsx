@@ -64,6 +64,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={handleOpenSettings}
 					handleToggleGitHistory={handleToggleGitHistory}
 					handleCloseGitHistory={() => {}}
+					handleBackToBoard={() => {}}
 					onStartAllTasks={() => {}}
 				/>,
 			);
@@ -108,6 +109,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={handleCloseGitHistory}
+					handleBackToBoard={() => {}}
 					onStartAllTasks={() => {}}
 				/>,
 			);
@@ -145,6 +147,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
+					handleBackToBoard={() => {}}
 					onStartAllTasks={onStartAllTasks}
 				/>,
 			);
@@ -182,6 +185,7 @@ describe("useAppHotkeys", () => {
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
+					handleBackToBoard={() => {}}
 					onStartAllTasks={() => {}}
 				/>,
 			);
@@ -198,5 +202,58 @@ describe("useAppHotkeys", () => {
 		});
 
 		expect(handleOpenCreateTask).not.toHaveBeenCalled();
+	});
+
+	it("returns to the board on Escape when a card detail is open", async () => {
+		const handleBackToBoard = vi.fn();
+		const handleCloseGitHistory = vi.fn();
+		const selectedCard = {
+			card: {
+				id: "task-1",
+				title: "Task",
+				prompt: "Task",
+				startInPlanMode: false,
+				baseRef: "main",
+				createdAt: 1,
+				updatedAt: 1,
+			},
+			column: { id: "in_progress" as const, title: "In Progress", cards: [] },
+			allColumns: [],
+		};
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={selectedCard}
+					isDetailTerminalOpen={false}
+					isHomeTerminalOpen={false}
+					isHomeGitHistoryOpen={false}
+					canUseCreateTaskShortcut
+					handleToggleDetailTerminal={() => {}}
+					handleToggleHomeTerminal={() => {}}
+					handleToggleExpandDetailTerminal={() => {}}
+					handleToggleExpandHomeTerminal={() => {}}
+					handleOpenCreateTask={() => {}}
+					handleOpenSettings={() => {}}
+					handleToggleGitHistory={() => {}}
+					handleCloseGitHistory={handleCloseGitHistory}
+					handleBackToBoard={handleBackToBoard}
+					onStartAllTasks={() => {}}
+				/>,
+			);
+		});
+
+		const escapeCall = mockUseHotkeys.mock.calls.find(([shortcut]) => shortcut === "escape");
+		if (!escapeCall || typeof escapeCall[1] !== "function") {
+			throw new Error("Expected Escape shortcut to be registered.");
+		}
+
+		act(() => {
+			const escapeHandler = escapeCall[1] as (event: KeyboardEvent) => void;
+			escapeHandler(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+		});
+
+		expect(handleBackToBoard).toHaveBeenCalledTimes(1);
+		expect(handleCloseGitHistory).not.toHaveBeenCalled();
 	});
 });

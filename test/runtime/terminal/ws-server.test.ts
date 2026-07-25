@@ -73,7 +73,7 @@ class FakeTerminalManager implements TerminalSessionService {
 	resize = vi.fn(() => true);
 	pauseOutput = vi.fn(() => true);
 	resumeOutput = vi.fn(() => true);
-	stopTaskSession = vi.fn(() => createSummary());
+	stopTaskSession = vi.fn(async () => createSummary());
 
 	emitOutput(taskId: string, data: string): void {
 		for (const listener of this.listenersByTaskId.get(taskId) ?? []) {

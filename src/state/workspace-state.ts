@@ -53,6 +53,14 @@ export interface RuntimeWorkspaceIndexEntry {
 	repoPath: string;
 }
 
+export interface RuntimeIndexedJsonWorkspaceSnapshot {
+	workspaceId: string;
+	repoPath: string;
+	board: RuntimeBoardData;
+	revision: number;
+	updatedAt: number;
+}
+
 interface WorkspaceIndexFile {
 	version: number;
 	entries: Record<string, WorkspaceIndexEntry>;
@@ -708,6 +716,37 @@ export async function loadWorkspaceState(cwd: string): Promise<RuntimeWorkspaceS
 	const sessions = await readWorkspaceSessions(context.workspaceId);
 	const meta = await readWorkspaceMeta(context.workspaceId);
 	return toWorkspaceStateResponse(context, board, sessions, meta.revision);
+}
+
+/**
+ * Read only board-authoritative indexed JSON state for the one-shot PostgreSQL
+ * importer. Session/process telemetry and unrelated files are deliberately not
+ * part of this boundary.
+ */
+export async function loadIndexedJsonWorkspaceSnapshot(cwd: string): Promise<RuntimeIndexedJsonWorkspaceSnapshot> {
+	const context = await loadWorkspaceContext(cwd, { autoCreateIfMissing: false });
+	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
+		const board = await readWorkspaceBoard(context.workspaceId);
+		const meta = await readWorkspaceMeta(context.workspaceId);
+		return {
+			workspaceId: context.workspaceId,
+			repoPath: context.repoPath,
+			board,
+			revision: meta.revision,
+			updatedAt: meta.updatedAt,
+		};
+	});
+}
+
+export async function saveWorkspaceSessionSummary(cwd: string, summary: RuntimeTaskSessionSummary): Promise<void> {
+	const context = await loadWorkspaceContext(cwd);
+	await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
+		const sessions = await readWorkspaceSessions(context.workspaceId);
+		sessions[summary.taskId] = summary;
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), sessions, {
+			lock: null,
+		});
+	});
 }
 
 export async function saveWorkspaceState(

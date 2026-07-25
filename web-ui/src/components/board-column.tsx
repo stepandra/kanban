@@ -1,6 +1,7 @@
 import { Droppable } from "@hello-pangea/dnd";
 import { Play, Plus, Trash2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { useCallback } from "react";
 
 import { BoardCard } from "@/components/board-card";
 import { Button } from "@/components/ui/button";
@@ -38,7 +39,10 @@ export function BoardColumn({
 	dependencyTargetTaskId,
 	isDependencyLinking,
 	workspacePath,
-	defaultClineModelId,
+	selectedTaskIds,
+	keyboardFocusedTaskId,
+	isSelectionMode,
+	onToggleCardSelected,
 }: {
 	column: BoardColumnModel;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -68,7 +72,10 @@ export function BoardColumn({
 	dependencyTargetTaskId?: string | null;
 	isDependencyLinking?: boolean;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
+	selectedTaskIds?: ReadonlySet<string>;
+	keyboardFocusedTaskId?: string | null;
+	isSelectionMode?: boolean;
+	onToggleCardSelected?: (taskId: string) => void;
 }): React.ReactElement {
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canStartAllTasks = column.id === "backlog" && onStartAllTasks;
@@ -85,6 +92,23 @@ export function BoardColumn({
 				(c)
 			</span>
 		</span>
+	);
+
+	// One stable id-based click handler per column so memoized BoardCards are not
+	// re-rendered by a fresh inline closure on every board render.
+	const handleCardClick = useCallback(
+		(card: BoardCardModel, event: ReactMouseEvent<HTMLElement>) => {
+			if (isSelectionMode || event.shiftKey) {
+				onToggleCardSelected?.(card.id);
+				return;
+			}
+			if (column.id === "backlog") {
+				onEditTask?.(card);
+				return;
+			}
+			onCardClick?.(card);
+		},
+		[column.id, isSelectionMode, onCardClick, onEditTask, onToggleCardSelected],
 	);
 
 	return (
@@ -172,6 +196,8 @@ export function BoardColumn({
 											index={draggableIndex}
 											columnId={column.id}
 											sessionSummary={taskSessions[card.id]}
+											selected={selectedTaskIds?.has(card.id) ?? false}
+											keyboardFocused={keyboardFocusedTaskId === card.id}
 											onStart={onStartTask}
 											onMoveToTrash={onMoveToTrashTask}
 											onRestoreFromTrash={onRestoreFromTrashTask}
@@ -187,15 +213,8 @@ export function BoardColumn({
 											isDependencyTarget={dependencyTargetTaskId === card.id}
 											isDependencyLinking={isDependencyLinking}
 											workspacePath={workspacePath}
-											defaultClineModelId={defaultClineModelId}
 											onSaveTitle={onSaveTitle}
-											onClick={() => {
-												if (column.id === "backlog") {
-													onEditTask?.(card);
-													return;
-												}
-												onCardClick?.(card);
-											}}
+											onClick={handleCardClick}
 										/>,
 									);
 									draggableIndex += 1;

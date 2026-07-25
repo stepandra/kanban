@@ -3,6 +3,7 @@ import type { RuntimeTaskSessionReviewReason, RuntimeTaskSessionSummary } from "
 export type SessionTransitionEvent =
 	| { type: "hook.to_review" }
 	| { type: "hook.to_in_progress" }
+	| { type: "agent.attention-required" }
 	| { type: "agent.prompt-ready" }
 	| { type: "process.exit"; exitCode: number | null; interrupted: boolean };
 
@@ -51,6 +52,21 @@ export function reduceSessionTransition(
 				patch: {
 					state: "running",
 					reviewReason: null,
+					warningMessage: null,
+				},
+				clearAttentionBuffer: true,
+			};
+		}
+		case "agent.attention-required": {
+			if (summary.state !== "running") {
+				return { changed: false, patch: {}, clearAttentionBuffer: false };
+			}
+			return {
+				changed: true,
+				patch: {
+					state: "awaiting_review",
+					reviewReason: "attention",
+					warningMessage: "Agent startup requires operator attention.",
 				},
 				clearAttentionBuffer: true,
 			};

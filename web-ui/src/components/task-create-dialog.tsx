@@ -23,10 +23,12 @@ import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
+import { TaskTemplatePicker } from "@/components/task-template-picker";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type { RuntimeAgentId, RuntimeTaskTemplate } from "@/runtime/types";
+import { useTaskTemplates } from "@/runtime/use-task-templates";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { TaskAutoReviewMode, TaskImage } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
@@ -120,12 +122,7 @@ export function TaskCreateDialog({
 	onBranchRefChange,
 	agentId,
 	onAgentIdChange,
-	clineSettings,
-	onClineSettingsChange,
 	defaultAgentId,
-	defaultProviderId,
-	defaultModelId,
-	defaultReasoningEffort,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -151,16 +148,8 @@ export function TaskCreateDialog({
 	onBranchRefChange: (value: string) => void;
 	agentId?: RuntimeAgentId | undefined;
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
-	clineSettings?: RuntimeTaskClineSettings | undefined;
-	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
-	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
-	defaultProviderId?: string | null;
-	/** Default Cline model ID from runtimeConfig.clineProviderSettings.modelId */
-	defaultModelId?: string | null;
-	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
-	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
 }): ReactElement {
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
@@ -177,24 +166,65 @@ export function TaskCreateDialog({
 		normalizeStoredTaskCreateStartAction,
 	);
 
-	const {
-		agentOptions,
-		clineProviderOptions,
-		clineModelOptions,
-		effectiveDefaultModelId,
-		providerModels,
-		isLoadingProviders,
-		isLoadingModels,
-		providerDefaultModels,
-	} = useTaskAgentModelPicker({
-		active: open,
-		workspaceId,
-		agentId,
-		clineSettings,
+	const { agentOptions } = useTaskAgentModelPicker({
 		defaultAgentId,
-		defaultProviderId,
-		defaultModelId,
 	});
+
+	const {
+		templates: taskTemplates,
+		isSaving: isSavingTaskTemplate,
+		saveTemplate: saveTaskTemplate,
+		deleteTemplate: deleteTaskTemplate,
+	} = useTaskTemplates(workspaceId, open);
+
+	const handleApplyTaskTemplate = useCallback(
+		(template: RuntimeTaskTemplate) => {
+			setMode("single");
+			setTaskPrompts([]);
+			onPromptChange(template.prompt);
+			if (template.baseRef && branchOptions.some((option) => option.value === template.baseRef)) {
+				onBranchRefChange(template.baseRef);
+			}
+			if (template.agentId && onAgentIdChange) {
+				onAgentIdChange(template.agentId);
+			}
+			if (template.autoReviewEnabled !== undefined) {
+				onAutoReviewEnabledChange(template.autoReviewEnabled);
+			}
+			if (template.autoReviewMode) {
+				onAutoReviewModeChange(template.autoReviewMode);
+			}
+		},
+		[
+			branchOptions,
+			onAgentIdChange,
+			onAutoReviewEnabledChange,
+			onAutoReviewModeChange,
+			onBranchRefChange,
+			onPromptChange,
+		],
+	);
+
+	const handleSaveTaskTemplate = useCallback(
+		(name: string) => {
+			void saveTaskTemplate({
+				name,
+				prompt,
+				...(agentId ? { agentId } : {}),
+				...(branchRef ? { baseRef: branchRef } : {}),
+				autoReviewEnabled,
+				autoReviewMode,
+			});
+		},
+		[agentId, autoReviewEnabled, autoReviewMode, branchRef, prompt, saveTaskTemplate],
+	);
+
+	const handleDeleteTaskTemplate = useCallback(
+		(templateId: string) => {
+			void deleteTaskTemplate(templateId);
+		},
+		[deleteTaskTemplate],
+	);
 
 	const detectedItems = useMemo(() => parseListItems(prompt), [prompt]);
 	const validTaskCount = useMemo(() => taskPrompts.filter((p) => p.trim()).length, [taskPrompts]);
@@ -515,6 +545,14 @@ export function TaskCreateDialog({
 				)}
 
 				<div className="flex flex-col gap-2.5 mt-4 pt-4 border-t border-border">
+					<TaskTemplatePicker
+						templates={taskTemplates}
+						isSaving={isSavingTaskTemplate}
+						canSaveCurrent={prompt.trim().length > 0}
+						onApply={handleApplyTaskTemplate}
+						onSaveCurrent={handleSaveTaskTemplate}
+						onDelete={handleDeleteTaskTemplate}
+					/>
 					<label
 						htmlFor={startInPlanModeId}
 						className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
@@ -576,23 +614,11 @@ export function TaskCreateDialog({
 						</NativeSelect>
 					</div>
 
-					{onAgentIdChange && onClineSettingsChange ? (
+					{onAgentIdChange ? (
 						<TaskAgentModelPicker
 							agentId={agentId}
 							onAgentIdChange={onAgentIdChange}
-							clineSettings={clineSettings}
-							onClineSettingsChange={onClineSettingsChange}
 							agentOptions={agentOptions}
-							clineProviderOptions={clineProviderOptions}
-							clineModelOptions={clineModelOptions}
-							effectiveDefaultModelId={effectiveDefaultModelId}
-							providerModels={providerModels}
-							isLoadingProviders={isLoadingProviders}
-							isLoadingModels={isLoadingModels}
-							defaultAgentId={defaultAgentId}
-							defaultProviderId={defaultProviderId}
-							defaultReasoningEffort={defaultReasoningEffort}
-							providerDefaultModels={providerDefaultModels}
 						/>
 					) : null}
 				</div>

@@ -151,6 +151,9 @@ function collectShutdownInterruptedTaskIds(
 		if (!shouldInterruptSessionOnShutdown(summary)) {
 			continue;
 		}
+		if (terminalManager.isDurableTaskSession(summary.taskId)) {
+			continue;
+		}
 		taskIds.add(summary.taskId);
 	}
 	return Array.from(taskIds);
@@ -184,6 +187,9 @@ export async function shutdownRuntimeServer(deps: RuntimeShutdownCoordinatorDepe
 		try {
 			const workspaceState = await loadWorkspaceState(workspacePath);
 			for (const taskId of collectWorkColumnTaskIds(workspaceState)) {
+				if (terminalManager.isDurableTaskSession(taskId)) {
+					continue;
+				}
 				interruptedTaskIds.add(taskId);
 			}
 			interruptedByWorkspace.push({
@@ -205,7 +211,15 @@ export async function shutdownRuntimeServer(deps: RuntimeShutdownCoordinatorDepe
 		}
 		try {
 			const workspaceState = await loadWorkspaceState(workspace.repoPath);
-			const interruptedTaskIds = collectWorkColumnTaskIds(workspaceState);
+			const interruptedTaskIds = collectWorkColumnTaskIds(workspaceState).filter((taskId) => {
+				// This workspace has no live terminal manager in this process, so
+				// the persisted record is the only signal: a task whose session was
+				// durable (zmx) may still be running under the zmx daemon. Keep its
+				// card and worktree intact; the next runtime start reconciles the
+				// marker against `zmx list` (see TerminalSessionManager).
+				const summary = workspaceState.sessions[taskId];
+				return !summary?.durableSessionName;
+			});
 			if (interruptedTaskIds.length === 0) {
 				continue;
 			}

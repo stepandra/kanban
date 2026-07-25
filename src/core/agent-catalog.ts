@@ -7,6 +7,13 @@ export interface RuntimeAgentCatalogEntry {
 	baseArgs: string[];
 	autonomousArgs: string[];
 	installUrl: string;
+	/**
+	 * Whether interactive sessions for this agent may be wrapped in a durable
+	 * zmx session (see src/terminal/zmx-agent-session.ts). This is the single
+	 * source of truth for durable-session eligibility; an explicit decision
+	 * must be recorded for every launch-supported agent.
+	 */
+	durableSession: boolean;
 }
 
 export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
@@ -17,6 +24,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--permission-mode", "auto"],
 		installUrl: "https://docs.anthropic.com/en/docs/claude-code/quickstart",
+		durableSession: true,
 	},
 	{
 		id: "codex",
@@ -25,6 +33,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--dangerously-bypass-approvals-and-sandbox"],
 		installUrl: "https://github.com/openai/codex",
+		durableSession: true,
 	},
 	{
 		id: "grok",
@@ -33,6 +42,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: ["--no-alt-screen", "--no-auto-update"],
 		autonomousArgs: ["--always-approve"],
 		installUrl: "https://grok.com/",
+		durableSession: true,
 	},
 	{
 		id: "kimi",
@@ -41,6 +51,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--yolo"],
 		installUrl: "https://moonshotai.github.io/kimi-code/",
+		durableSession: true,
 	},
 	{
 		id: "cline",
@@ -49,6 +60,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--auto-approve-all"],
 		installUrl: "https://github.com/cline/cline",
+		// Not durable: durable-session wrapping not yet validated for Cline.
+		durableSession: false,
 	},
 	{
 		id: "opencode",
@@ -57,6 +70,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: [],
 		installUrl: "https://github.com/sst/opencode",
+		durableSession: false,
 	},
 	{
 		id: "droid",
@@ -65,6 +79,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--auto", "high"],
 		installUrl: "https://docs.factory.ai/cli/getting-started/quickstart",
+		// Not durable: durable-session wrapping not yet validated for Droid.
+		durableSession: false,
 	},
 	{
 		id: "kiro",
@@ -73,6 +89,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: ["chat"],
 		autonomousArgs: ["--trust-all-tools"],
 		installUrl: "https://kiro.dev",
+		// Not durable: durable-session wrapping not yet validated for Kiro.
+		durableSession: false,
 	},
 	{
 		id: "gemini",
@@ -81,6 +99,7 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--yolo"],
 		installUrl: "https://github.com/google-gemini/gemini-cli",
+		durableSession: false,
 	},
 ];
 
@@ -110,4 +129,8 @@ export function getRuntimeLaunchSupportedAgentCatalog(): RuntimeAgentCatalogEntr
 
 export function getRuntimeAgentCatalogEntry(agentId: RuntimeAgentId): RuntimeAgentCatalogEntry | null {
 	return RUNTIME_AGENT_CATALOG.find((entry) => entry.id === agentId) ?? null;
+}
+
+export function isDurableAgentSessionEligible(agentId: RuntimeAgentId): boolean {
+	return getRuntimeAgentCatalogEntry(agentId)?.durableSession === true;
 }

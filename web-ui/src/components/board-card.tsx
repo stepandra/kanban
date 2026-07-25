@@ -1,16 +1,11 @@
 import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
-import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { buildTaskWorkspaceDisplayPath } from "@runtime-task-worktree-path";
+import { formatToolCallLabel } from "@runtime-tool-call-display";
 import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import {
-	formatClineReasoningEffortLabel,
-	formatClineSelectedModelButtonText,
-	resolveClineModelDisplayName,
-} from "@/components/detail-panels/cline-model-picker-options";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
@@ -119,7 +114,7 @@ function resolveToolCallLabel(
 		if (!toolInputSummary && !parsedSummary) {
 			return null;
 		}
-		return formatClineToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
+		return formatToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
 	}
 	if (!activityText) {
 		return null;
@@ -128,7 +123,7 @@ function resolveToolCallLabel(
 	if (!parsed) {
 		return null;
 	}
-	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
+	return formatToolCallLabel(parsed.toolName, parsed.toolInputSummary);
 }
 
 function isCardCreditLimitError(summary: RuntimeTaskSessionSummary | undefined): boolean {
@@ -210,12 +205,13 @@ function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined):
 	return null;
 }
 
-export function BoardCard({
+export const BoardCard = memo(function BoardCard({
 	card,
 	index,
 	columnId,
 	sessionSummary,
 	selected = false,
+	keyboardFocused = false,
 	onClick,
 	onStart,
 	onMoveToTrash,
@@ -233,14 +229,14 @@ export function BoardCard({
 	isDependencyTarget = false,
 	isDependencyLinking = false,
 	workspacePath,
-	defaultClineModelId = null,
 }: {
 	card: BoardCardModel;
 	index: number;
 	columnId: BoardColumnId;
 	sessionSummary?: RuntimeTaskSessionSummary;
 	selected?: boolean;
-	onClick?: () => void;
+	keyboardFocused?: boolean;
+	onClick?: (card: BoardCardModel, event: MouseEvent<HTMLElement>) => void;
 	onStart?: (taskId: string) => void;
 	onMoveToTrash?: (taskId: string) => void;
 	onRestoreFromTrash?: (taskId: string) => void;
@@ -257,7 +253,6 @@ export function BoardCard({
 	isDependencyTarget?: boolean;
 	isDependencyLinking?: boolean;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 }): React.ReactElement {
 	const [isHovered, setIsHovered] = useState(false);
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -434,38 +429,7 @@ export function BoardCard({
 		() => (card.agentId ? (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId) : null),
 		[card.agentId],
 	);
-	const modelOverrideLabel = useMemo(() => {
-		if (card.clineSettings === undefined) {
-			return null;
-		}
-		const explicitReasoningLabel = card.clineSettings.reasoningEffort
-			? formatClineReasoningEffortLabel(card.clineSettings.reasoningEffort)
-			: !card.clineSettings.providerId && !card.clineSettings.modelId
-				? "Default"
-				: null;
-		if (card.clineSettings.providerId && !card.clineSettings.modelId) {
-			const providerLabel = `Provider: ${card.clineSettings.providerId}`;
-			return explicitReasoningLabel ? `${providerLabel} (${explicitReasoningLabel})` : providerLabel;
-		}
-		const effectiveModelId = card.clineSettings.modelId ?? defaultClineModelId;
-		if (!effectiveModelId) {
-			return explicitReasoningLabel ? `Default model (${explicitReasoningLabel})` : null;
-		}
-		const modelName = resolveClineModelDisplayName(effectiveModelId);
-		if (explicitReasoningLabel) {
-			return `${modelName} (${explicitReasoningLabel})`;
-		}
-		const inheritedReasoningEffort = "";
-		return formatClineSelectedModelButtonText({
-			modelName,
-			reasoningEffort: inheritedReasoningEffort,
-			showReasoningEffort: Boolean(inheritedReasoningEffort),
-		});
-	}, [card.clineSettings, defaultClineModelId]);
-	const taskAgentSettingsLabel = useMemo(() => {
-		const parts = [agentOverrideLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
-		return parts.length > 0 ? parts.join(" · ") : null;
-	}, [agentOverrideLabel, modelOverrideLabel]);
+	const taskAgentSettingsLabel = agentOverrideLabel;
 
 	const activeDescriptionDisplay = isDescriptionExpanded ? descriptionDisplay.expanded : descriptionDisplay.collapsed;
 
@@ -482,6 +446,7 @@ export function BoardCard({
 						data-task-id={card.id}
 						data-column-id={columnId}
 						data-selected={selected}
+						data-keyboard-focused={keyboardFocused ? "true" : undefined}
 						onMouseDownCapture={(event) => {
 							if (!isCardInteractive) {
 								return;
@@ -519,7 +484,7 @@ export function BoardCard({
 								return;
 							}
 							if (!snapshot.isDragging && onClick) {
-								onClick();
+								onClick(card, event);
 							}
 						}}
 						style={{
@@ -854,4 +819,4 @@ export function BoardCard({
 			}}
 		</Draggable>
 	);
-}
+});

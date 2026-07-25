@@ -1,11 +1,11 @@
 // Persists Kanban-owned runtime preferences on disk.
-// This module should store Kanban settings such as selected agents,
-// shortcuts, and prompt templates, not SDK-owned Cline secrets or OAuth data.
+// This module stores Kanban settings such as selected agents, shortcuts, and
+// prompt templates.
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
-import type { RuntimeAgentId, RuntimeProjectShortcut } from "../core/api-contract";
+import type { RuntimeAgentId, RuntimeProjectShortcut, RuntimeTaskTemplate } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
 import { areRuntimeProjectShortcutsEqual } from "./shortcut-utils";
@@ -17,6 +17,7 @@ interface RuntimeGlobalConfigFileShape {
 	readyForReviewNotificationsEnabled?: boolean;
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
+	taskTemplates?: RuntimeTaskTemplate[];
 }
 
 interface RuntimeProjectConfigFileShape {
@@ -35,6 +36,7 @@ export interface RuntimeConfigState {
 	openPrPromptTemplate: string;
 	commitPromptTemplateDefault: string;
 	openPrPromptTemplateDefault: string;
+	taskTemplates: RuntimeTaskTemplate[];
 }
 
 export interface RuntimeConfigUpdateInput {
@@ -45,6 +47,7 @@ export interface RuntimeConfigUpdateInput {
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
+	taskTemplates?: RuntimeTaskTemplate[];
 }
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
@@ -53,7 +56,7 @@ const CONFIG_FILENAME = "config.json";
 const PROJECT_CONFIG_PARENT_DIR = ".cline";
 const PROJECT_CONFIG_DIR = "kanban";
 const PROJECT_CONFIG_FILENAME = "config.json";
-const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
+const DEFAULT_AGENT_ID: RuntimeAgentId = "claude";
 const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "grok", "kimi", "droid", "kiro"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
@@ -180,6 +183,59 @@ function normalizePromptTemplate(value: unknown, fallback: string): string {
 	return normalized.length > 0 ? value : fallback;
 }
 
+function normalizeTaskTemplate(template: RuntimeTaskTemplate): RuntimeTaskTemplate | null {
+	if (!template || typeof template !== "object") {
+		return null;
+	}
+
+	const id = typeof template.id === "string" ? template.id.trim() : "";
+	const name = typeof template.name === "string" ? template.name.trim() : "";
+	const prompt = typeof template.prompt === "string" ? template.prompt.trim() : "";
+	if (!id || !name || !prompt) {
+		return null;
+	}
+
+	const baseRef = typeof template.baseRef === "string" ? template.baseRef.trim() : "";
+	const normalized: RuntimeTaskTemplate = {
+		id,
+		name,
+		prompt: template.prompt,
+	};
+	// Drop agent overrides that are not launch-supported instead of
+	// silently coercing them to the default agent.
+	if (template.agentId !== undefined && template.agentId === normalizeAgentId(template.agentId)) {
+		normalized.agentId = template.agentId;
+	}
+	if (baseRef) {
+		normalized.baseRef = baseRef;
+	}
+	if (typeof template.autoReviewEnabled === "boolean") {
+		normalized.autoReviewEnabled = template.autoReviewEnabled;
+	}
+	if (template.autoReviewMode === "commit" || template.autoReviewMode === "pr") {
+		normalized.autoReviewMode = template.autoReviewMode;
+	}
+	return normalized;
+}
+
+function normalizeTaskTemplates(templates: RuntimeTaskTemplate[] | null | undefined): RuntimeTaskTemplate[] {
+	if (!Array.isArray(templates)) {
+		return [];
+	}
+	const normalized: RuntimeTaskTemplate[] = [];
+	for (const template of templates) {
+		const parsed = normalizeTaskTemplate(template);
+		if (parsed) {
+			normalized.push(parsed);
+		}
+	}
+	return normalized;
+}
+
+function areRuntimeTaskTemplatesEqual(a: readonly RuntimeTaskTemplate[], b: readonly RuntimeTaskTemplate[]): boolean {
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
 	if (typeof value === "boolean") {
 		return value;
@@ -293,6 +349,7 @@ function toRuntimeConfigState({
 		),
 		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
 		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
+		taskTemplates: normalizeTaskTemplates(globalConfig?.taskTemplates),
 	};
 }
 
@@ -314,6 +371,7 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled?: boolean;
 		commitPromptTemplate?: string;
 		openPrPromptTemplate?: string;
+		taskTemplates?: RuntimeTaskTemplate[];
 	},
 ): Promise<void> {
 	const existing = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(configPath);
@@ -342,6 +400,7 @@ async function writeRuntimeGlobalConfigFile(
 		config.openPrPromptTemplate === undefined
 			? DEFAULT_OPEN_PR_PROMPT_TEMPLATE
 			: normalizePromptTemplate(config.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE);
+	const taskTemplates = config.taskTemplates === undefined ? undefined : normalizeTaskTemplates(config.taskTemplates);
 
 	const payload: RuntimeGlobalConfigFileShape = {};
 	if (selectedAgentId !== undefined) {
@@ -375,6 +434,13 @@ async function writeRuntimeGlobalConfigFile(
 	}
 	if (hasOwnKey(existing, "openPrPromptTemplate") || openPrPromptTemplate !== DEFAULT_OPEN_PR_PROMPT_TEMPLATE) {
 		payload.openPrPromptTemplate = openPrPromptTemplate;
+	}
+	if (taskTemplates !== undefined) {
+		if (taskTemplates.length > 0 || hasOwnKey(existing, "taskTemplates")) {
+			payload.taskTemplates = taskTemplates;
+		}
+	} else if (hasOwnKey(existing, "taskTemplates")) {
+		payload.taskTemplates = normalizeTaskTemplates(existing?.taskTemplates);
 	}
 
 	await lockedFileSystem.writeJsonFileAtomic(configPath, payload, {
@@ -458,6 +524,7 @@ function createRuntimeConfigStateFromValues(input: {
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
+	taskTemplates: RuntimeTaskTemplate[];
 }): RuntimeConfigState {
 	return {
 		globalConfigPath: input.globalConfigPath,
@@ -477,6 +544,7 @@ function createRuntimeConfigStateFromValues(input: {
 		openPrPromptTemplate: normalizePromptTemplate(input.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE),
 		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
 		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
+		taskTemplates: normalizeTaskTemplates(input.taskTemplates),
 	};
 }
 
@@ -491,6 +559,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
 		openPrPromptTemplate: current.openPrPromptTemplate,
+		taskTemplates: current.taskTemplates,
 	});
 }
 
@@ -526,6 +595,7 @@ export async function saveRuntimeConfig(
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
 		openPrPromptTemplate: string;
+		taskTemplates: RuntimeTaskTemplate[];
 	},
 ): Promise<RuntimeConfigState> {
 	const { globalConfigPath, projectConfigPath } = resolveRuntimeConfigPaths(cwd);
@@ -537,6 +607,7 @@ export async function saveRuntimeConfig(
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
+			taskTemplates: config.taskTemplates,
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, { shortcuts: config.shortcuts });
 		return createRuntimeConfigStateFromValues({
@@ -549,6 +620,7 @@ export async function saveRuntimeConfig(
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
+			taskTemplates: config.taskTemplates,
 		});
 	});
 }
@@ -570,6 +642,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
 			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
+			taskTemplates: updates.taskTemplates ?? current.taskTemplates,
 		};
 
 		const hasChanges =
@@ -579,7 +652,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
-			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts);
+			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts) ||
+			!areRuntimeTaskTemplatesEqual(nextConfig.taskTemplates, current.taskTemplates);
 
 		if (!hasChanges) {
 			return current;
@@ -592,6 +666,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+			taskTemplates: nextConfig.taskTemplates,
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, {
 			shortcuts: nextConfig.shortcuts,
@@ -606,6 +681,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+			taskTemplates: nextConfig.taskTemplates,
 		});
 	});
 }
@@ -635,6 +711,7 @@ export async function updateGlobalRuntimeConfig(
 				shortcuts: current.shortcuts,
 				commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 				openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
+				taskTemplates: updates.taskTemplates ?? current.taskTemplates,
 			};
 
 			const hasChanges =
@@ -643,7 +720,8 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
-				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate;
+				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
+				!areRuntimeTaskTemplatesEqual(nextConfig.taskTemplates, current.taskTemplates);
 
 			if (!hasChanges) {
 				return current;
@@ -656,6 +734,7 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+				taskTemplates: nextConfig.taskTemplates,
 			});
 
 			return createRuntimeConfigStateFromValues({
@@ -668,6 +747,7 @@ export async function updateGlobalRuntimeConfig(
 				shortcuts: nextConfig.shortcuts,
 				commitPromptTemplate: nextConfig.commitPromptTemplate,
 				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+				taskTemplates: nextConfig.taskTemplates,
 			});
 		},
 	);

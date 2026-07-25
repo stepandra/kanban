@@ -50,6 +50,17 @@ function isIgnorablePtyResizeError(error: unknown): boolean {
 	return error.message.toLowerCase().includes("already exited");
 }
 
+// Kills the PTY process AND its whole foreground process group (SIGTERM to
+// -pid). For stop() this is intentional: tear down the agent's entire tree.
+// For detach() durability this only works because zmx daemonizes the wrapped
+// agent into its OWN process group (verified with zmx 0.6.0: the wrapped
+// process is a process-group leader whose pgid differs from the zmx client's,
+// so the group SIGTERM never reaches it). If a launcher ever keeps the agent
+// in the client's process group, detach() will kill the agent — reimplement
+// detach() to terminate only the PTY client in that case. Pinned by
+// test/integration/pty-detach.integration.test.ts, which detaches a live zmx
+// session (or a detached-child stub when zmx is unavailable) and asserts the
+// wrapped process survives.
 function terminatePtyProcess(ptyProcess: pty.IPty): void {
 	const pid = ptyProcess.pid;
 	ptyProcess.kill();
@@ -65,6 +76,7 @@ function terminatePtyProcess(ptyProcess: pty.IPty): void {
 export class PtySession {
 	private readonly ptyProcess: pty.IPty;
 	private interrupted = false;
+	private detached = false;
 	private exited = false;
 
 	private constructor(
@@ -155,7 +167,16 @@ export class PtySession {
 		terminatePtyProcess(this.ptyProcess);
 	}
 
+	detach(): void {
+		this.detached = true;
+		terminatePtyProcess(this.ptyProcess);
+	}
+
 	wasInterrupted(): boolean {
 		return this.interrupted;
+	}
+
+	wasDetached(): boolean {
+		return this.detached;
 	}
 }

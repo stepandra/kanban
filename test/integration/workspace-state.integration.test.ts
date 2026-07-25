@@ -9,10 +9,12 @@ import type { WorkspaceStateConflictError } from "../../src/state/workspace-stat
 import {
 	getWorkspacesRootPath,
 	listWorkspaceIndexEntries,
+	loadIndexedJsonWorkspaceSnapshot,
 	loadWorkspaceContext,
 	loadWorkspaceContextById,
 	loadWorkspaceState,
 	removeWorkspaceIndexEntry,
+	saveWorkspaceSessionSummary,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
 import { createGitTestEnv } from "../utilities/git-env";
@@ -137,6 +139,33 @@ describe.sequential("workspace-state integration", () => {
 				const loadedAfterConflict = await loadWorkspaceState(workspacePath);
 				expect(loadedAfterConflict.revision).toBe(2);
 				expect(loadedAfterConflict.board.columns[0]?.cards[0]?.prompt).toBe("Task Two");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("persists live task summaries without invalidating the board revision", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-session-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-session");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const initial = await loadWorkspaceState(workspacePath);
+				const summary: RuntimeTaskSessionSummary = {
+					...createSessionSummary("task-1"),
+					state: "running",
+					agentId: "codex",
+					workspacePath: "/tmp/task-1",
+					durableSessionName: "kanban.project-session.codex.task-1.0123456789ab",
+				};
+
+				await saveWorkspaceSessionSummary(workspacePath, summary);
+
+				const persisted = await loadWorkspaceState(workspacePath);
+				expect(persisted.sessions["task-1"]).toEqual(summary);
+				expect(persisted.revision).toBe(initial.revision);
 			} finally {
 				cleanup();
 			}
@@ -340,6 +369,35 @@ describe.sequential("workspace-state integration", () => {
 
 				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("sessions.json");
 				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("state");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("loads an import snapshot without reading session telemetry", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-import-snapshot-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-import-snapshot");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+
+				const context = await loadWorkspaceContext(workspacePath);
+				mkdirSync(context.statePath, { recursive: true });
+				const board = createBoard("Board authority only");
+				writeFileSync(join(context.statePath, "board.json"), JSON.stringify(board, null, 2), "utf8");
+				writeFileSync(join(context.statePath, "meta.json"), '{"revision":4,"updatedAt":123}', "utf8");
+				writeFileSync(join(context.statePath, "sessions.json"), "not-json-and-must-not-be-read", "utf8");
+
+				await expect(loadWorkspaceState(workspacePath)).rejects.toThrow("sessions.json");
+				await expect(loadIndexedJsonWorkspaceSnapshot(workspacePath)).resolves.toMatchObject({
+					workspaceId: context.workspaceId,
+					repoPath: context.repoPath,
+					revision: 4,
+					updatedAt: 123,
+					board,
+				});
 			} finally {
 				cleanup();
 			}

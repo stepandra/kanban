@@ -7,7 +7,11 @@ import type {
 import { parseHookIngestRequest } from "../core/api-validation";
 import { loadWorkspaceContextById } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
-import { captureTaskTurnCheckpoint, deleteTaskTurnCheckpointRef } from "../workspace/turn-checkpoints";
+import {
+	captureBestEffortTurnCheckpoint,
+	captureTaskTurnCheckpoint,
+	deleteTaskTurnCheckpointRef,
+} from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext } from "./app-router";
 
 export interface CreateHooksApiDependencies {
@@ -85,15 +89,15 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				}
 
 				if (event === "to_review") {
-					const nextTurn = (transitionedSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
 					const checkpointCwd = transitionedSummary.workspacePath ?? workspacePath;
 					const staleRef = transitionedSummary.previousTurnCheckpoint?.ref ?? null;
-					try {
-						const checkpoint = await checkpointCapture({
-							cwd: checkpointCwd,
-							taskId,
-							turn: nextTurn,
-						});
+					const checkpoint = await captureBestEffortTurnCheckpoint({
+						cwd: checkpointCwd,
+						taskId,
+						latestTurnCheckpoint: transitionedSummary.latestTurnCheckpoint,
+						capture: checkpointCapture,
+					});
+					if (checkpoint) {
 						manager.applyTurnCheckpoint(taskId, checkpoint);
 						if (staleRef) {
 							void checkpointRefDelete({
@@ -103,8 +107,6 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 								// Best effort cleanup only.
 							});
 						}
-					} catch {
-						// Best effort checkpointing only.
 					}
 				}
 
