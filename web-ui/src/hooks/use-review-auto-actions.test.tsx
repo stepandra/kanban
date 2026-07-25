@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
-import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
+import { type AutoReviewTaskState, autoReviewTaskReducer, useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import { resetWorkspaceMetadataStore, setTaskWorkspaceSnapshot } from "@/stores/workspace-metadata-store";
 import type { BoardColumnId, BoardData, ReviewTaskWorkspaceSnapshot } from "@/types";
 
@@ -51,15 +51,17 @@ function HookHarness({
 	board,
 	runAutoReviewGitAction,
 	requestMoveTaskToTrash,
+	taskGitActionLoadingByTaskId = {},
 }: {
 	board: BoardData;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
 	requestMoveTaskToTrash: (taskId: string, fromColumnId: BoardColumnId) => Promise<void>;
+	taskGitActionLoadingByTaskId?: Record<string, { commitSource: string | null; prSource: string | null }>;
 }): null {
 	setTaskWorkspaceSnapshot(workspaceSnapshots["task-1"] ?? null);
 	useReviewAutoActions({
 		board,
-		taskGitActionLoadingByTaskId: {},
+		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
 		requestMoveTaskToTrash,
 	});
@@ -126,5 +128,199 @@ describe("useReviewAutoActions", () => {
 
 		expect(runAutoReviewGitAction).not.toHaveBeenCalled();
 		expect(requestMoveTaskToTrash).not.toHaveBeenCalled();
+	});
+
+	it("does not retry a failed auto review action until the task state changes", async () => {
+		const board = createBoard(true);
+		let resolveAutoReviewAction: ((triggered: boolean) => void) | null = null;
+		const runAutoReviewGitAction = vi.fn(
+			() =>
+				new Promise<boolean>((resolve) => {
+					resolveAutoReviewAction = resolve;
+				}),
+		);
+		const requestMoveTaskToTrash = vi.fn(async () => {});
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					runAutoReviewGitAction={runAutoReviewGitAction}
+					requestMoveTaskToTrash={requestMoveTaskToTrash}
+				/>,
+			);
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(500);
+			await Promise.resolve();
+		});
+
+		expect(runAutoReviewGitAction).toHaveBeenCalledTimes(1);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={board}
+					runAutoReviewGitAction={runAutoReviewGitAction}
+					requestMoveTaskToTrash={requestMoveTaskToTrash}
+					taskGitActionLoadingByTaskId={{ "task-1": { commitSource: "card", prSource: null } }}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			resolveAutoReviewAction?.(false);
+			await Promise.resolve();
+			root.render(
+				<HookHarness
+					board={board}
+					runAutoReviewGitAction={runAutoReviewGitAction}
+					requestMoveTaskToTrash={requestMoveTaskToTrash}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			vi.advanceTimersByTime(2_000);
+			await Promise.resolve();
+		});
+
+		expect(runAutoReviewGitAction).toHaveBeenCalledTimes(1);
+		expect(requestMoveTaskToTrash).not.toHaveBeenCalled();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={createBoard(false)}
+					runAutoReviewGitAction={runAutoReviewGitAction}
+					requestMoveTaskToTrash={requestMoveTaskToTrash}
+				/>,
+			);
+		});
+		await act(async () => {
+			root.render(
+				<HookHarness
+					board={createBoard(true)}
+					runAutoReviewGitAction={runAutoReviewGitAction}
+					requestMoveTaskToTrash={requestMoveTaskToTrash}
+				/>,
+			);
+		});
+		await act(async () => {
+			vi.advanceTimersByTime(500);
+			await Promise.resolve();
+		});
+
+		expect(runAutoReviewGitAction).toHaveBeenCalledTimes(2);
+	});
+
+	it("walks the full state machine from scheduled to completed", async () => {
+		const originalSnapshot = workspaceSnapshots["task-1"] as ReviewTaskWorkspaceSnapshot;
+		const board = createBoard(true);
+		let resolveAutoReviewAction: ((triggered: boolean) => void) | null = null;
+		const runAutoReviewGitAction = vi.fn(
+			() =>
+				new Promise<boolean>((resolve) => {
+					resolveAutoReviewAction = resolve;
+				}),
+		);
+		let resolveMoveToTrash: (() => void) | null = null;
+		const requestMoveTaskToTrash = vi.fn(
+			() =>
+				new Promise<void>((resolve) => {
+					resolveMoveToTrash = resolve;
+				}),
+		);
+
+		try {
+			// idle -> scheduled-git-action: changes are present, but the debounce has not elapsed yet.
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={board}
+						runAutoReviewGitAction={runAutoReviewGitAction}
+						requestMoveTaskToTrash={requestMoveTaskToTrash}
+					/>,
+				);
+			});
+			expect(runAutoReviewGitAction).not.toHaveBeenCalled();
+
+			// scheduled-git-action -> awaiting-clean: the debounce fires the git action.
+			await act(async () => {
+				vi.advanceTimersByTime(500);
+				await Promise.resolve();
+			});
+			expect(runAutoReviewGitAction).toHaveBeenCalledTimes(1);
+			expect(requestMoveTaskToTrash).not.toHaveBeenCalled();
+
+			// awaiting-clean: the git action triggered and the workspace snapshot becomes clean.
+			await act(async () => {
+				resolveAutoReviewAction?.(true);
+				await Promise.resolve();
+			});
+			workspaceSnapshots["task-1"] = { ...originalSnapshot, changedFiles: 0 };
+			await act(async () => {
+				root.render(
+					<HookHarness
+						board={board}
+						runAutoReviewGitAction={runAutoReviewGitAction}
+						requestMoveTaskToTrash={requestMoveTaskToTrash}
+					/>,
+				);
+			});
+			expect(requestMoveTaskToTrash).not.toHaveBeenCalled();
+
+			// awaiting-clean -> scheduled-move-to-done -> moving-to-done: the debounce fires the move.
+			await act(async () => {
+				vi.advanceTimersByTime(500);
+				await Promise.resolve();
+			});
+			expect(requestMoveTaskToTrash).toHaveBeenCalledTimes(1);
+			expect(requestMoveTaskToTrash).toHaveBeenCalledWith("task-1", "review", { skipWorkingChangeWarning: true });
+
+			// moving-to-done -> idle (completed): the move settles without re-arming anything.
+			await act(async () => {
+				resolveMoveToTrash?.();
+				await Promise.resolve();
+			});
+			await act(async () => {
+				vi.advanceTimersByTime(2_000);
+				await Promise.resolve();
+			});
+			expect(runAutoReviewGitAction).toHaveBeenCalledTimes(1);
+			expect(requestMoveTaskToTrash).toHaveBeenCalledTimes(1);
+		} finally {
+			workspaceSnapshots["task-1"] = originalSnapshot;
+		}
+	});
+});
+
+describe("autoReviewTaskReducer", () => {
+	it("walks idle through the happy path and back to idle", () => {
+		let state: AutoReviewTaskState = { kind: "idle" };
+		state = autoReviewTaskReducer(state, { type: "schedule", action: "commit", timerId: 1 });
+		expect(state).toEqual({ kind: "scheduled-git-action", action: "commit", timerId: 1 });
+		state = autoReviewTaskReducer(state, { type: "git-action-fired" });
+		expect(state).toEqual({ kind: "awaiting-clean", action: "commit" });
+		state = autoReviewTaskReducer(state, { type: "git-action-triggered" });
+		expect(state).toEqual({ kind: "awaiting-clean", action: "commit" });
+		state = autoReviewTaskReducer(state, { type: "schedule", action: "move_to_done_after_git_action", timerId: 2 });
+		expect(state).toEqual({ kind: "scheduled-move-to-done", action: "commit", timerId: 2 });
+		state = autoReviewTaskReducer(state, { type: "move-to-done-fired" });
+		expect(state).toEqual({ kind: "moving-to-done", action: "commit" });
+		state = autoReviewTaskReducer(state, { type: "move-to-done-settled" });
+		expect(state).toEqual({ kind: "idle" });
+	});
+
+	it("records a failed attempt and re-arms on the next schedule", () => {
+		let state: AutoReviewTaskState = { kind: "idle" };
+		state = autoReviewTaskReducer(state, { type: "schedule", action: "commit", timerId: 1 });
+		state = autoReviewTaskReducer(state, { type: "git-action-fired" });
+		state = autoReviewTaskReducer(state, { type: "git-action-failed", action: "commit", attemptKey: "key-1" });
+		expect(state).toEqual({ kind: "failed", attemptKey: "key-1" });
+		state = autoReviewTaskReducer(state, { type: "schedule", action: "commit", timerId: 2 });
+		expect(state).toEqual({ kind: "scheduled-git-action", action: "commit", timerId: 2 });
+		state = autoReviewTaskReducer(state, { type: "reset" });
+		expect(state).toEqual({ kind: "idle" });
 	});
 });

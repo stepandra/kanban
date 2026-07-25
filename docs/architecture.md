@@ -6,15 +6,36 @@ There are three big ideas to hold in your head:
 
 1. The browser is mostly a control surface. It renders state, sends commands, and reacts to live updates.
 2. The local runtime is the source of truth for projects, worktrees, sessions, git operations, and streaming state.
-3. There are two different agent execution paths:
-   - most agents run as PTY-backed CLI processes
-   - Cline runs through a native SDK-backed chat runtime
+3. Every agent runs the same way: as a PTY-backed CLI process in a task worktree.
 
 If you remember nothing else, remember this:
 
-- PTY-backed agents are process-oriented
-- Cline is session-oriented
-- the backend coordinates both through one runtime API and one state stream
+- agents are process-oriented
+- the backend coordinates everything through one runtime API and one state stream
+
+## Decision record: the native Cline SDK runtime was removed
+
+Kanban previously shipped a second execution path: Cline ran through a native
+SDK-backed chat runtime (`src/cline-sdk/` on top of the published
+`@clinebot/core` / `@clinebot/llms` packages), while every other agent ran as
+a PTY-backed CLI process. That native runtime has been removed:
+
+- `src/cline-sdk/` and its TRPC surface (provider settings, OAuth, MCP
+  settings, task chat endpoints) are gone
+- the `@clinebot/*` packages are no longer dependencies
+- the Cline web-ui surfaces (chat panel, provider/model pickers, account and
+  MCP settings) are gone
+- Cline remains in the agent catalog as an external CLI (`cline` binary)
+  launched through the same PTY path as every other agent
+
+Tradeoff, stated plainly: removing the native runtime **diverges from upstream
+`cline/kanban`**, so upstream merges will be harder — anything upstream that
+touches `src/cline-sdk/`, the Cline chat UI, or the provider-settings TRPC
+surface will conflict. We accepted that cost in exchange for a single agent
+execution model, a much smaller dependency and cold-start surface (the SDK
+host can no longer be started accidentally, e.g. on trash-restore probes), and
+the removal of an entire settings/OAuth/MCP stack that duplicated what the
+external Cline CLI already does itself.
 
 ## System Diagram
 
@@ -33,28 +54,22 @@ If you remember nothing else, remember this:
 | src/                                                                             |
 |                                                                                  |
 | trpc/app-router.ts, trpc/runtime-api.ts, server/runtime-state-hub.ts             |
-+-------------------------------+--------------------------------+------------------+
-                                |                                |
-                                |                                |
-                                v                                v
-+-------------------------------+--+          +------------------+-------------------+
-| PTY Runtime                      |          | Native Cline Integration             |
-| src/terminal/                    |          | src/cline-sdk/                       |
-|                                  |          |                                      |
-| agent-registry.ts                |          | cline-provider-service.ts            |
-| session-manager.ts               |          | cline-task-session-service.ts        |
-| pty-session.ts                   |          | cline-session-runtime.ts             |
-+-------------------------------+--+          | cline-message-repository.ts         |
-                                |             | cline-event-adapter.ts              |
-                                |             +------------------+-------------------+
-                                |                                |
-                                v                                v
-+-------------------------------+--+          +------------------+-------------------+
-| Worktrees and shell processes    |          | Published Cline SDK packages        |
-| per-task cwd, CLI agents, shell  |          | `@clinebot/core`, `@clinebot/agents`, `@clinebot/llms` |
-+----------------------------------+          | provider store, session host,       |
-                                              | session artifact persistence         |
-                                              +--------------------------------------+
++---------------------------------------+------------------------------------------+
+                                        |
+                                        v
++---------------------------------------+------------------------------------------+
+| PTY Runtime                                                                    |
+| src/terminal/                                                                  |
+|                                                                                  |
+| agent-registry.ts, agent-session-adapters.ts, session-manager.ts, pty-session.ts|
++---------------------------------------+------------------------------------------+
+                                        |
+                                        v
++---------------------------------------+------------------------------------------+
+| Worktrees and shell processes                                                    |
+| per-task cwd, CLI agents (Claude Code, Codex, Grok, Kimi, Cline, Droid, Kiro),   |
+| workspace shell                                                                  |
++----------------------------------------------------------------------------------+
 ```
 
 ## Request and Stream Diagram
@@ -77,16 +92,12 @@ app-router.ts
     v
 runtime-api.ts
     |
-    +--> terminal/session-manager.ts for CLI-backed agents
-    |
-    +--> cline-task-session-service.ts for native Cline
+    +--> terminal/session-manager.ts for all agents
 
 
 Live runtime output
     |
     +--> terminal session summaries
-    |
-    +--> Cline summaries and chat messages
     |
     v
 runtime-state-hub.ts
@@ -105,50 +116,26 @@ board, detail view, and terminal panels
 
 Kanban is easiest to understand if you separate it into three layers of responsibility.
 
-The browser layer is the presentation and orchestration layer. It renders the board, detail view, settings, and terminal or chat surfaces. It also owns short-lived UI state such as panel visibility, form drafts, and optimistic message rendering.
+The browser layer is the presentation and orchestration layer. It renders the board, detail view, settings, and terminal surfaces. It also owns short-lived UI state such as panel visibility, form drafts, and optimistic rendering.
 
-The runtime layer is the control layer. It decides what session to start, where it should run, what worktree or workspace it belongs to, what command or SDK session should be used, and what state should be streamed back to the browser.
+The runtime layer is the control layer. It decides what session to start, where it should run, what worktree or workspace it belongs to, what command should be used, and what state should be streamed back to the browser.
 
-The execution layer is the actual agent implementation. For most agents that means a CLI process attached to a PTY. For Cline that means the published SDK packages with their own provider store, session host, and persisted session artifacts.
+The execution layer is the actual agent implementation: a CLI process attached to a PTY.
 
 That split explains a lot of the architecture:
 
 - the browser should not be the source of truth for session lifecycle
 - the runtime should coordinate work, not render UI
-- the Cline integration should adapt the SDK instead of copying SDK responsibilities into Kanban
+- agent differences belong in the agent catalog and per-agent launch adapters, not in parallel runtime stacks
 
 ## Runtime Modes
 
-Kanban currently supports three runtime modes.
+Kanban currently supports two runtime modes.
 
 | Runtime mode | Used for | Scope | Backing implementation | Why it exists |
 | --- | --- | --- | --- | --- |
-| Native Cline chat | Cline | task-scoped | Cline SDK session host | Cline exposes richer chat semantics, provider settings, OAuth, and persisted session history |
-| CLI-backed task terminal | Claude Code, Codex, Gemini, OpenCode, Droid, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
+| CLI-backed task terminal | Claude Code, Codex, Grok, Kimi, Cline, Gemini, OpenCode, Droid, Kiro, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
 | Workspace shell terminal | the bottom shell panel | workspace-scoped | PTY-backed shell process | this is for manual commands in the repo, not task execution |
-
-The crucial point is that Cline is not just "another agent command". It is a native runtime path. Treating it like a terminal process would throw away useful structure that the SDK already gives us.
-
-## Why Cline Is Different
-
-The codebase draws a hard line between Cline and the rest of the agent catalog.
-
-Most agents are binaries. We launch them, stream their terminal output, watch for transitions, and kill the process when the session ends.
-
-Cline is different because the SDK already owns several concerns that a CLI runtime does not:
-
-- provider settings
-- OAuth login and refresh
-- session hosting
-- persisted session history
-
-Because of that, the architecture is intentionally split:
-
-- Cline uses a native chat path
-- other agents stay on the PTY path
-- the UI still sees a shared runtime surface, but the implementation behind it differs
-
-This is one of the most important architecture choices in the repo. If someone accidentally starts pushing Cline back toward "just another CLI", the system gets worse, not simpler.
 
 ## Core Concepts
 
@@ -159,7 +146,7 @@ These terms come up everywhere in the codebase.
 | Workspace | an indexed git repository that Kanban has opened | most browser and runtime state is scoped to a workspace |
 | Task card | a board item with a prompt, base ref, and review settings | a task is the unit of work the board cares about |
 | Worktree | a per-task git worktree | most task agents run inside one |
-| Task session | the live runtime attached to a task card | this may be a PTY process or a native Cline session |
+| Task session | the live runtime attached to a task card | a PTY process managed by the terminal session manager |
 | Runtime summary | the small state object the board uses to know whether a session is idle, running, awaiting review, interrupted, or failed | this is the bridge between long-running agent work and the UI |
 
 ## Who Owns What
@@ -168,13 +155,10 @@ One of the biggest cleanup themes was making ownership clearer. The system is mu
 
 | Concern | Primary owner | Notes |
 | --- | --- | --- |
-| board state, workspace state, review state | Kanban | this is product state, not SDK state |
+| board state, workspace state, review state | Kanban | this is product state |
 | worktree lifecycle | Kanban | task worktrees are a Kanban concept |
-| non-Cline process lifecycle | Kanban | the terminal runtime owns process start, resize, output, and stop |
-| Cline provider settings and secrets | Cline SDK | Kanban should not mirror these back into its own runtime config |
-| Cline OAuth state and refresh | Cline SDK | Kanban delegates through a provider service |
-| Cline session persistence and history | Cline SDK | Kanban hydrates from SDK artifacts instead of reinventing persistence |
-| mapping SDK sessions into Kanban task semantics | Kanban integration layer | this is what `src/cline-sdk/` exists to do |
+| agent process lifecycle | Kanban | the terminal runtime owns process start, resize, output, and stop |
+| agent authentication and provider settings | each agent CLI | CLIs own their own login and config; Kanban only launches them |
 | UI rendering state for detail view | browser hooks and components | local UI state belongs in the frontend |
 | live state fanout to the browser | `runtime-state-hub.ts` | the browser should react to streamed state, not poll |
 
@@ -188,40 +172,30 @@ The backend has a few important subsystems, each with a different job.
 
 `app-router.ts` defines the typed contract between the browser and the runtime.
 
-`runtime-api.ts` is the coordinator behind that contract. It should be the front door for runtime procedures, but not the place where deep session logic accumulates. A good rule of thumb is that `runtime-api.ts` should route and validate, then hand off to the terminal runtime, the Cline integration, workspace logic, config helpers, or git helpers.
+`runtime-api.ts` is the coordinator behind that contract. It should be the front door for runtime procedures, but not the place where deep session logic accumulates. A good rule of thumb is that `runtime-api.ts` should route and validate, then hand off to the terminal runtime, workspace logic, config helpers, or git helpers.
 
 ### Terminal runtime
 
 The `src/terminal/` area owns everything process-oriented:
 
-- choosing what binary to run
+- choosing what binary to run (via the agent catalog in `src/core/agent-catalog.ts`)
+- per-agent launch preparation (hooks, env, args) in `agent-session-adapters.ts`
 - launching PTY sessions
 - resizing and streaming terminal output
 - translating process lifecycle into Kanban runtime summaries
 - handling the workspace shell terminal
 
-This is the path for Claude Code, Codex, Gemini, OpenCode, Droid, and any other command-driven agent.
-
-### Native Cline integration
-
-The `src/cline-sdk/` area is an integration layer, not just a dump of SDK calls.
-
-Its job is to translate between Kanban concepts and SDK concepts:
-
-- Kanban thinks in task ids, runtime summaries, and browser-facing chat messages
-- the SDK thinks in provider settings, session ids, raw session events, and persisted artifacts
-
-The integration layer exists so the rest of Kanban does not need to understand the SDK package layout or the details of provider auth and session hosting.
+This is the single execution path for every agent, including the external Cline CLI.
 
 ### Workspace and config
 
 `src/workspace/` owns worktree creation, lookup, cleanup, and turn checkpoints.
 
-`src/config/runtime-config.ts` owns Kanban preferences such as selected agents, shortcuts, and prompt templates. It should not become a second source of truth for Cline secrets, OAuth tokens, or SDK provider state.
+`src/config/runtime-config.ts` owns Kanban preferences such as selected agents, shortcuts, and prompt templates.
 
 ### State streaming
 
-`runtime-state-hub.ts` is the central fanout point for live updates. It listens to terminal summaries, Cline summaries, Cline messages, workspace metadata, and workspace state changes, then broadcasts websocket messages that keep the browser in sync.
+`runtime-state-hub.ts` is the central fanout point for live updates. It listens to terminal summaries, workspace metadata, and workspace state changes, then broadcasts websocket messages that keep the browser in sync.
 
 This is important because Kanban is not designed around browser polling. The runtime is long-lived and streams state outward.
 
@@ -231,67 +205,11 @@ The frontend is also easier to navigate if you think in responsibilities instead
 
 `App.tsx` is the composition root. It wires together the major hooks, determines which high-level surfaces are visible, and hands state down into the board, detail view, dialogs, and terminal areas. It should not become a second runtime orchestrator.
 
-Hooks in `web-ui/src/hooks/` are where most domain logic lives. This includes project navigation, workspace synchronization, task-session actions, review behavior, and Cline chat state. If you are looking for "how does this behavior actually work?", the answer is usually in a hook, not a component.
+Hooks in `web-ui/src/hooks/` are where most domain logic lives. This includes project navigation, workspace synchronization, task-session actions, and review behavior. If you are looking for "how does this behavior actually work?", the answer is usually in a hook, not a component.
 
 Components in `web-ui/src/components/` are mostly rendering and composition. Good frontend changes often mean moving runtime-aware logic into hooks and leaving the component to render a view model.
 
 `web-ui/src/runtime/` holds client-side query helpers and persistence glue. One of the guardrails we now enforce is that raw workspace TRPC client creation should stay concentrated in the runtime query helpers rather than spread through arbitrary components.
-
-## Native Cline Architecture
-
-The native Cline stack is split into small modules because this part of the system has more moving pieces than the PTY runtime.
-
-```text
-runtime-api.ts
-    |
-    +--> cline-provider-service.ts
-    |        |
-    |        v
-    |    sdk-provider-boundary.ts
-    |        |
-    |        v
-    |    @clinebot/core and @clinebot/llms provider store, catalog, OAuth helpers
-    |
-    v
-cline-task-session-service.ts
-    |
-    +--> cline-session-runtime.ts
-    |        |
-    |        v
-    |    sdk-runtime-boundary.ts
-    |        |
-    |        v
-    |    @clinebot/core session host and persisted session records, plus @clinebot/agents prompt helpers
-    |
-    +--> cline-message-repository.ts
-    |        |
-    |        v
-    |    live in-memory messages plus hydrated SDK history
-    |
-    +--> cline-event-adapter.ts
-             |
-             v
-         cline-session-state.ts
-```
-
-The useful way to think about each module is:
-
-| Module | Role | Why it exists |
-| --- | --- | --- |
-| `sdk-provider-boundary.ts` | the only place that should import SDK provider and OAuth APIs directly | protects the rest of Kanban from SDK package layout details |
-| `sdk-runtime-boundary.ts` | the only place that should import SDK session-host and persisted-session APIs directly | same reason, but for runtime behavior |
-| `cline-provider-service.ts` | Kanban-facing service for provider settings, model catalog loading, OAuth login, and launch config resolution | keeps auth and provider policy out of `runtime-api.ts` and the UI |
-| `cline-session-runtime.ts` | owns the live SDK session host plus task id to session id bindings | maps Kanban tasks onto SDK sessions |
-| `cline-message-repository.ts` | stores the Kanban-side view of Cline chat state and hydrates history from SDK persistence | gives the rest of the backend one consistent chat repository shape |
-| `cline-event-adapter.ts` | translates raw SDK events into Kanban mutations | isolates protocol-specific event handling |
-| `cline-session-state.ts` | pure state helpers for messages and summaries | keeps low-level mutation logic reusable and testable |
-| `cline-task-session-service.ts` | the task-oriented facade used by the rest of the backend | gives runtime-api.ts one place to talk to for Cline session work |
-
-This split matters because the biggest failure mode in this area is accidental duplication:
-
-- duplicating SDK-owned settings in Kanban config
-- duplicating SDK event logic in multiple places
-- duplicating direct SDK imports throughout the codebase
 
 ## Configuration and Persistence
 
@@ -301,13 +219,8 @@ Different state lives in different places on purpose.
 | --- | --- | --- |
 | selected agent, shortcuts, Kanban prompt templates | Kanban runtime config | these are Kanban preferences |
 | per-project UI or workflow state | workspace state or project config | this is workspace-scoped product state |
-| Cline provider settings, API keys, OAuth tokens | SDK-backed provider store | the SDK already owns auth and provider persistence |
-| Cline session history | SDK persisted session artifacts | this allows recovery without rebuilding another persistence layer |
+| agent credentials and provider settings | each agent CLI's own config | the CLIs already own auth and provider persistence |
 | task runtime summaries | Kanban runtime memory and state stream | the board needs a lightweight product-shaped summary of current work |
-
-One very important rule falls out of that table:
-
-Do not put Cline provider secrets or OAuth tokens back into `runtime-config.ts`.
 
 ## Amp Task Planning
 
@@ -315,45 +228,32 @@ Task decomposition lives in Amp through the self-contained `amp/kanban.ts` plugi
 
 Task completion has two deliberately separate operations. `submit` moves in-progress work to review without cleanup or dependency unblocking; executors and runtime hooks use it when implementation is ready for inspection. `done` is the acceptance operation: it stops the session, removes the task workspace where appropriate, and unblocks linked work. An executor must not collapse those gates by calling `done` itself.
 
-A small backend compatibility check still recognizes synthetic session IDs saved by older Kanban versions, but the sidebar runtime and its prompt injection are gone.
-
 ## Main Flows
 
-### Starting a CLI-backed task session
+### Starting a task session
 
-When the user starts a normal non-Cline task, the browser asks the runtime to start a task session. The runtime resolves the task cwd, chooses the right command, and starts a PTY-backed process inside the task worktree. As the process runs, the terminal runtime emits summary updates and terminal output. The runtime state hub then streams those updates back to the browser so the board and detail view stay live.
+When the user starts a task, the browser asks the runtime to start a task session. The runtime resolves the task cwd, resolves the effective agent (previous session's agent on trash-restore, then the card's override, then the workspace default), chooses the matching command from the agent catalog, and starts a PTY-backed process inside the task worktree. As the process runs, the terminal runtime emits summary updates and terminal output. The runtime state hub then streams those updates back to the browser so the board and detail view stay live.
 
-This is the "classic Kanban" path.
+### Turn checkpoints
 
-### Sending a Cline chat message
-
-When the user sends a Cline message from the detail view, the request reaches `runtime-api.ts`, which delegates to the task-oriented Cline session service. That service makes sure the right native session exists, applies chat turns to it, listens to SDK events, updates the message repository and summary state, and lets the runtime state hub stream those updates back to the browser.
-
-### Opening settings and changing Cline provider state
-
-The settings dialog is split between generic Kanban settings and the Cline-specific provider flow. The browser loads provider catalog data, available models, saved provider settings, and OAuth state through a dedicated Cline controller path. The backend answers those requests through the Cline provider service, which is the layer that talks to the SDK-backed provider store.
-
-This means the UI can stay focused on rendering and local form state while the provider service owns auth and launch configuration policy.
+When a session starts (and when a hook moves a task to review), the runtime captures a best effort git checkpoint of the task worktree through the shared helper in `src/workspace/turn-checkpoints.ts`. Checkpoints power the "last turn" diff mode. Failures are swallowed on purpose: checkpointing must never block session startup or review transitions.
 
 ## Design Rules
 
 These are the architectural rules that are most important to preserve.
 
 - one concern should have one clear source of truth
-- keep the SDK behind the Cline boundary modules
+- one agent execution path: PTY-backed CLI processes, parameterized by the agent catalog and launch adapters — do not add a second runtime stack
 - keep `runtime-api.ts` as a coordinator, not a god file
-- do not store Cline auth or provider secrets in Kanban runtime config
 - treat the browser as a client of streamed runtime state, not the source of truth for long-running sessions
-- when adding new agent behavior, prefer capability-oriented reasoning over sprinkling more `selectedAgentId === "cline"` checks
+- when adding new agent behavior, prefer capability-oriented reasoning over sprinkling agent-id string checks
 - because this feature area currently has zero users to migrate, prefer clean replacement over backward-compatibility scaffolding
 
 ## Enforced Boundaries
 
 Some of the highest-value rules are enforced automatically by lint.
 
-- only the two SDK boundary modules may import directly from `@clinebot/*`
 - in the browser app, `createWorkspaceTrpcClient` is reserved for the runtime query helpers
-- the raw home agent session prefix should not be duplicated in app code
 
 These rules are intentionally narrow. They exist to protect the seams that are easiest to accidentally erode.
 
@@ -361,9 +261,8 @@ These rules are intentionally narrow. They exist to protect the seams that are e
 
 Not everything is perfectly generalized, and that is okay. Some current tradeoffs are intentional.
 
-- some agent-selection code still branches on `"cline"` directly, even though the long-term direction is more capability-based routing
-- the published SDK packages are still a real dependency boundary, so the local boundary modules matter a lot
-- Cline is native chat while the rest of the catalog is still command-driven, which means some parallel abstractions are similar but not identical
+- removing the native Cline runtime diverges from upstream `cline/kanban`, making upstream merges harder (see the decision record above)
+- the external Cline CLI runs through the generic PTY adapter set, so Cline-specific UX (rich chat semantics, in-app provider settings) no longer exists
 
 The important thing is that these tradeoffs are now explicit. They are not random accidents spread through the codebase.
 
@@ -373,10 +272,8 @@ When you are making a change, this table is often more useful than a file list.
 
 | If you are changing... | Think about this first | Common mistake to avoid |
 | --- | --- | --- |
-| task startup for Claude Code, Codex, Grok, Kimi, Gemini, OpenCode, or Droid | the PTY runtime and agent launch path | accidentally adding special logic to the Cline path |
+| task startup for any agent | the PTY runtime and agent launch path | adding a second, agent-specific runtime path |
 | Amp Orb task startup | the Amp plugin and its native thread watcher | inventing a second worker runtime or letting the worker accept its own card |
-| Cline provider settings, models, or OAuth | the Cline provider service and SDK provider boundary | storing secrets in Kanban config or duplicating OAuth policy |
-| Cline message rendering or send/cancel behavior | the Cline hooks and task-session service | duplicating SDK event or session logic in the component |
 | live board updates | the runtime state hub and browser stream consumers | falling back to polling or duplicating summary logic |
 | new architectural boundaries | the existing lint rules and ownership model | adding a rule that is too broad and becomes a nuisance |
 
@@ -387,7 +284,7 @@ A new engineer opening this repo will probably notice a few things quickly:
 - the backend is long-lived and stateful, not a thin stateless API server
 - the browser is closer to a local control client than a traditional web app
 - the task system, review system, and runtime system are tightly connected
-- Cline has a richer integration path than the rest of the agent catalog
+- every agent, including Cline, runs through the same PTY-backed terminal runtime
 - the architecture now favors clean ownership over compatibility glue because this area did not have legacy users to preserve
 
 If you approach the code with those assumptions, the rest of the system starts to make sense much faster.

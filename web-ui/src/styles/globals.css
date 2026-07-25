@@ -372,6 +372,11 @@ body,
 	box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
+.kb-board-card-shell[data-keyboard-focused="true"] > div {
+	outline: 2px solid var(--color-border-focus);
+	outline-offset: 1px;
+}
+
 /* -- Dependency overlay -- */
 
 .kb-dependency-overlay {

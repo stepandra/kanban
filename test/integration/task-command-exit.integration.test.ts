@@ -414,10 +414,18 @@ describe("source task commands", () => {
 			commitAll(projectPath, "init");
 
 			const port = String(await getAvailablePort());
+			// Stub the headless Fixer agent so `task submit` exercises the native
+			// review handoff without launching a real Amp run.
+			const fixerStubBinDir = join(homeDir, "fixer-stub-bin");
+			mkdirSync(fixerStubBinDir, { recursive: true });
+			const fixerStubPath = join(fixerStubBinDir, "amp");
+			writeFileSync(fixerStubPath, "#!/bin/sh\nexit 0\n", "utf8");
+			chmodSync(fixerStubPath, 0o755);
 			const env = createGitTestEnv({
 				HOME: homeDir,
 				USERPROFILE: homeDir,
 				KANBAN_RUNTIME_PORT: port,
+				KANBAN_REVIEW_FIXER_AMP_BIN: fixerStubPath,
 			});
 
 			const serverProcess = spawn(
@@ -517,6 +525,13 @@ describe("source task commands", () => {
 				expect(submitted.didExit).toBe(true);
 				expect(submitted.exitCode).toBe(0);
 				expect(submitted.stdout).toContain('"column": "review"');
+				const submittedPayload = JSON.parse(submitted.stdout) as {
+					reviewHandoff?: { ok?: boolean; action?: string; state?: string; label?: string };
+				};
+				expect(submittedPayload.reviewHandoff?.ok).toBe(true);
+				expect(submittedPayload.reviewHandoff?.action).toBe("review_handoff");
+				expect(submittedPayload.reviewHandoff?.label).toBe(`ar-fixer-${taskIds[0] ?? ""}`);
+				expect(["running", "queued"]).toContain(submittedPayload.reviewHandoff?.state);
 
 				const movedByDoneAlias = await runCliCommandAndCollectOutput({
 					args: ["task", "done", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
@@ -593,103 +608,6 @@ describe("source task commands", () => {
 				).toBe(true);
 				expect(listedTrash.exitCode).toBe(0);
 				expect(listedTrash.stdout).toContain('"count": 0');
-			} finally {
-				await requestGracefulShutdown(serverProcess);
-				const stopped = await waitForExit(serverProcess, 5_000);
-				if (!stopped) {
-					serverProcess.kill("SIGKILL");
-					await waitForExit(serverProcess, 5_000);
-				}
-			}
-		} finally {
-			cleanupProject();
-			cleanupHome();
-		}
-	});
-
-	it("treats create-time reasoning inherit as no explicit override", { timeout: 60_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-cline-reasoning-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-cline-reasoning-");
-
-		try {
-			initGitRepository(projectPath);
-			writeFileSync(join(projectPath, "README.md"), "# Task Cline Reasoning Test\n", "utf8");
-			commitAll(projectPath, "init");
-
-			const port = String(await getAvailablePort());
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
-				KANBAN_RUNTIME_PORT: port,
-			});
-
-			const serverProcess = spawn(
-				process.execPath,
-				[
-					"--require",
-					resolveShutdownIpcHookPath(),
-					"--import",
-					resolveTsxLoaderImportSpecifier(),
-					resolve(process.cwd(), "src/cli.ts"),
-					"--no-open",
-				],
-				{
-					cwd: projectPath,
-					env,
-					stdio: ["ignore", "pipe", "pipe", "ipc"],
-				},
-			);
-
-			try {
-				await waitForServerStart(serverProcess);
-
-				const inheritedCreate = await runCliCommandAndCollectOutput({
-					args: [
-						"task",
-						"create",
-						"--prompt",
-						"Create a task that inherits workspace reasoning",
-						"--project-path",
-						projectPath,
-						"--cline-reasoning-effort",
-						"inherit",
-					],
-					cwd: projectPath,
-					env,
-				});
-				expect(inheritedCreate.didExit).toBe(true);
-				expect(inheritedCreate.exitCode).toBe(0);
-
-				const inheritedPayload = JSON.parse(inheritedCreate.stdout) as {
-					ok?: boolean;
-					task?: { clineSettings?: Record<string, unknown> };
-				};
-				expect(inheritedPayload.ok).toBe(true);
-				expect(inheritedPayload.task?.clineSettings).toBeUndefined();
-
-				const defaultCreate = await runCliCommandAndCollectOutput({
-					args: [
-						"task",
-						"create",
-						"--prompt",
-						"Create a task that uses model default reasoning",
-						"--project-path",
-						projectPath,
-						"--cline-reasoning-effort",
-						"default",
-					],
-					cwd: projectPath,
-					env,
-				});
-				expect(defaultCreate.didExit).toBe(true);
-				expect(defaultCreate.exitCode).toBe(0);
-
-				const defaultPayload = JSON.parse(defaultCreate.stdout) as {
-					ok?: boolean;
-					task?: { clineSettings?: Record<string, unknown> };
-				};
-				expect(defaultPayload.ok).toBe(true);
-				expect(defaultPayload.task?.clineSettings).toEqual({});
 			} finally {
 				await requestGracefulShutdown(serverProcess);
 				const stopped = await waitForExit(serverProcess, 5_000);

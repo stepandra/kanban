@@ -37,6 +37,7 @@ export interface AgentAdapterLaunchInput {
 	resumeFromTrash?: boolean;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
+	projectPath?: string;
 }
 
 export type AgentOutputTransitionDetector = (
@@ -598,11 +599,19 @@ function withPrompt(args: string[], prompt: string, mode: "append" | "flag", fla
 	};
 }
 
-function withReviewSubmission(prompt: string, source: "grok" | "kimi"): string {
+function withReviewSubmission(prompt: string, input: AgentAdapterLaunchInput): string {
+	const projectPath = input.projectPath?.trim();
+	if (!projectPath) {
+		return prompt;
+	}
+	const command = buildKanbanCommandParts(["task", "submit", "--task-id", input.taskId, "--project-path", projectPath])
+		.map((part) => quoteShellArg(part))
+		.join(" ");
 	return [
 		prompt.trim(),
-		"When implementation and validation are complete, submit this Kanban task for review before your final response:",
-		buildHookCommand("to_review", { source }),
+		"When implementation and validation are complete, you are authorized to run this exact command before your final response:",
+		command,
+		"This submits the task for isolated review. Do not run `done`, commit, or push it yourself.",
 	].join("\n\n");
 }
 
@@ -725,7 +734,7 @@ const grokAdapter: AgentSessionAdapter = {
 		if (hooks) {
 			Object.assign(env, createHookRuntimeEnv(hooks));
 		}
-		const prompt = hooks ? withReviewSubmission(input.prompt, "grok") : input.prompt;
+		const prompt = input.prompt;
 		if (input.startInPlanMode) {
 			return {
 				binary: input.binary,
@@ -754,7 +763,7 @@ const kimiAdapter: AgentSessionAdapter = {
 		if (hooks) {
 			Object.assign(env, createHookRuntimeEnv(hooks));
 		}
-		const prompt = hooks ? withReviewSubmission(input.prompt, "kimi") : input.prompt;
+		const prompt = input.prompt;
 		if (input.startInPlanMode) {
 			if (!hasCliOption(args, "--plan")) {
 				args.push("--plan");
@@ -789,13 +798,16 @@ const ampAdapter: AgentSessionAdapter = {
 };
 
 function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): SessionTransitionEvent | null {
+	const stripped = stripAnsi(data);
+	if (summary.state === "running" && /Hooks need review|hooks? (?:is|are) new or changed/i.test(stripped)) {
+		return { type: "agent.attention-required" };
+	}
 	if (summary.state !== "awaiting_review") {
 		return null;
 	}
 	if (summary.reviewReason !== "attention" && summary.reviewReason !== "hook") {
 		return null;
 	}
-	const stripped = stripAnsi(data);
 	if (/(?:^|\n)\s*›/.test(stripped)) {
 		return { type: "agent.prompt-ready" };
 	}
@@ -804,8 +816,9 @@ function codexPromptDetector(data: string, summary: RuntimeTaskSessionSummary): 
 
 function shouldInspectCodexOutputForTransition(summary: RuntimeTaskSessionSummary): boolean {
 	return (
-		summary.state === "awaiting_review" &&
-		(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error")
+		summary.state === "running" ||
+		(summary.state === "awaiting_review" &&
+			(summary.reviewReason === "attention" || summary.reviewReason === "hook" || summary.reviewReason === "error"))
 	);
 }
 
@@ -1506,6 +1519,6 @@ export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promis
 	});
 	return await ADAPTERS[input.agentId].prepare({
 		...input,
-		prompt: preparedPrompt,
+		prompt: withReviewSubmission(preparedPrompt, input),
 	});
 }

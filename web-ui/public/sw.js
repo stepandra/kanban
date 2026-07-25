@@ -50,7 +50,7 @@ const FALLBACK_HTML = `<!doctype html>
     <line x1="12" x2="12.01" y1="16" y2="16"/>
   </svg>
   <h3>Waiting for Cline</h3>
-  <p>Run <code style="background:#2D3339;padding:2px 6px;border-radius:4px;font-size:13px">cline</code> in your terminal to start the server.</p>
+  <p>Run <code style="background:#2D3339;padding:2px 6px;border-radius:4px;font-size:13px">kanban</code> in your terminal to start the server.</p>
   <div class="spinner"></div>
   <p id="cert-hint" style="display:none;margin-top:12px;color:#D29922;font-size:13px;line-height:1.5;max-width:420px">
     Unable to connect. If you are using HTTPS with a self-signed certificate,<br/>

@@ -1,4 +1,4 @@
-// PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
+// PTY-backed runtime for agent task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
@@ -22,6 +22,7 @@ import {
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
+import { isBinaryAvailableOnPath } from "./command-discovery";
 import { stripAnsi } from "./output-utils";
 import { PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
@@ -33,6 +34,12 @@ import {
 } from "./terminal-protocol-filter";
 import type { TerminalSessionListener, TerminalSessionService } from "./terminal-session-service";
 import { TerminalStateMirror } from "./terminal-state-mirror";
+import {
+	buildZmxWorkspaceSessionPrefix,
+	createZmxSessionControl,
+	prepareZmxAgentSession,
+	type ZmxSessionControl,
+} from "./zmx-agent-session";
 
 const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const AUTO_RESTART_WINDOW_MS = 5_000;
@@ -50,6 +57,7 @@ type RestartableSessionRequest =
 
 interface ActiveProcessState {
 	session: PtySession;
+	durableSessionName: string | null;
 	workspaceTrustBuffer: string | null;
 	cols: number;
 	rows: number;
@@ -90,6 +98,7 @@ export interface StartTaskSessionRequest {
 	rows?: number;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
+	projectPath?: string;
 }
 
 export interface StartShellSessionRequest {
@@ -202,9 +211,27 @@ function hasCodexStartupUiRendered(text: string): boolean {
 	return stripped.includes("openai codex (v");
 }
 
+export interface TerminalSessionManagerOptions {
+	// Injectable so tests can stub zmx (an optional external binary). Defaults
+	// to the real zmx CLI control surface.
+	zmxControl?: ZmxSessionControl;
+	workspaceId?: string;
+	warn?: (message: string) => void;
+}
+
 export class TerminalSessionManager implements TerminalSessionService {
 	private readonly entries = new Map<string, SessionEntry>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
+	private readonly durableTaskIds = new Set<string>();
+	private readonly zmxControl: ZmxSessionControl;
+	private readonly workspaceSessionPrefix: string | null;
+	private readonly warn: (message: string) => void;
+
+	constructor(options?: TerminalSessionManagerOptions) {
+		this.zmxControl = options?.zmxControl ?? createZmxSessionControl();
+		this.workspaceSessionPrefix = buildZmxWorkspaceSessionPrefix(options?.workspaceId ?? "");
+		this.warn = options?.warn ?? ((message) => process.stderr.write(`[kanban] ${message}\n`));
+	}
 
 	private trySendDeferredStartupInput(taskId: string): boolean {
 		const entry = this.entries.get(taskId);
@@ -261,6 +288,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 				autoRestartTimestamps: [],
 				pendingAutoRestart: null,
 			});
+			// Repopulate durable-session tracking from the persisted record so a
+			// restarted runtime still knows this task is backed by a live zmx
+			// session (shutdown guard, stale-session recovery, reattach).
+			if (summary.durableSessionName) {
+				this.durableTaskIds.add(taskId);
+			} else {
+				this.durableTaskIds.delete(taskId);
+			}
+		}
+		// Reconcile against the real zmx daemon in the background: drop durable
+		// markers for sessions that died while the runtime was down and reap
+		// orphans. reconcileDurableSessions never rejects.
+		if (this.durableTaskIds.size > 0 || this.workspaceSessionPrefix) {
+			void this.reconcileDurableSessions();
 		}
 	}
 
@@ -271,6 +312,120 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return Array.from(this.entries.values()).map((entry) => cloneSummary(entry.summary));
+	}
+
+	isDurableTaskSession(taskId: string): boolean {
+		return this.durableTaskIds.has(taskId);
+	}
+
+	// Reconciles this manager's durable-session tracking against the live zmx
+	// daemon (called automatically from hydrateFromRecord after a runtime
+	// restart; also invoked directly by tests with a stubbed control).
+	//
+	// - A persisted durable session that is still present in `zmx list` stays
+	//   marked durable, so it remains reattachable and protected by the
+	//   shutdown guard.
+	// - A persisted durable session missing from `zmx list` died while the
+	//   runtime was down: the durable marker is cleared and an active-looking
+	//   summary is reset to idle so it no longer masquerades as reattachable.
+	// - DECISION: `kanban.*` zmx sessions belonging to this workspace that match
+	//   no known task are killed automatically (with a logged warning) rather
+	//   than left running. Orphaned sessions hold worktree directories open and
+	//   consume resources with no UI surface to reach them; leaking them forever
+	//   is worse than reaping them. The manager's workspace id scopes the prefix,
+	//   so sessions owned by other kanban workspaces are never touched. Deriving
+	//   a prefix from persisted sessions remains a fallback for callers that
+	//   construct a manager without workspace context.
+	//
+	// This method never rejects; list/kill failures are logged as warnings.
+	async reconcileDurableSessions(control?: ZmxSessionControl): Promise<void> {
+		// KANBAN_DURABLE_AGENT_SESSIONS=0 fully disables durable sessions,
+		// including any zmx interaction during reconciliation.
+		if (process.env.KANBAN_DURABLE_AGENT_SESSIONS === "0") {
+			return;
+		}
+		const zmx = control ?? (isBinaryAvailableOnPath("zmx") ? this.zmxControl : null);
+		if (!zmx) {
+			return;
+		}
+
+		let sessionNames: string[];
+		try {
+			sessionNames = await zmx.listSessionNames();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.warn(`Could not list zmx sessions for durable-session reconciliation. ${message}`);
+			return;
+		}
+		const liveSessionNames = new Set(sessionNames);
+
+		const workspacePrefixes = new Set<string>();
+		if (this.workspaceSessionPrefix) {
+			workspacePrefixes.add(this.workspaceSessionPrefix);
+		}
+		for (const taskId of this.durableTaskIds) {
+			const summary = this.entries.get(taskId)?.summary;
+			if (!summary?.durableSessionName || !summary.agentId) {
+				continue;
+			}
+			const agentMarker = `.${summary.agentId}.`;
+			const markerIndex = summary.durableSessionName.indexOf(agentMarker);
+			if (markerIndex > 0) {
+				workspacePrefixes.add(summary.durableSessionName.slice(0, markerIndex + 1));
+			}
+		}
+
+		for (const taskId of Array.from(this.durableTaskIds)) {
+			const entry = this.entries.get(taskId);
+			const sessionName = entry?.summary.durableSessionName;
+			if (!entry || !sessionName || liveSessionNames.has(sessionName)) {
+				continue;
+			}
+			this.durableTaskIds.delete(taskId);
+			const patch: Partial<RuntimeTaskSessionSummary> = {
+				durableSessionName: null,
+				pid: null,
+			};
+			if (isActiveState(entry.summary.state)) {
+				// The zmx session died while the runtime was down: surface the task
+				// as idle instead of leaving a stale "running" summary that cannot
+				// be reattached. Preserve agentId for trash-restore routing.
+				Object.assign(patch, {
+					state: "idle",
+					startedAt: null,
+					lastOutputAt: null,
+					reviewReason: null,
+				});
+			}
+			const summary = updateSummary(entry, patch);
+			for (const listener of entry.listeners.values()) {
+				listener.onState?.(cloneSummary(summary));
+			}
+			this.emitSummary(summary);
+		}
+
+		const knownSessionNames = new Set<string>();
+		for (const taskId of this.durableTaskIds) {
+			const sessionName = this.entries.get(taskId)?.summary.durableSessionName;
+			if (sessionName) {
+				knownSessionNames.add(sessionName);
+			}
+		}
+		for (const sessionName of sessionNames) {
+			if (!sessionName.startsWith("kanban.") || knownSessionNames.has(sessionName)) {
+				continue;
+			}
+			if (!Array.from(workspacePrefixes).some((prefix) => sessionName.startsWith(prefix))) {
+				continue;
+			}
+			try {
+				await zmx.killSession(sessionName);
+				this.warn(`Killed orphaned durable zmx session "${sessionName}" (no matching kanban task).`);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.warn(`Could not kill orphaned durable zmx session "${sessionName}". ${message}`);
+			}
+		}
 	}
 
 	attach(taskId: string, listener: TerminalSessionListener): (() => void) | null {
@@ -340,6 +495,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			resumeFromTrash: request.resumeFromTrash,
 			env: request.env,
 			workspaceId: request.workspaceId,
+			projectPath: request.projectPath,
 		});
 
 		const env = buildTerminalEnvironment(request.env, launch.env);
@@ -348,14 +504,37 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// (for example, Codex uses a wrapper script to watch session logs for hook transitions).
 		const commandBinary = launch.binary ?? request.binary;
 		const commandArgs = [...launch.args];
+		// Durable zmx sessions keep the agent alive across runtime restarts.
+		// Set KANBAN_DURABLE_AGENT_SESSIONS=0 to opt out entirely: agents then
+		// launch directly on the PTY and are interrupted on shutdown, and
+		// startup reconciliation leaves zmx untouched.
+		const zmxLaunch =
+			process.env.KANBAN_DURABLE_AGENT_SESSIONS === "0"
+				? null
+				: prepareZmxAgentSession({
+						agentId: request.agentId,
+						binary: commandBinary,
+						args: commandArgs,
+						taskId: request.taskId,
+						workspaceId: request.workspaceId,
+						zmxAvailable: isBinaryAvailableOnPath("zmx"),
+					});
+		if (zmxLaunch) {
+			// The Kanban runtime may itself live inside a durable zmx holder.
+			// A worker holder must start as a sibling, never inherit that parent
+			// session identity and become a nested attach to the runtime shell.
+			delete env.ZMX_SESSION;
+		}
+		const spawnBinary = zmxLaunch?.binary ?? commandBinary;
+		const spawnArgs = zmxLaunch?.args ?? commandArgs;
 		const hasCodexLaunchSignature = [commandBinary, ...commandArgs].some((part) =>
 			part.toLowerCase().includes("codex"),
 		);
 		let session: PtySession;
 		try {
 			session = PtySession.spawn({
-				binary: commandBinary,
-				args: commandArgs,
+				binary: spawnBinary,
+				args: spawnArgs,
 				cwd: request.cwd,
 				env,
 				cols,
@@ -460,6 +639,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
+					if (currentActive.session.wasDetached()) {
+						currentEntry.active = null;
+						return;
+					}
+					this.durableTaskIds.delete(request.taskId);
+					if (currentActive.durableSessionName) {
+						// The zmx session itself exited: the durable marker must not
+						// survive into the persisted record.
+						updateSummary(currentEntry, { durableSessionName: null });
+					}
 
 					const summary = this.applySessionEvent(currentEntry, {
 						type: "process.exit",
@@ -509,11 +698,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 				previousTurnCheckpoint: null,
 			});
 			this.emitSummary(summary);
-			throw new Error(formatSpawnFailure(commandBinary, error));
+			throw new Error(formatSpawnFailure(spawnBinary, error));
 		}
 
 		const active: ActiveProcessState = {
 			session,
+			durableSessionName: zmxLaunch?.sessionName ?? null,
 			workspaceTrustBuffer:
 				shouldAutoConfirmClaudeWorkspaceTrust(request.agentId, request.cwd) ||
 				shouldAutoConfirmCodexWorkspaceTrust(request.agentId, request.cwd) ||
@@ -534,6 +724,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			autoConfirmedWorkspaceTrust: false,
 			workspaceTrustConfirmTimer: null,
 		};
+		if (active.durableSessionName) {
+			this.durableTaskIds.add(request.taskId);
+		} else {
+			this.durableTaskIds.delete(request.taskId);
+		}
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
 
@@ -552,6 +747,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			warningMessage: null,
 			latestTurnCheckpoint: null,
 			previousTurnCheckpoint: null,
+			// Persisted so a restarted runtime can rehydrate durable-session
+			// tracking (see hydrateFromRecord / reconcileDurableSessions).
+			durableSessionName: active.durableSessionName,
 		});
 		this.emitSummary(entry.summary);
 
@@ -673,6 +871,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 		const active: ActiveProcessState = {
 			session,
+			durableSessionName: null,
 			workspaceTrustBuffer: null,
 			cols,
 			rows,
@@ -719,8 +918,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 
-		// Preserve agentId so the server can route to the correct agent type
-		// (Cline SDK vs terminal PTY) when a task is restored from trash.
+		if (this.durableTaskIds.has(taskId) && entry.summary.durableSessionName) {
+			// Detached but alive: the durable zmx session survived the runtime
+			// restart (hydrateFromRecord + reconcileDurableSessions verified it).
+			// Keep the active state so the task surfaces as reattachable instead
+			// of silently flipping to idle; startTaskSession reattaches to the
+			// live zmx session by name. Only the recorded pid is stale — it
+			// belonged to the previous runtime's zmx attach client.
+			const summary = updateSummary(entry, { pid: null });
+			for (const listener of entry.listeners.values()) {
+				listener.onState?.(cloneSummary(summary));
+			}
+			this.emitSummary(summary);
+			return cloneSummary(summary);
+		}
+
+		// Preserve agentId so the server can resume the task with the same
+		// agent runtime when it is restored from trash.
 		const summary = updateSummary(entry, {
 			state: "idle",
 			workspacePath: null,
@@ -921,34 +1135,63 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	stopTaskSession(taskId: string): RuntimeTaskSessionSummary | null {
+	async stopTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active) {
-			return entry ? cloneSummary(entry.summary) : null;
+		if (!entry) {
+			return null;
 		}
+		const active = entry.active;
+		const cleanupFn = active?.onSessionCleanup ?? null;
+		const previousSuppressAutoRestart = entry.suppressAutoRestartOnExit;
 		entry.suppressAutoRestartOnExit = true;
-		const cleanupFn = entry.active.onSessionCleanup;
-		entry.active.onSessionCleanup = null;
-		stopWorkspaceTrustTimers(entry.active);
-		entry.active.session.stop();
+		if (active) {
+			active.onSessionCleanup = null;
+			stopWorkspaceTrustTimers(active);
+		}
+		const sessionName = active?.durableSessionName ?? entry.summary.durableSessionName;
+		if (sessionName) {
+			try {
+				await this.zmxControl.killSession(sessionName);
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.warn(`Could not kill durable zmx session "${sessionName}" for task "${taskId}". ${message}`);
+				entry.suppressAutoRestartOnExit = previousSuppressAutoRestart;
+				if (active) {
+					active.onSessionCleanup = cleanupFn;
+				}
+				throw error;
+			}
+			updateSummary(entry, { durableSessionName: null });
+		}
+		this.durableTaskIds.delete(taskId);
+		if (active) {
+			active.session.stop();
+		}
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
 				// Best effort: cleanup failure is non-critical.
 			});
 		}
+		this.emitSummary(entry.summary);
 		return cloneSummary(entry.summary);
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
 		const activeEntries = Array.from(this.entries.values()).filter((entry) => entry.active != null);
+		const interruptedEntries: SessionEntry[] = [];
 		for (const entry of activeEntries) {
 			if (!entry.active) {
 				continue;
 			}
 			stopWorkspaceTrustTimers(entry.active);
+			if (entry.active.durableSessionName) {
+				entry.active.session.detach();
+				continue;
+			}
+			interruptedEntries.push(entry);
 			entry.active.session.stop({ interrupted: true });
 		}
-		return activeEntries.map((entry) => cloneSummary(entry.summary));
+		return interruptedEntries.map((entry) => cloneSummary(entry.summary));
 	}
 
 	private applySessionEvent(entry: SessionEntry, event: SessionTransitionEvent): RuntimeTaskSessionSummary {

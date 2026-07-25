@@ -94,3 +94,29 @@ export async function deleteTaskTurnCheckpointRef(input: { cwd: string; ref: str
 	const repoRoot = await runGit(input.cwd, ["rev-parse", "--show-toplevel"]);
 	await tryRunGit(repoRoot, ["update-ref", "-d", input.ref]);
 }
+
+/**
+ * Best effort wrapper around {@link captureTaskTurnCheckpoint}: computes the
+ * next turn from the latest known checkpoint and swallows failures, returning
+ * `null` when no checkpoint could be captured (e.g. jj workspaces or
+ * non-git cwds). Shared by session start and hook-driven review transitions.
+ */
+export async function captureBestEffortTurnCheckpoint(input: {
+	cwd: string;
+	taskId: string;
+	latestTurnCheckpoint: RuntimeTaskTurnCheckpoint | null | undefined;
+	capture?: (args: { cwd: string; taskId: string; turn: number }) => Promise<RuntimeTaskTurnCheckpoint>;
+}): Promise<RuntimeTaskTurnCheckpoint | null> {
+	const capture = input.capture ?? captureTaskTurnCheckpoint;
+	try {
+		const nextTurn = (input.latestTurnCheckpoint?.turn ?? 0) + 1;
+		return await capture({
+			cwd: input.cwd,
+			taskId: input.taskId,
+			turn: nextTurn,
+		});
+	} catch {
+		// Best effort checkpointing only.
+		return null;
+	}
+}

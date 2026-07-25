@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
@@ -8,11 +9,10 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
-	RuntimeClineReasoningEffort,
-	RuntimeTaskClineSettings,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
-import { runtimeAgentIdSchema, runtimeClineReasoningEffortSchema } from "../core/api-contract";
+import { runtimeAgentIdSchema } from "../core/api-contract";
+import { dispatchReviewFixer } from "../core/review-fixer";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
 	addTaskDependency,
@@ -31,6 +31,7 @@ import type { RuntimeAppRouter } from "../trpc/app-router";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
+const execFileAsync = promisify(execFile);
 type ListTaskColumn = (typeof LIST_TASK_COLUMNS)[number];
 type TaskCommandTarget = { taskId?: string; column?: ListTaskColumn };
 
@@ -99,131 +100,6 @@ function parseAgentId(value: string | undefined): RuntimeAgentId | null | undefi
 		return result.data;
 	}
 	throw new Error(`Invalid agent ID "${value}". Expected one of: ${VALID_AGENT_IDS.join(", ")}, default.`);
-}
-
-function parseOptionalStringOrDefault(value: string | undefined): string | null | undefined {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (value === "default") {
-		return null;
-	}
-	return value;
-}
-
-type ParsedTaskClineReasoningEffort = RuntimeClineReasoningEffort | "default" | null | undefined;
-
-function parseTaskClineReasoningEffort(value: string | undefined): ParsedTaskClineReasoningEffort {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (value === "inherit") {
-		return null;
-	}
-	if (value === "default") {
-		return "default";
-	}
-	const result = runtimeClineReasoningEffortSchema.safeParse(value);
-	if (result.success) {
-		return result.data;
-	}
-	throw new Error("Invalid Cline reasoning effort. Expected one of: default, low, medium, high, xhigh, inherit.");
-}
-
-function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTaskClineSettings | undefined {
-	if (settings === undefined) {
-		return undefined;
-	}
-	const providerId = settings.providerId?.trim();
-	const modelId = settings.modelId?.trim();
-	return {
-		...(providerId ? { providerId } : {}),
-		...(modelId ? { modelId } : {}),
-		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-	};
-}
-
-function formatTaskClineSettings(settings?: RuntimeTaskClineSettings): JsonRecord {
-	if (settings === undefined) {
-		return {};
-	}
-	return {
-		clineSettings: cloneTaskClineSettings(settings) ?? {},
-	};
-}
-
-function buildTaskClineSettingsForCreate(input: {
-	providerId?: string;
-	modelId?: string;
-	reasoningEffort?: ParsedTaskClineReasoningEffort;
-}): RuntimeTaskClineSettings | undefined {
-	const providerId = input.providerId?.trim();
-	const modelId = input.modelId?.trim();
-	const reasoningEffort = input.reasoningEffort === null ? undefined : input.reasoningEffort;
-	if (!providerId && !modelId && reasoningEffort === undefined) {
-		return undefined;
-	}
-	return {
-		...(providerId ? { providerId } : {}),
-		...(modelId ? { modelId } : {}),
-		...(reasoningEffort && reasoningEffort !== "default" ? { reasoningEffort } : {}),
-	};
-}
-
-function buildTaskClineSettingsForUpdate(
-	currentSettings: RuntimeTaskClineSettings | undefined,
-	input: {
-		providerId?: string | null;
-		modelId?: string | null;
-		reasoningEffort?: ParsedTaskClineReasoningEffort;
-	},
-): RuntimeTaskClineSettings | null | undefined {
-	if (input.providerId === undefined && input.modelId === undefined && input.reasoningEffort === undefined) {
-		return undefined;
-	}
-	const nextSettings = cloneTaskClineSettings(currentSettings) ?? {};
-	let preserveEmptyOverride = currentSettings !== undefined && Object.keys(currentSettings).length === 0;
-
-	if (input.providerId !== undefined) {
-		const providerId = input.providerId?.trim();
-		if (providerId) {
-			nextSettings.providerId = providerId;
-		} else {
-			delete nextSettings.providerId;
-		}
-	}
-
-	if (input.modelId !== undefined) {
-		const modelId = input.modelId?.trim();
-		if (modelId) {
-			nextSettings.modelId = modelId;
-		} else {
-			delete nextSettings.modelId;
-		}
-	}
-
-	if (input.reasoningEffort !== undefined) {
-		if (input.reasoningEffort === "default") {
-			delete nextSettings.reasoningEffort;
-			preserveEmptyOverride = true;
-		} else if (input.reasoningEffort === null) {
-			delete nextSettings.reasoningEffort;
-			preserveEmptyOverride = false;
-		} else {
-			nextSettings.reasoningEffort = input.reasoningEffort;
-		}
-	}
-
-	if (
-		nextSettings.providerId === undefined &&
-		nextSettings.modelId === undefined &&
-		nextSettings.reasoningEffort === undefined &&
-		!preserveEmptyOverride
-	) {
-		return null;
-	}
-
-	return nextSettings;
 }
 
 function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string): ResolvedTaskCommandTarget {
@@ -355,7 +231,6 @@ function formatTaskRecord(
 		autoReviewEnabled: task.autoReviewEnabled === true,
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		...(task.agentId ? { agentId: task.agentId } : {}),
-		...formatTaskClineSettings(task.clineSettings),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
 		session: session
@@ -471,11 +346,10 @@ async function stopTaskRuntimeSession(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
 	taskId: string,
 ): Promise<void> {
-	await runtimeClient.runtime.stopTaskSession
-		.mutate({
-			taskId,
-		})
-		.catch(() => null);
+	const stopped = await runtimeClient.runtime.stopTaskSession.mutate({ taskId });
+	if (!stopped.ok && stopped.error) {
+		throw new Error(`Could not stop task session "${taskId}": ${stopped.error}`);
+	}
 }
 
 async function deleteTaskWorkspace(
@@ -508,7 +382,6 @@ async function createTask(input: {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
-	clineSettings?: RuntimeTaskClineSettings;
 }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -528,7 +401,6 @@ async function createTask(input: {
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
-				clineSettings: input.clineSettings,
 				baseRef: resolvedBaseRef,
 			},
 			() => globalThis.crypto.randomUUID(),
@@ -552,7 +424,6 @@ async function createTask(input: {
 			autoReviewEnabled: created.autoReviewEnabled === true,
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
-			...formatTaskClineSettings(created.clineSettings),
 		},
 	};
 }
@@ -568,9 +439,6 @@ async function updateTaskCommand(input: {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId | null;
-	clineProviderId?: string | null;
-	clineModelId?: string | null;
-	clineReasoningEffort?: ParsedTaskClineReasoningEffort;
 }): Promise<JsonRecord> {
 	if (
 		input.title === undefined &&
@@ -579,10 +447,7 @@ async function updateTaskCommand(input: {
 		input.startInPlanMode === undefined &&
 		input.autoReviewEnabled === undefined &&
 		input.autoReviewMode === undefined &&
-		input.agentId === undefined &&
-		input.clineProviderId === undefined &&
-		input.clineModelId === undefined &&
-		input.clineReasoningEffort === undefined
+		input.agentId === undefined
 	) {
 		throw new Error("task update requires at least one field to change.");
 	}
@@ -595,12 +460,6 @@ async function updateTaskCommand(input: {
 		if (!taskRecord) {
 			throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
 		}
-		const nextTaskClineSettings = buildTaskClineSettingsForUpdate(taskRecord.task.clineSettings, {
-			providerId: input.clineProviderId,
-			modelId: input.clineModelId,
-			reasoningEffort: input.clineReasoningEffort,
-		});
-
 		const updatedTask = updateTask(runtimeState.board, input.taskId, {
 			title: input.title ?? taskRecord.task.title,
 			prompt: input.prompt ?? taskRecord.task.prompt,
@@ -609,7 +468,6 @@ async function updateTaskCommand(input: {
 			autoReviewEnabled: input.autoReviewEnabled ?? taskRecord.task.autoReviewEnabled === true,
 			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
-			clineSettings: nextTaskClineSettings,
 		});
 		if (!updatedTask.updated || !updatedTask.task) {
 			throw new Error(`Task "${input.taskId}" could not be updated.`);
@@ -696,7 +554,61 @@ async function unlinkTasks(input: { cwd: string; dependencyId: string; projectPa
 	};
 }
 
-async function startTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+async function enqueueTaskStart(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const runtimeState = await runtimeClient.workspace.getState.query();
+	const record = findTaskRecord(runtimeState, input.taskId);
+	if (!record) {
+		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+	}
+	if (record.columnId !== "backlog" && record.columnId !== "in_progress") {
+		throw new Error(
+			`Task "${input.taskId}" is in "${record.columnId}" and can only be started from backlog or in_progress.`,
+		);
+	}
+
+	const zjAgent = process.env.ZJ_AGENT_BIN ?? `${process.env.HOME}/.config/zellij/bin/zj-agent`;
+	let stdout: string;
+	try {
+		({ stdout } = await execFileAsync(
+			zjAgent,
+			[
+				"kanban-enqueue",
+				"--task-id",
+				record.task.id,
+				"--project-path",
+				workspaceRepoPath,
+				"--agent",
+				record.task.agentId ?? "codex",
+			],
+			{ encoding: "utf8", timeout: 10_000 },
+		));
+	} catch (error) {
+		throw new Error(`Could not enqueue task through Absurd: ${toErrorMessage(error)}`);
+	}
+
+	let orchestration: unknown;
+	try {
+		orchestration = JSON.parse(stdout);
+	} catch {
+		throw new Error("Absurd enqueue returned invalid JSON.");
+	}
+	return {
+		ok: true,
+		state: "queued",
+		task: {
+			id: record.task.id,
+			column: record.columnId,
+			agentId: record.task.agentId,
+			workspacePath: workspaceRepoPath,
+		},
+		orchestration,
+	};
+}
+
+async function startTaskDirect(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
@@ -718,10 +630,10 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 		throw new Error(`Task "${input.taskId}" could not be resolved.`);
 	}
 
-	const existingSession = runtimeState.sessions[task.id] ?? null;
-	const shouldStartSession = !existingSession || existingSession.state !== "running";
-
-	if (shouldStartSession) {
+	// startTaskSession is idempotent for a live manager and reattaches a durable
+	// zmx-backed session after a runtime restart. Do not trust a persisted
+	// "running" summary as proof that this process is still attached.
+	{
 		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
 			taskId: task.id,
 			baseRef: task.baseRef,
@@ -737,7 +649,6 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			startInPlanMode: task.startInPlanMode,
 			baseRef: task.baseRef,
 			agentId: task.agentId,
-			clineSettings: task.clineSettings,
 		});
 		if (!started.ok || !started.summary) {
 			throw new Error(started.error ?? "Could not start task session.");
@@ -898,66 +809,17 @@ async function transitionExternalTask(input: {
 	// Review handoff is owned by submit so a bare CLI transition cannot orphan a card.
 	// Fail-closed: column is already Review; surface handoff failure without rolling back.
 	if (input.action === "submit") {
-		result.reviewHandoff = handoffReviewToFixer({
-			taskId: input.taskId,
-			projectPath: workspaceRepoPath,
-			taskWorkspacePath: taskWorkspace.exists ? taskWorkspace.path : undefined,
-			title: taskTitle,
-			cwd: input.cwd,
-		});
+		result.reviewHandoff = {
+			...(await dispatchReviewFixer({
+				taskId: input.taskId,
+				projectPath: workspaceRepoPath,
+				taskWorkspacePath: taskWorkspace.exists ? taskWorkspace.path : undefined,
+				title: taskTitle,
+			})),
+		};
 	}
 
 	return result;
-}
-
-/**
- * Queue an isolated per-task Fixer after a task enters Review.
- * Never accepts the task here; Fixer/Integrator owns done/commit/push.
- */
-function handoffReviewToFixer(input: {
-	taskId: string;
-	projectPath: string;
-	taskWorkspacePath?: string;
-	title?: string;
-	cwd: string;
-}): JsonRecord {
-	const command = process.env.ZJ_AGENT_BIN?.trim() || "zj-agent";
-	const args = ["review-handoff", "--task-id", input.taskId, "--project-path", input.projectPath];
-	if (input.taskWorkspacePath) {
-		args.push("--task-workspace-path", input.taskWorkspacePath);
-	}
-	if (input.title) {
-		args.push("--title", input.title);
-	}
-	const result = spawnSync(command, args, {
-		cwd: input.cwd,
-		encoding: "utf8",
-		env: process.env,
-	});
-	if (result.error) {
-		const notFound = "code" in result.error && result.error.code === "ENOENT";
-		return {
-			ok: false,
-			error: notFound
-				? `${command} is not available on PATH; task is in review but its isolated Fixer was not queued`
-				: result.error.message,
-		};
-	}
-	if (result.status !== 0) {
-		const detail = (result.stderr || result.stdout || "").trim();
-		return {
-			ok: false,
-			error:
-				detail ||
-				`${command} review-handoff exited with code ${result.status ?? "unknown"}; task is in review but its isolated Fixer was not queued`,
-		};
-	}
-	const stdout = (result.stdout || "").trim();
-	try {
-		return stdout ? (JSON.parse(stdout) as JsonRecord) : { ok: true, action: "review_handoff" };
-	} catch {
-		return { ok: true, action: "review_handoff", raw: stdout };
-	}
 }
 
 interface TrashTaskExecutionResult {
@@ -1049,7 +911,7 @@ async function trashTaskById(input: {
 
 	const autoStartedTasks: JsonRecord[] = [];
 	for (const readyTaskId of mutation.value.readyTaskIds) {
-		const started = await startTask({
+		const started = await enqueueTaskStart({
 			cwd: input.cwd,
 			taskId: readyTaskId,
 			projectPath: input.projectPath,
@@ -1327,18 +1189,6 @@ export function registerTaskCommand(program: Command): void {
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")} | default.`)
-		.option(
-			"--cline-provider <id>",
-			'Cline provider override (e.g. anthropic, openai, cline). Use "default" for workspace default.',
-		)
-		.option(
-			"--cline-model <id>",
-			'Cline model override (e.g. claude-sonnet-4-20250514). Use "default" for workspace default.',
-		)
-		.option(
-			"--cline-reasoning-effort <level>",
-			"Cline reasoning effort override: default | low | medium | high | xhigh.",
-		)
 		.action(
 			async (options: {
 				title?: string;
@@ -1349,9 +1199,6 @@ export function registerTaskCommand(program: Command): void {
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
-				clineProvider?: string;
-				clineModel?: string;
-				clineReasoningEffort?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1365,11 +1212,6 @@ export function registerTaskCommand(program: Command): void {
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId) ?? undefined,
-							clineSettings: buildTaskClineSettingsForCreate({
-								providerId: parseOptionalStringOrDefault(options.clineProvider) ?? undefined,
-								modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
-								reasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
-							}),
 						}),
 				);
 			},
@@ -1387,15 +1229,6 @@ export function registerTaskCommand(program: Command): void {
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")}. Use "default" to clear.`)
-		.option(
-			"--cline-provider <id>",
-			'Cline provider override (e.g. anthropic, openai, cline). Use "default" to clear.',
-		)
-		.option("--cline-model <id>", 'Cline model override (e.g. claude-sonnet-4-20250514). Use "default" to clear.')
-		.option(
-			"--cline-reasoning-effort <level>",
-			'Cline reasoning effort override: default | low | medium | high | xhigh. Use "inherit" to clear.',
-		)
 		.action(
 			async (options: {
 				taskId: string;
@@ -1407,9 +1240,6 @@ export function registerTaskCommand(program: Command): void {
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
-				clineProvider?: string;
-				clineModel?: string;
-				clineReasoningEffort?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1424,9 +1254,6 @@ export function registerTaskCommand(program: Command): void {
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId),
-							clineProviderId: parseOptionalStringOrDefault(options.clineProvider),
-							clineModelId: parseOptionalStringOrDefault(options.clineModel),
-							clineReasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
 						}),
 				);
 			},
@@ -1579,17 +1406,35 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("start")
-		.description("Start a task session and move task to in_progress.")
+		.description("Queue a task session through durable orchestration.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.action(async (options: { taskId: string; projectPath?: string }) => {
 			await runTaskCommand(
 				async () =>
-					await startTask({
+					await enqueueTaskStart({
 						cwd: process.cwd(),
 						taskId: options.taskId,
 						projectPath: options.projectPath,
 					}),
 			);
+		});
+
+	task
+		.command("start-direct", { hidden: true })
+		.description("Internal Absurd worker entrypoint for starting a task session.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				if (!process.env.KANBAN_ABSURD_TASK_ID) {
+					throw new Error("start-direct requires KANBAN_ABSURD_TASK_ID.");
+				}
+				return await startTaskDirect({
+					cwd: process.cwd(),
+					taskId: options.taskId,
+					projectPath: options.projectPath,
+				});
+			});
 		});
 }

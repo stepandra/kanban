@@ -738,6 +738,17 @@ export async function loadIndexedJsonWorkspaceSnapshot(cwd: string): Promise<Run
 	});
 }
 
+export async function saveWorkspaceSessionSummary(cwd: string, summary: RuntimeTaskSessionSummary): Promise<void> {
+	const context = await loadWorkspaceContext(cwd);
+	await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
+		const sessions = await readWorkspaceSessions(context.workspaceId);
+		sessions[summary.taskId] = summary;
+		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), sessions, {
+			lock: null,
+		});
+	});
+}
+
 export async function saveWorkspaceState(
 	cwd: string,
 	payload: RuntimeWorkspaceStateSaveRequest,

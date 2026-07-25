@@ -8,12 +8,20 @@ import {
 	type SensorAPI,
 	type SnapDragActions,
 } from "@hello-pangea/dnd";
+import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
+import { ListChecks, SearchX } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { BoardBulkActionBar } from "@/components/board-bulk-action-bar";
 import { BoardColumn } from "@/components/board-column";
+import { BoardFilterControls } from "@/components/board-filter-controls";
 import { DependencyOverlay } from "@/components/dependencies/dependency-overlay";
 import { useDependencyLinking } from "@/components/dependencies/use-dependency-linking";
+import { Button } from "@/components/ui/button";
+import { useBoardFilter } from "@/hooks/use-board-filter";
+import { useBoardSelection } from "@/hooks/use-board-selection";
+import { useBoardSpatialNavigation } from "@/hooks/use-board-spatial-navigation";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { canCreateTaskDependency } from "@/state/board-state";
 import { findCardColumnId, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
@@ -53,7 +61,8 @@ export function KanbanBoard({
 	onDragEnd,
 	onRequestProgrammaticCardMoveReady,
 	workspacePath,
-	defaultClineModelId,
+	onMoveTasksToColumn,
+	isInteractionActive = true,
 }: {
 	data: BoardData;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -80,7 +89,8 @@ export function KanbanBoard({
 	onDragEnd: (result: DropResult) => void;
 	onRequestProgrammaticCardMoveReady?: (requestMove: RequestProgrammaticCardMove | null) => void;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
+	onMoveTasksToColumn?: (taskIds: string[], toColumnId: BoardColumnId) => void;
+	isInteractionActive?: boolean;
 }): React.ReactElement {
 	const dragOccurredRef = useRef(false);
 	const boardRef = useRef<HTMLElement>(null);
@@ -92,8 +102,14 @@ export function KanbanBoard({
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const [programmaticCardMoveInFlight, setProgrammaticCardMoveInFlight] =
 		useState<ProgrammaticCardMoveInFlight | null>(null);
+	// Read from latestDataRef so the callback identity stays stable across stream
+	// ticks; unstable identities here would defeat the memoized BoardCards.
+	const canLinkTasks = useCallback(
+		(fromTaskId: string, toTaskId: string) => canCreateTaskDependency(latestDataRef.current, fromTaskId, toTaskId),
+		[],
+	);
 	const dependencyLinking = useDependencyLinking({
-		canLinkTasks: (fromTaskId, toTaskId) => canCreateTaskDependency(data, fromTaskId, toTaskId),
+		canLinkTasks,
 		onCreateDependency,
 	});
 
@@ -368,6 +384,108 @@ export function KanbanBoard({
 		programmaticCardMoveInFlight?.toColumnId ??
 		(activeDragTaskId !== null && activeDragSourceColumnId === "backlog" ? "in_progress" : null);
 
+	const boardFilter = useBoardFilter();
+	const selection = useBoardSelection(data);
+
+	const visibleColumns = useMemo(() => {
+		if (!boardFilter.isFilterActive) {
+			return data.columns;
+		}
+		return data.columns.map((column) => ({
+			...column,
+			cards: column.cards.filter((card) => boardFilter.isCardVisible(card, taskSessions[card.id])),
+		}));
+	}, [boardFilter, data.columns, taskSessions]);
+
+	const visibleCardCount = useMemo(
+		() => visibleColumns.reduce((count, column) => count + column.cards.length, 0),
+		[visibleColumns],
+	);
+
+	const agentFilterOptions = useMemo(() => {
+		const labelByAgentId = new Map<string, string>();
+		let hasDefaultAgent = false;
+		for (const column of data.columns) {
+			for (const card of column.cards) {
+				if (!card.agentId) {
+					hasDefaultAgent = true;
+					continue;
+				}
+				if (!labelByAgentId.has(card.agentId)) {
+					labelByAgentId.set(card.agentId, getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId);
+				}
+			}
+		}
+		const options = [...labelByAgentId.entries()].map(([value, label]) => ({ value, label }));
+		if (hasDefaultAgent) {
+			options.unshift({ value: "", label: "Default agent" });
+		}
+		return options;
+	}, [data.columns]);
+
+	const selectedColumnCounts = useMemo(() => {
+		const selectedIds = selection.selectedTaskIdSet;
+		const counts = { backlog: 0, trash: 0, other: 0 };
+		for (const column of data.columns) {
+			for (const card of column.cards) {
+				if (!selectedIds.has(card.id)) {
+					continue;
+				}
+				if (column.id === "backlog") {
+					counts.backlog += 1;
+				} else if (column.id === "trash") {
+					counts.trash += 1;
+				} else {
+					counts.other += 1;
+				}
+			}
+		}
+		return counts;
+	}, [data.columns, selection.selectedTaskIdSet]);
+
+	const handleCardSelect = useCallback(
+		(card: BoardCard) => {
+			if (!dragOccurredRef.current) {
+				onCardSelect(card.id);
+			}
+		},
+		[onCardSelect],
+	);
+
+	const handleActivateCard = useCallback(
+		(card: BoardCard, columnId: BoardColumnId) => {
+			if (columnId === "trash") {
+				return;
+			}
+			if (columnId === "backlog") {
+				onEditTask?.(card);
+				return;
+			}
+			handleCardSelect(card);
+		},
+		[handleCardSelect, onEditTask],
+	);
+
+	const { focusedTaskId } = useBoardSpatialNavigation({
+		columns: visibleColumns,
+		enabled: isInteractionActive,
+		hasSelection: selection.selectedTaskIds.length > 0,
+		onClearSelection: selection.clearSelection,
+		onActivateCard: handleActivateCard,
+	});
+
+	const handleBulkMoveToColumn = useCallback(
+		(toColumnId: BoardColumnId) => {
+			const taskIds = selection.selectedTaskIds;
+			if (taskIds.length === 0) {
+				return;
+			}
+			onMoveTasksToColumn?.(taskIds, toColumnId);
+			selection.clearSelection();
+		},
+		[onMoveTasksToColumn, selection],
+	);
+
 	return (
 		<DragDropContext
 			onBeforeCapture={handleBeforeCapture}
@@ -375,59 +493,105 @@ export function KanbanBoard({
 			onDragEnd={handleDragEnd}
 			sensors={[programmaticSensor]}
 		>
-			<section
-				ref={boardRef}
-				className="kb-board kb-dependency-surface"
-				data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
-			>
-				{data.columns.map((column) => (
-					<BoardColumn
-						key={column.id}
-						column={column}
-						taskSessions={taskSessions}
-						onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
-						onStartTask={column.id === "backlog" ? onStartTask : undefined}
-						onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}
-						onClearTrash={column.id === "trash" ? onClearTrash : undefined}
-						editingTaskId={column.id === "backlog" ? editingTaskId : null}
-						inlineTaskEditor={column.id === "backlog" ? inlineTaskEditor : undefined}
-						onEditTask={column.id === "backlog" ? onEditTask : undefined}
-						onSaveTitle={column.id !== "trash" ? onSaveTaskTitle : undefined}
-						onCommitTask={column.id === "review" ? onCommitTask : undefined}
-						onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
-						onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
-						onMoveToTrashTask={column.id === "review" ? onMoveToTrashTask : undefined}
-						onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
-						commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
-						openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
-						moveToTrashLoadingById={column.id === "review" ? moveToTrashLoadingById : undefined}
-						activeDragTaskId={activeDragTaskId}
-						activeDragSourceColumnId={activeDragSourceColumnId}
-						programmaticCardMoveInFlight={programmaticCardMoveInFlight}
-						onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
-						onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
-						dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
-						dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
-						isDependencyLinking={dependencyLinking.draft !== null}
-						workspacePath={workspacePath}
-						defaultClineModelId={defaultClineModelId}
-						onCardClick={(card) => {
-							if (!dragOccurredRef.current) {
-								onCardSelect(card.id);
-							}
-						}}
+			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+				<div className="flex items-center justify-between gap-2 px-2 pt-2">
+					<BoardFilterControls
+						query={boardFilter.query}
+						onQueryChange={boardFilter.setQuery}
+						agentId={boardFilter.agentId}
+						onAgentIdChange={boardFilter.setAgentId}
+						sessionState={boardFilter.sessionState}
+						onSessionStateChange={boardFilter.setSessionState}
+						agentOptions={agentFilterOptions}
+						isBoardActive={isInteractionActive}
 					/>
-				))}
-				<DependencyOverlay
-					containerRef={boardRef}
-					dependencies={dependencies}
-					draft={dependencyLinking.draft}
-					activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
-					activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
-					isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
-					onDeleteDependency={onDeleteDependency}
-				/>
-			</section>
+					{selection.selectedTaskIds.length > 0 ? (
+						<BoardBulkActionBar
+							selectedCount={selection.selectedTaskIds.length}
+							canStart={selectedColumnCounts.backlog > 0}
+							canMoveToReview={selectedColumnCounts.trash > 0}
+							canMoveToTrash={selectedColumnCounts.backlog + selectedColumnCounts.other > 0}
+							onMoveToColumn={handleBulkMoveToColumn}
+							onClearSelection={selection.clearSelection}
+						/>
+					) : (
+						<Button
+							size="sm"
+							variant={selection.isSelectionMode ? "default" : "ghost"}
+							icon={<ListChecks size={14} />}
+							aria-pressed={selection.isSelectionMode}
+							onClick={() => selection.setIsSelectionMode(!selection.isSelectionMode)}
+						>
+							{selection.isSelectionMode ? "Done" : "Select"}
+						</Button>
+					)}
+				</div>
+				<div className="relative flex min-h-0 min-w-0 flex-1">
+					<section
+						ref={boardRef}
+						className="kb-board kb-dependency-surface"
+						data-programmatic-card-move={programmaticCardMoveInFlight ? "true" : undefined}
+					>
+						{visibleColumns.map((column) => (
+							<BoardColumn
+								key={column.id}
+								column={column}
+								taskSessions={taskSessions}
+								onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
+								onStartTask={column.id === "backlog" ? onStartTask : undefined}
+								onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}
+								onClearTrash={column.id === "trash" ? onClearTrash : undefined}
+								editingTaskId={column.id === "backlog" ? editingTaskId : null}
+								inlineTaskEditor={column.id === "backlog" ? inlineTaskEditor : undefined}
+								onEditTask={column.id === "backlog" ? onEditTask : undefined}
+								onSaveTitle={column.id !== "trash" ? onSaveTaskTitle : undefined}
+								onCommitTask={column.id === "review" ? onCommitTask : undefined}
+								onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
+								onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
+								onMoveToTrashTask={column.id === "review" ? onMoveToTrashTask : undefined}
+								onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
+								commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
+								openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
+								moveToTrashLoadingById={column.id === "review" ? moveToTrashLoadingById : undefined}
+								activeDragTaskId={activeDragTaskId}
+								activeDragSourceColumnId={activeDragSourceColumnId}
+								programmaticCardMoveInFlight={programmaticCardMoveInFlight}
+								onDependencyPointerDown={dependencyLinking.onDependencyPointerDown}
+								onDependencyPointerEnter={dependencyLinking.onDependencyPointerEnter}
+								dependencySourceTaskId={dependencyLinking.draft?.sourceTaskId ?? null}
+								dependencyTargetTaskId={dependencyLinking.draft?.targetTaskId ?? null}
+								isDependencyLinking={dependencyLinking.draft !== null}
+								workspacePath={workspacePath}
+								selectedTaskIds={selection.selectedTaskIdSet}
+								keyboardFocusedTaskId={focusedTaskId}
+								isSelectionMode={selection.isSelectionMode}
+								onToggleCardSelected={selection.toggleTaskSelected}
+								onCardClick={handleCardSelect}
+							/>
+						))}
+						<DependencyOverlay
+							containerRef={boardRef}
+							dependencies={dependencies}
+							draft={dependencyLinking.draft}
+							activeTaskId={activeDragTaskId ?? programmaticCardMoveInFlight?.taskId ?? null}
+							activeTaskEffectiveColumnId={activeTaskEffectiveColumnId}
+							isMotionActive={activeDragTaskId !== null || programmaticCardMoveInFlight !== null}
+							onDeleteDependency={onDeleteDependency}
+						/>
+					</section>
+					{boardFilter.isFilterActive && visibleCardCount === 0 ? (
+						<div className="absolute inset-0 flex items-center justify-center">
+							<div className="flex flex-col items-center gap-3 text-text-tertiary">
+								<SearchX size={32} strokeWidth={1} />
+								<p className="m-0 text-sm text-text-secondary">No tasks match the current filters.</p>
+								<Button size="sm" variant="default" onClick={boardFilter.clearFilter}>
+									Clear filters
+								</Button>
+							</div>
+						</div>
+					) : null}
+				</div>
+			</div>
 		</DragDropContext>
 	);
 }

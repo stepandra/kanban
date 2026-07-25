@@ -29,6 +29,7 @@ function createMockPtySession(pid: number, request: MockSpawnRequest) {
 		resume: vi.fn(),
 		stop: vi.fn(),
 		wasInterrupted: vi.fn(() => false),
+		wasDetached: vi.fn(() => false),
 		triggerData: (chunk: string | Buffer) => {
 			request.onData?.(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
 		},
@@ -107,7 +108,7 @@ describe("TerminalSessionManager auto-restart", () => {
 			prompt: "Fix the bug",
 		});
 
-		manager.stopTaskSession("task-1");
+		await manager.stopTaskSession("task-1");
 		spawnedSessions[0]?.triggerExit(0);
 		await Promise.resolve();
 		await Promise.resolve();

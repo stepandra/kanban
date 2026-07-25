@@ -2,17 +2,16 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
-import type { PluginAPI } from "@ampcode/plugin";
+import type { PluginAPI, ThreadTextBlock } from "@ampcode/plugin";
 
 const KANBAN_TOOL_NAME = "kanban_tasks";
 const KANBAN_BIN_ENV = "KANBAN_BIN";
-const ZJ_AGENT_BIN_ENV = "ZJ_AGENT_BIN";
-const INTERACTIVE_ZELLIJ_AGENTS = new Set(["claude", "codex", "grok", "kimi"]);
 const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
+const AMP_WATCH_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const KANBAN_CONTEXT = `[stepandra/kanban]
 In this environment, Kanban means the installed stepandra/kanban fork of cline/kanban, not upstream cline/kanban and not Hermes.
 The kanban_tasks tool and local kanban CLI are the durable source of truth for tasks, dependencies, task workspaces, review, and acceptance.
-Interactive Codex, Claude, Grok, and Kimi task execution is handed to the zj-agent native Zellij controller after Kanban prepares the task workspace.
+Interactive Codex, Claude, Grok, and Kimi execution is owned by Kanban's terminal runtime; Zellij is only a replaceable view of durable sessions.
 Submitting a task to Review hands it to an isolated per-task Fixer Amp thread; the worker never accepts its own task.`;
 
 interface KanbanTask {
@@ -20,14 +19,35 @@ interface KanbanTask {
 	prompt: string;
 	title?: string;
 	agentId?: string;
+	column?: string;
 	startInPlanMode?: boolean;
 	taskWorkspacePath?: string;
 	taskWorkspaceExists?: boolean;
 }
 
-interface PreparedKanbanTask extends KanbanTask {
-	projectPath: string;
-	taskWorkspacePath: string;
+/**
+ * In-process registry of active Amp Orb thread watches, keyed by Kanban task
+ * id. The watch itself cannot be aborted (`PluginThread.waitForResponse` takes
+ * no signal), so cancellation resolves a per-watch promise that the watcher
+ * races against the response; the registry is the cancellation surface used by
+ * task lifecycle mutations (submit/done/delete) coming through the kanban_tasks
+ * tool.
+ */
+interface AmpTaskWatchRegistry {
+	/** Registers a watch for a task, cancelling any previous watch for it. */
+	register(taskId: string, threadId: string): RegisteredAmpTaskWatch;
+	/** Ends the watch for one task. Returns false when no watch is active. */
+	cancelForTask(taskId: string, reason: string): boolean;
+	/** Ends watches whose task is no longer in progress; returns their task ids. */
+	cancelOutsideInProgress(inProgressTaskIds: ReadonlySet<string>, reason: string): string[];
+	size(): number;
+}
+
+interface RegisteredAmpTaskWatch {
+	/** Resolves with the cancellation reason when the watch is ended early. */
+	readonly cancelled: Promise<string>;
+	/** Detaches this watch from the registry without cancelling replacements. */
+	release(): void;
 }
 
 type ProcessResult = {
@@ -39,6 +59,14 @@ type ProcessResult = {
 
 export default function (amp: PluginAPI): void {
 	const mediumAgent = amp.getBuiltinAgent("medium");
+	const watches = createAmpTaskWatchRegistry();
+
+	// Watches live only in this plugin process: a plugin reload or Amp restart
+	// kills them without touching the board, so the Orb thread's result is
+	// never submitted. Re-watching on startup is impossible because the
+	// completion receipt is generated per `start` and never persisted, and the
+	// board does not record the Orb thread id. Report the orphans instead.
+	void reportOrphanedAmpWatches(amp);
 
 	amp.on("agent.start", async () => ({
 		message: {
@@ -108,12 +136,15 @@ export default function (amp: PluginAPI): void {
 						parentThreadID: ctx.thread.id,
 						executor: "orb",
 					});
-					await runKanbanChecked(["task", "claim", "--task-id", taskId, "--project-path", workspacePath], workspacePath);
+					// Amp work still needs a concrete task workspace so submit can hand
+					// the exact path to its isolated Fixer. `prepare` is idempotent for
+					// backlog/in-progress/review cards and also performs the claim.
+					await runKanbanChecked(["task", "prepare", "--task-id", taskId, "--project-path", workspacePath], workspacePath);
 					await thread.appendUserMessage({
 						type: "user-message",
 						content: buildAmpTaskPrompt(task, completionReceipt),
 					});
-					void watchAmpTask(amp, thread, taskId, workspacePath, completionReceipt);
+					void watchAmpTask(amp, watches, thread, taskId, workspacePath, completionReceipt);
 					return JSON.stringify({
 						ok: true,
 						taskId,
@@ -123,32 +154,6 @@ export default function (amp: PluginAPI): void {
 						threadId: thread.id,
 					});
 				}
-				if (task.agentId && INTERACTIVE_ZELLIJ_AGENTS.has(task.agentId)) {
-					await runZjAgentChecked(["controller", "inspect", task.agentId], workspacePath);
-					const prepared = await prepareInteractiveTask(taskId, workspacePath);
-					const workerPrompt = buildInteractiveTaskPrompt(prepared);
-					const result = await runZjAgentChecked(
-						[
-							"controller",
-							"spawn",
-							"--agent",
-							task.agentId,
-							"--lane",
-							task.agentId,
-							"--cwd",
-							prepared.taskWorkspacePath,
-							"--task-id",
-							taskId,
-							"--project-path",
-							workspacePath,
-							"--prompt-file",
-							"-",
-						],
-						workspacePath,
-						prepared.startInPlanMode ? `/plan ${workerPrompt}` : workerPrompt,
-					);
-					return result.stdout.trim() || "Interactive Zellij worker started.";
-				}
 			}
 			const transitionedTask =
 				(action === "submit" || action === "done") && typeof input.taskId === "string"
@@ -156,6 +161,11 @@ export default function (amp: PluginAPI): void {
 					: undefined;
 			const args = buildTaskArgs(input, workspacePath);
 			const result = await runKanbanChecked(args, workspacePath);
+			// A task submitted, done, or trashed through this tool must end its Orb
+			// watch, or the watcher would later submit a stale receipt.
+			if (action === "submit" || action === "done" || action === "delete") {
+				await endAmpTaskWatches(amp, watches, action, input, workspacePath);
+			}
 			// `kanban task submit` owns the isolated per-task review handoff (fail-closed in CLI).
 			// Surface a failed handoff from the CLI JSON when present; do not double-nudge.
 			if (action === "submit") {
@@ -163,19 +173,6 @@ export default function (amp: PluginAPI): void {
 				if (handoffStatus && handoffStatus.ok === false) {
 					amp.logger.log(
 						`Kanban submitted task ${transitionedTask?.id ?? "unknown"} to review, but its isolated Fixer handoff failed: ${String(handoffStatus.error ?? "unknown")}`,
-					);
-				}
-			}
-			if (transitionedTask?.agentId && INTERACTIVE_ZELLIJ_AGENTS.has(transitionedTask.agentId)) {
-				const controllerAction = action === "submit" ? "review" : "release";
-				try {
-					await runZjAgentChecked(
-						["controller", controllerAction, "--task-id", transitionedTask.id],
-						workspacePath,
-					);
-				} catch (error) {
-					amp.logger.log(
-						`Kanban moved task ${transitionedTask.id} with ${action}, but its Zellij lane could not enter ${controllerAction}: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
 			}
@@ -332,7 +329,7 @@ async function runKanbanChecked(args: string[], cwd: string): Promise<ProcessRes
 	return result;
 }
 
-async function getTask(taskId: string, workspacePath: string): Promise<KanbanTask> {
+async function listKanbanTasks(workspacePath: string): Promise<KanbanTask[]> {
 	const result = await runKanbanChecked(["task", "list", "--project-path", workspacePath], workspacePath);
 	let payload: unknown;
 	try {
@@ -343,39 +340,17 @@ async function getTask(taskId: string, workspacePath: string): Promise<KanbanTas
 	if (!isRecord(payload) || !Array.isArray(payload.tasks)) {
 		throw new Error("Kanban task list response is missing tasks.");
 	}
-	const task = payload.tasks.find((candidate): candidate is KanbanTask => {
-		return isRecord(candidate) && candidate.id === taskId && typeof candidate.prompt === "string";
+	return payload.tasks.filter((candidate): candidate is KanbanTask => {
+		return isRecord(candidate) && typeof candidate.id === "string" && typeof candidate.prompt === "string";
 	});
+}
+
+async function getTask(taskId: string, workspacePath: string): Promise<KanbanTask> {
+	const task = (await listKanbanTasks(workspacePath)).find((candidate) => candidate.id === taskId);
 	if (!task) {
 		throw new Error(`Kanban task "${taskId}" was not found.`);
 	}
 	return task;
-}
-
-async function prepareInteractiveTask(taskId: string, workspacePath: string): Promise<PreparedKanbanTask> {
-	const result = await runKanbanChecked(
-		["task", "prepare", "--task-id", taskId, "--project-path", workspacePath],
-		workspacePath,
-	);
-	let payload: unknown;
-	try {
-		payload = JSON.parse(result.stdout);
-	} catch {
-		throw new Error("Kanban returned invalid JSON while preparing the task workspace.");
-	}
-	if (!isRecord(payload) || !isRecord(payload.task)) {
-		throw new Error("Kanban task prepare response is missing the task.");
-	}
-	const task = payload.task;
-	if (
-		typeof task.id !== "string" ||
-		typeof task.prompt !== "string" ||
-		typeof task.projectPath !== "string" ||
-		typeof task.taskWorkspacePath !== "string"
-	) {
-		throw new Error("Kanban task prepare response has an invalid task shape.");
-	}
-	return task as unknown as PreparedKanbanTask;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -396,42 +371,152 @@ function buildAmpTaskPrompt(task: KanbanTask, completionReceipt: string): string
 	].join("\n\n");
 }
 
-function buildInteractiveTaskPrompt(task: PreparedKanbanTask): string {
-	const submitCommand = [
-		"kanban task submit",
-		`--task-id ${shellQuote(task.id)}`,
-		`--project-path ${shellQuote(task.projectPath)}`,
-	].join(" ");
-	return [
-		"Role: bounded implementation worker in an interactive Zellij lane.",
-		`Goal: ${task.title?.trim() || task.prompt.trim()}`,
-		`Scope: implement only this Kanban task in the current task workspace.\n\n${task.prompt.trim()}`,
-		"Non-goals: do not create, accept, or mark Kanban tasks done; do not broaden scope or modify unrelated work.",
-		"Expected output: the implementation, the narrowest relevant validation, and a concise handoff with files changed and any blocker.",
-		"Shared-host validation budget: run exact affected tests first (cap Vitest at 2 workers); run a package-wide test suite or production build at most once, only after focused checks pass, and never loop on a saturated or stalled full check. Report shared-host contention honestly instead of spending the task budget rerunning it.",
-		"Timeout/budget: one bounded implementation run; stop and report instead of silently broadening scope or looping on a failed check.",
-		"Read/write authority: you may edit only files needed for this task. Preserve concurrent user and agent changes.",
-		`When and only when implementation and validation are complete, submit the task for review with:\n${submitCommand}`,
-		"That submit moves the card to Review and automatically queues an isolated per-task Fixer thread; do not call review-handoff yourself unless submit reports handoff failure.",
-		`Then update the ephemeral cockpit indicator (best effort only):\nzj-agent controller review --task-id ${shellQuote(task.id)} || true`,
-		"If blocked, incomplete, cancelled, or validation fails, leave the task in progress and report the blocker. Never run `kanban task done`; acceptance belongs to the reviewer.",
-	].join("\n\n");
+export function createAmpTaskWatchRegistry(): AmpTaskWatchRegistry {
+	interface WatchEntry {
+		threadId: string;
+		cancel(reason: string): void;
+	}
+	const watches = new Map<string, WatchEntry>();
+	return {
+		register(taskId, threadId) {
+			watches.get(taskId)?.cancel(`replaced by Amp Orb thread ${threadId}`);
+			let resolveCancelled: (reason: string) => void = () => undefined;
+			const cancelled = new Promise<string>((resolve) => {
+				resolveCancelled = resolve;
+			});
+			const entry: WatchEntry = {
+				threadId,
+				cancel: (reason) => {
+					if (watches.get(taskId) === entry) {
+						watches.delete(taskId);
+					}
+					resolveCancelled(reason);
+				},
+			};
+			watches.set(taskId, entry);
+			return {
+				cancelled,
+				release() {
+					if (watches.get(taskId) === entry) {
+						watches.delete(taskId);
+					}
+				},
+			};
+		},
+		cancelForTask(taskId, reason) {
+			const entry = watches.get(taskId);
+			if (!entry) {
+				return false;
+			}
+			entry.cancel(reason);
+			return true;
+		},
+		cancelOutsideInProgress(inProgressTaskIds, reason) {
+			const cancelledTaskIds: string[] = [];
+			for (const [taskId, entry] of watches) {
+				if (!inProgressTaskIds.has(taskId)) {
+					entry.cancel(reason);
+					cancelledTaskIds.push(taskId);
+				}
+			}
+			return cancelledTaskIds;
+		},
+		size: () => watches.size,
+	};
+}
+
+export function hasCompletionReceipt(text: string, completionReceipt: string): boolean {
+	return text.trimEnd().endsWith(completionReceipt);
+}
+
+/** In-progress tasks owned by Amp Orb threads; used for the restart orphan report. */
+export function findOrphanedAmpTaskIds(tasks: KanbanTask[]): string[] {
+	return tasks.filter((task) => task.column === "in_progress" && task.agentId === "amp").map((task) => task.id);
+}
+
+async function reportOrphanedAmpWatches(amp: PluginAPI): Promise<void> {
+	try {
+		const workspaceRoot = amp.system.workspaceRoot;
+		if (!workspaceRoot) {
+			return;
+		}
+		const workspacePath = amp.helpers.filePathFromURI(workspaceRoot);
+		const orphanedTaskIds = findOrphanedAmpTaskIds(await listKanbanTasks(workspacePath));
+		if (orphanedTaskIds.length === 0) {
+			return;
+		}
+		amp.logger.log(
+			`Kanban plugin restarted; no Amp Orb watch is attached to in-progress task(s) ${orphanedTaskIds.join(", ")}. If an Orb thread finished, submit it manually with the ${KANBAN_TOOL_NAME} tool (action=submit).`,
+		);
+	} catch (error) {
+		amp.logger.log(
+			`Kanban plugin could not check for orphaned Amp Orb watches: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+async function endAmpTaskWatches(
+	amp: PluginAPI,
+	watches: AmpTaskWatchRegistry,
+	action: string,
+	input: Record<string, unknown>,
+	workspacePath: string,
+): Promise<void> {
+	if (watches.size() === 0) {
+		return;
+	}
+	const reason = `task ${action} through the ${KANBAN_TOOL_NAME} tool`;
+	const taskId = optionalString(input.taskId);
+	if (taskId) {
+		if (watches.cancelForTask(taskId, reason)) {
+			amp.logger.log(`Ended the Amp Orb watch for Kanban task ${taskId}: ${reason}.`);
+		}
+		return;
+	}
+	// Bulk column targets (done/delete --column) can move a watched task off the
+	// board; refresh once and end any watch whose task left in_progress.
+	try {
+		const inProgressTaskIds = new Set(
+			(await listKanbanTasks(workspacePath)).filter((task) => task.column === "in_progress").map((task) => task.id),
+		);
+		const endedTaskIds = watches.cancelOutsideInProgress(inProgressTaskIds, reason);
+		if (endedTaskIds.length > 0) {
+			amp.logger.log(`Ended the Amp Orb watch for Kanban task(s) ${endedTaskIds.join(", ")}: ${reason}.`);
+		}
+	} catch (error) {
+		amp.logger.log(
+			`Kanban could not refresh Amp Orb watches after bulk ${action}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 async function watchAmpTask(
 	amp: PluginAPI,
+	watches: AmpTaskWatchRegistry,
 	thread: Awaited<ReturnType<ReturnType<PluginAPI["getBuiltinAgent"]>["createThread"]>>,
 	taskId: string,
 	workspacePath: string,
 	completionReceipt: string,
 ): Promise<void> {
+	const watch = watches.register(taskId, thread.id);
 	try {
-		const response = await thread.waitForResponse({ timeoutMs: 24 * 60 * 60 * 1_000 });
+		// `waitForResponse` has no abort signal, so race it against cancellation.
+		// `Promise.race` keeps handlers on the loser, so a late rejection (the
+		// 24h timeout firing after cancellation) cannot surface as an unhandled
+		// rejection; the pending wait simply outlives the watch until then.
+		const response = await Promise.race([
+			thread.waitForResponse({ timeoutMs: AMP_WATCH_TIMEOUT_MS }),
+			watch.cancelled.then((reason) => ({ cancelled: reason })),
+		]);
+		if ("cancelled" in response) {
+			amp.logger.log(`Amp Orb watch for Kanban task ${taskId} ended: ${response.cancelled}.`);
+			return;
+		}
 		const text = response.content
-			.filter((block) => block.type === "text")
+			.filter((block): block is ThreadTextBlock => block.type === "text")
 			.map((block) => block.text)
 			.join("\n");
-		if (!text.trimEnd().endsWith(completionReceipt)) {
+		if (!hasCompletionReceipt(text, completionReceipt)) {
 			amp.logger.log(`Amp Orb thread ${thread.id} left Kanban task ${taskId} in progress.`);
 			return;
 		}
@@ -451,6 +536,8 @@ async function watchAmpTask(
 		amp.logger.log(
 			`Amp Orb thread ${thread.id} did not submit Kanban task ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
 		);
+	} finally {
+		watch.release();
 	}
 }
 
@@ -474,18 +561,6 @@ async function runKanban(args: string[], cwd: string): Promise<ProcessResult> {
 	);
 }
 
-async function runZjAgentChecked(args: string[], cwd: string, stdin?: string): Promise<ProcessResult> {
-	const command = process.env[ZJ_AGENT_BIN_ENV]?.trim() || "zj-agent";
-	const result = await runProcess(command, args, cwd, stdin);
-	if (result.notFound) {
-		throw new Error(`${command} is not available on Amp's PATH.`);
-	}
-	if (result.exitCode !== 0) {
-		throw new Error(result.stderr.trim() || result.stdout.trim() || `zj-agent exited with code ${result.exitCode}.`);
-	}
-	return result;
-}
-
 function parseReviewHandoffStatus(stdout: string): { ok?: boolean; error?: unknown } | undefined {
 	const trimmed = stdout.trim();
 	if (!trimmed) {
@@ -499,10 +574,6 @@ function parseReviewHandoffStatus(stdout: string): { ok?: boolean; error?: unkno
 	}
 }
 
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
 async function runProcess(command: string, args: string[], cwd: string, stdin?: string): Promise<ProcessResult> {
 	return await new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
@@ -513,6 +584,11 @@ async function runProcess(command: string, args: string[], cwd: string, stdin?: 
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
+
+		if (!child.stdout || !child.stderr) {
+			reject(new Error("Kanban process did not expose stdout/stderr."));
+			return;
+		}
 
 		child.stdout.setEncoding("utf8");
 		child.stderr.setEncoding("utf8");

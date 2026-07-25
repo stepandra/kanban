@@ -1,6 +1,7 @@
 import { useHotkeys } from "react-hotkeys-hook";
 
 import type { CardSelection } from "@/types";
+import { isTypingTarget } from "@/utils/keyboard-target";
 
 function isEventInsideDialog(target: EventTarget | null): boolean {
 	return target instanceof Element && target.closest("[role='dialog']") !== null;
@@ -20,6 +21,7 @@ interface UseAppHotkeysInput {
 	handleOpenSettings: () => void;
 	handleToggleGitHistory: () => void;
 	handleCloseGitHistory: () => void;
+	handleBackToBoard: () => void;
 	onStartAllTasks: () => void;
 }
 
@@ -37,6 +39,7 @@ export function useAppHotkeys({
 	handleOpenSettings,
 	handleToggleGitHistory,
 	handleCloseGitHistory,
+	handleBackToBoard,
 	onStartAllTasks,
 }: UseAppHotkeysInput): void {
 	useHotkeys(
@@ -135,7 +138,20 @@ export function useAppHotkeys({
 	useHotkeys(
 		"escape",
 		(event) => {
-			if (selectedCard || !isHomeGitHistoryOpen || isEventInsideDialog(event.target)) {
+			if (isEventInsideDialog(event.target) || event.defaultPrevented) {
+				return;
+			}
+			if (selectedCard) {
+				// Esc returns from the detail view to the board; leave Esc alone while
+				// typing (terminal, inputs) so it can reach the focused control.
+				if (isTypingTarget(event.target)) {
+					return;
+				}
+				event.preventDefault();
+				handleBackToBoard();
+				return;
+			}
+			if (!isHomeGitHistoryOpen) {
 				return;
 			}
 			event.preventDefault();
@@ -146,6 +162,6 @@ export function useAppHotkeys({
 			enableOnContentEditable: true,
 			preventDefault: true,
 		},
-		[handleCloseGitHistory, isHomeGitHistoryOpen, selectedCard],
+		[handleBackToBoard, handleCloseGitHistory, isHomeGitHistoryOpen, selectedCard],
 	);
 }

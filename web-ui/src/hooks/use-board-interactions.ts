@@ -91,6 +91,7 @@ export interface UseBoardInteractionsResult {
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
 	handleMoveReviewCardToTrash: (taskId: string) => void;
+	handleMoveTasksToColumn: (taskIds: string[], toColumnId: BoardColumnId) => void;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
 	handleCancelAutomaticTaskAction: (taskId: string) => void;
 	handleOpenClearTrash: () => void;
@@ -819,13 +820,44 @@ export function useBoardInteractions({
 					autoReviewMode: resolveTaskAutoReviewMode(selection.card.autoReviewMode),
 					images: selection.card.images,
 					agentId: selection.card.agentId,
-					clineSettings: selection.card.clineSettings,
 					baseRef: selection.card.baseRef,
 				});
 				return updated.updated ? updated.board : currentBoard;
 			});
 		},
 		[setBoard],
+	);
+
+	const handleMoveTasksToTrash = useCallback(
+		(taskIds: string[]) => {
+			for (const taskId of taskIds) {
+				const selection = findCardSelection(board, taskId);
+				if (!selection || selection.column.id === "trash") {
+					continue;
+				}
+				void confirmMoveTaskToTrash(selection.card);
+			}
+		},
+		[board, confirmMoveTaskToTrash],
+	);
+
+	const handleMoveTasksToColumn = useCallback(
+		(taskIds: string[], toColumnId: BoardColumnId) => {
+			if (toColumnId === "in_progress") {
+				handleStartAllBacklogTasks(taskIds);
+				return;
+			}
+			if (toColumnId === "review") {
+				for (const taskId of taskIds) {
+					handleRestoreTaskFromTrash(taskId);
+				}
+				return;
+			}
+			if (toColumnId === "trash") {
+				handleMoveTasksToTrash(taskIds);
+			}
+		},
+		[handleMoveTasksToTrash, handleRestoreTaskFromTrash, handleStartAllBacklogTasks],
 	);
 
 	const handleOpenClearTrash = useCallback(() => {
@@ -904,6 +936,7 @@ export function useBoardInteractions({
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		handleMoveTasksToColumn,
 		handleRestoreTaskFromTrash,
 		handleCancelAutomaticTaskAction,
 		handleOpenClearTrash,

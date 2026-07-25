@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import type { RuntimeHookEvent } from "../core/api-contract";
 import { buildKanbanCommandParts } from "../core/kanban-command";
@@ -24,6 +27,7 @@ interface CodexHookConfig {
 interface CodexHookTrustEntry {
 	key: string;
 	trustedHash: string;
+	enabled?: boolean;
 }
 
 export function hasCodexConfigOverride(args: string[], key: string): boolean {
@@ -132,10 +136,71 @@ function buildCodexHookTrustEntry(config: CodexHookConfig): CodexHookTrustEntry 
 	};
 }
 
+function parseTomlBasicString(value: string): string | null {
+	try {
+		const parsed: unknown = JSON.parse(value);
+		return typeof parsed === "string" ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+function readPersistedCodexHookTrustEntries(): CodexHookTrustEntry[] {
+	const configuredHome = process.env.CODEX_HOME?.trim();
+	const configPath = join(configuredHome || join(homedir(), ".codex"), "config.toml");
+	let config: string;
+	try {
+		config = readFileSync(configPath, "utf8");
+	} catch {
+		return [];
+	}
+
+	const entries: CodexHookTrustEntry[] = [];
+	let current: Partial<CodexHookTrustEntry> | null = null;
+	const flushCurrent = (): void => {
+		if (current?.key && current.trustedHash) {
+			entries.push({
+				key: current.key,
+				trustedHash: current.trustedHash,
+				enabled: false,
+			});
+		}
+		current = null;
+	};
+
+	for (const line of config.split(/\r?\n/u)) {
+		const sectionMatch = line.match(/^\s*\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*$/u);
+		if (sectionMatch) {
+			flushCurrent();
+			const key = parseTomlBasicString(sectionMatch[1]);
+			current = key ? { key } : null;
+			continue;
+		}
+		if (/^\s*\[/u.test(line)) {
+			flushCurrent();
+			continue;
+		}
+		if (!current) {
+			continue;
+		}
+		const trustedHashMatch = line.match(/^\s*trusted_hash\s*=\s*("(?:[^"\\]|\\.)*")\s*$/u);
+		if (trustedHashMatch) {
+			const trustedHash = parseTomlBasicString(trustedHashMatch[1]);
+			if (trustedHash) {
+				current.trustedHash = trustedHash;
+			}
+		}
+	}
+	flushCurrent();
+	return entries;
+}
+
 function buildCodexHookTrustStateConfigValue(entries: CodexHookTrustEntry[]): string {
-	const states = entries.map(
-		(entry) => `${JSON.stringify(entry.key)}={trusted_hash=${JSON.stringify(entry.trustedHash)}}`,
-	);
+	const entriesByKey = new Map(entries.map((entry) => [entry.key, entry]));
+	const states = [...entriesByKey.values()].map((entry) => {
+		const enabled = entry.enabled === undefined ? "" : `,enabled=${String(entry.enabled)}`;
+		return `${JSON.stringify(entry.key)}={trusted_hash=${JSON.stringify(entry.trustedHash)}${enabled}}`;
+	});
 	return `{${states.join(",")}}`;
 }
 
@@ -163,11 +228,12 @@ export function configureCodexHooks(args: string[]): void {
 		command: buildCodexHookCommand("activity"),
 		matcher: "*",
 	};
-	const trustStateConfigValue = buildCodexHookTrustStateConfigValue(
-		[inProgressHook, reviewHook, permissionRequestHook, preToolUseActivityHook, postToolUseActivityHook].map(
+	const trustStateConfigValue = buildCodexHookTrustStateConfigValue([
+		...readPersistedCodexHookTrustEntries(),
+		...[inProgressHook, reviewHook, permissionRequestHook, preToolUseActivityHook, postToolUseActivityHook].map(
 			buildCodexHookTrustEntry,
 		),
-	);
+	]);
 
 	addCodexConfigOverrideBeforeSubcommand(args, "features.hooks", "true");
 	addCodexConfigOverrideBeforeSubcommand(args, "hooks.state", trustStateConfigValue);

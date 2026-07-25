@@ -144,7 +144,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 				process.env.SHELL = "/definitely-not-a-shell";
 				await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin, replacePath: true }, async () => {
 					const state = await loadRuntimeConfig(tempProject);
-					expect(state.selectedAgentId).toBe("cline");
+					expect(state.selectedAgentId).toBe("claude");
 					expect(existsSync(join(tempHome, ".cline", "kanban", "config.json"))).toBe(false);
 				});
 			} finally {
@@ -231,7 +231,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 
 			await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin }, async () => {
 				const state = await loadRuntimeConfig(tempProject);
-				expect(state.selectedAgentId).toBe("cline");
+				expect(state.selectedAgentId).toBe("claude");
 			});
 		} finally {
 			cleanupBin();
@@ -264,7 +264,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 
 			await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin }, async () => {
 				const state = await loadRuntimeConfig(tempProject);
-				expect(state.selectedAgentId).toBe("cline");
+				expect(state.selectedAgentId).toBe("claude");
 			});
 		} finally {
 			cleanupBin();
@@ -287,13 +287,14 @@ describe.sequential("runtime-config auto agent selection", () => {
 			await withTemporaryEnv({ home: tempHome }, async () => {
 				const current = await loadRuntimeConfig(tempProject);
 				await saveRuntimeConfig(tempProject, {
-					selectedAgentId: "cline",
+					selectedAgentId: "claude",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					readyForReviewNotificationsEnabled: true,
 					shortcuts: [],
 					commitPromptTemplate: current.commitPromptTemplateDefault,
 					openPrPromptTemplate: current.openPrPromptTemplateDefault,
+					taskTemplates: [],
 				});
 
 				const globalPayload = JSON.parse(
@@ -332,13 +333,14 @@ describe.sequential("runtime-config auto agent selection", () => {
 			await withTemporaryEnv({ home: tempHome }, async () => {
 				const current = await loadRuntimeConfig(tempProject);
 				await saveRuntimeConfig(tempProject, {
-					selectedAgentId: "cline",
+					selectedAgentId: "claude",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					readyForReviewNotificationsEnabled: true,
 					shortcuts: [],
 					commitPromptTemplate: current.commitPromptTemplateDefault,
 					openPrPromptTemplate: current.openPrPromptTemplateDefault,
+					taskTemplates: [],
 				});
 
 				expect(existsSync(join(tempProject, ".cline", "kanban", "config.json"))).toBe(false);
@@ -359,13 +361,14 @@ describe.sequential("runtime-config auto agent selection", () => {
 			await withTemporaryEnv({ home: tempHome }, async () => {
 				const current = await loadRuntimeConfig(tempProject);
 				await saveRuntimeConfig(tempProject, {
-					selectedAgentId: "cline",
+					selectedAgentId: "claude",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					readyForReviewNotificationsEnabled: true,
 					shortcuts: [{ label: "Ship", command: "npm run ship", icon: "rocket" }],
 					commitPromptTemplate: current.commitPromptTemplateDefault,
 					openPrPromptTemplate: current.openPrPromptTemplateDefault,
+					taskTemplates: [],
 				});
 				expect(existsSync(join(tempProject, ".cline", "kanban", "config.json"))).toBe(true);
 
@@ -465,6 +468,113 @@ describe.sequential("runtime-config auto agent selection", () => {
 				const reloaded = await loadRuntimeConfig(tempProject);
 				expect(reloaded.selectedAgentId).toBe("codex");
 				expect(reloaded.agentAutonomousModeEnabled).toBe(false);
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("persists task templates in the global config and normalizes invalid entries", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-templates-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir("kanban-project-runtime-config-templates-");
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				const current = await loadRuntimeConfig(tempProject);
+				expect(current.taskTemplates).toEqual([]);
+
+				const updated = await updateRuntimeConfig(tempProject, {
+					taskTemplates: [
+						{
+							id: "tpl-1",
+							name: "Bug fix",
+							prompt: "Fix the bug",
+							agentId: "codex",
+							baseRef: "main",
+							autoReviewEnabled: true,
+							autoReviewMode: "pr",
+						},
+						{
+							id: " ",
+							name: "Missing id",
+							prompt: "Dropped",
+						},
+						{
+							id: "tpl-2",
+							name: "  ",
+							prompt: "Dropped",
+						},
+						{
+							id: "tpl-3",
+							name: "Unsupported agent",
+							prompt: "Kept without agent",
+							agentId: "gemini",
+						},
+					],
+				});
+				expect(updated.taskTemplates).toEqual([
+					{
+						id: "tpl-1",
+						name: "Bug fix",
+						prompt: "Fix the bug",
+						agentId: "codex",
+						baseRef: "main",
+						autoReviewEnabled: true,
+						autoReviewMode: "pr",
+					},
+					{
+						id: "tpl-3",
+						name: "Unsupported agent",
+						prompt: "Kept without agent",
+					},
+				]);
+
+				const globalPayload = JSON.parse(
+					readFileSync(join(tempHome, ".cline", "kanban", "config.json"), "utf8"),
+				) as {
+					taskTemplates?: unknown[];
+				};
+				expect(globalPayload.taskTemplates).toHaveLength(2);
+
+				const reloaded = await loadRuntimeConfig(tempProject);
+				expect(reloaded.taskTemplates).toEqual(updated.taskTemplates);
+			});
+		} finally {
+			cleanupProject();
+			cleanupHome();
+		}
+	});
+
+	it("preserves existing task templates across unrelated config updates", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-runtime-config-tpl-preserve-");
+		const { path: tempProject, cleanup: cleanupProject } = createTempDir(
+			"kanban-project-runtime-config-tpl-preserve-",
+		);
+
+		try {
+			await withTemporaryEnv({ home: tempHome }, async () => {
+				await loadRuntimeConfig(tempProject);
+				await updateRuntimeConfig(tempProject, {
+					taskTemplates: [{ id: "tpl-1", name: "Docs", prompt: "Write docs" }],
+				});
+
+				const updated = await updateRuntimeConfig(tempProject, {
+					agentAutonomousModeEnabled: false,
+				});
+				expect(updated.taskTemplates).toEqual([{ id: "tpl-1", name: "Docs", prompt: "Write docs" }]);
+
+				const cleared = await updateRuntimeConfig(tempProject, {
+					taskTemplates: [],
+				});
+				expect(cleared.taskTemplates).toEqual([]);
+
+				const globalPayload = JSON.parse(
+					readFileSync(join(tempHome, ".cline", "kanban", "config.json"), "utf8"),
+				) as {
+					taskTemplates?: unknown[];
+				};
+				expect(globalPayload.taskTemplates).toEqual([]);
 			});
 		} finally {
 			cleanupProject();

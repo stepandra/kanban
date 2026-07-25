@@ -1,4 +1,4 @@
-import { act, forwardRef, type ReactNode, useImperativeHandle } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -8,18 +8,9 @@ import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, CardSelection } from "@/types";
 
 const mockUseRuntimeWorkspaceChanges = vi.fn();
-const {
-	mockAgentTerminalPanel,
-	mockClineAgentChatPanel,
-	mockDiffViewerPanel,
-	mockClineAppendToDraft,
-	mockClineSendText,
-} = vi.hoisted(() => ({
+const { mockAgentTerminalPanel, mockDiffViewerPanel } = vi.hoisted(() => ({
 	mockAgentTerminalPanel: vi.fn((_props: { panelBackgroundColor?: string; terminalBackgroundColor?: string }) => null),
-	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
-	mockClineAppendToDraft: vi.fn(),
-	mockClineSendText: vi.fn(async () => {}),
 }));
 
 vi.mock("react-hotkeys-hook", () => ({
@@ -32,17 +23,6 @@ vi.mock("@/hooks/use-is-mobile", () => ({
 
 vi.mock("@/components/detail-panels/agent-terminal-panel", () => ({
 	AgentTerminalPanel: mockAgentTerminalPanel,
-}));
-
-vi.mock("@/components/detail-panels/cline-agent-chat-panel", () => ({
-	ClineAgentChatPanel: forwardRef((props: unknown, ref) => {
-		mockClineAgentChatPanel(props);
-		useImperativeHandle(ref, () => ({
-			appendToDraft: mockClineAppendToDraft,
-			sendText: mockClineSendText,
-		}));
-		return <div data-testid="cline-agent-chat-panel" />;
-	}),
 }));
 
 vi.mock("@/components/detail-panels/column-context-panel", () => ({
@@ -180,10 +160,7 @@ describe("CardDetailView", () => {
 		document.body.appendChild(container);
 		root = createRoot(container);
 		mockAgentTerminalPanel.mockClear();
-		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
-		mockClineAppendToDraft.mockClear();
-		mockClineSendText.mockClear();
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
 			changes: {
 				files: [
@@ -207,10 +184,7 @@ describe("CardDetailView", () => {
 		});
 		mockUseRuntimeWorkspaceChanges.mockReset();
 		mockAgentTerminalPanel.mockClear();
-		mockClineAgentChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
-		mockClineAppendToDraft.mockClear();
-		mockClineSendText.mockClear();
 		vi.restoreAllMocks();
 		container.remove();
 		if (previousActEnvironment === undefined) {
@@ -392,135 +366,6 @@ describe("CardDetailView", () => {
 		expect(onCloseGitHistory).toHaveBeenCalledTimes(1);
 	});
 
-	it("renders native chat panel for cline agent", async () => {
-		await act(async () => {
-			root.render(
-				<CardDetailView
-					selection={createSelection()}
-					currentProjectId="workspace-1"
-					selectedAgentId="cline"
-					sessionSummary={null}
-					taskSessions={{}}
-					onSessionSummary={() => {}}
-					onCardSelect={() => {}}
-					onTaskDragEnd={() => {}}
-					onMoveToTrash={() => {}}
-					bottomTerminalOpen={false}
-					bottomTerminalTaskId={null}
-					bottomTerminalSummary={null}
-					onBottomTerminalClose={() => {}}
-				/>,
-			);
-		});
-
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
-		expect(container.querySelector('[data-testid="agent-terminal-panel"]')).toBeNull();
-	});
-
-	it("does not render native chat panel when the task explicitly uses a non-cline agent", async () => {
-		const selection = createSelection();
-		selection.card.agentId = "codex";
-
-		await act(async () => {
-			root.render(
-				<CardDetailView
-					selection={selection}
-					currentProjectId="workspace-1"
-					selectedAgentId="cline"
-					sessionSummary={null}
-					taskSessions={{}}
-					onSessionSummary={() => {}}
-					onCardSelect={() => {}}
-					onTaskDragEnd={() => {}}
-					onMoveToTrash={() => {}}
-					bottomTerminalOpen={false}
-					bottomTerminalTaskId={null}
-					bottomTerminalSummary={null}
-					onBottomTerminalClose={() => {}}
-				/>,
-			);
-		});
-
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
-	});
-
-	it("shows cline chat panel when task session agentId is cline even if global agent is claude", async () => {
-		await act(async () => {
-			root.render(
-				<CardDetailView
-					selection={createSelection()}
-					currentProjectId="workspace-1"
-					selectedAgentId="claude"
-					sessionSummary={{
-						taskId: "task-1",
-						state: "running",
-						agentId: "cline",
-						workspacePath: null,
-						pid: null,
-						startedAt: null,
-						updatedAt: Date.now(),
-						lastOutputAt: null,
-						reviewReason: null,
-						exitCode: null,
-						lastHookAt: null,
-						latestHookActivity: null,
-						warningMessage: null,
-					}}
-					taskSessions={{}}
-					onSessionSummary={() => {}}
-					onCardSelect={() => {}}
-					onTaskDragEnd={() => {}}
-					onMoveToTrash={() => {}}
-					bottomTerminalOpen={false}
-					bottomTerminalTaskId={null}
-					bottomTerminalSummary={null}
-					onBottomTerminalClose={() => {}}
-				/>,
-			);
-		});
-
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
-	});
-
-	it("shows terminal panel when task session agentId is claude even if global agent is cline", async () => {
-		await act(async () => {
-			root.render(
-				<CardDetailView
-					selection={createSelection()}
-					currentProjectId="workspace-1"
-					selectedAgentId="cline"
-					sessionSummary={{
-						taskId: "task-1",
-						state: "running",
-						agentId: "claude",
-						workspacePath: null,
-						pid: null,
-						startedAt: null,
-						updatedAt: Date.now(),
-						lastOutputAt: null,
-						reviewReason: null,
-						exitCode: null,
-						lastHookAt: null,
-						latestHookActivity: null,
-						warningMessage: null,
-					}}
-					taskSessions={{}}
-					onSessionSummary={() => {}}
-					onCardSelect={() => {}}
-					onTaskDragEnd={() => {}}
-					onMoveToTrash={() => {}}
-					bottomTerminalOpen={false}
-					bottomTerminalTaskId={null}
-					bottomTerminalSummary={null}
-					onBottomTerminalClose={() => {}}
-				/>,
-			);
-		});
-
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
-		expect(mockAgentTerminalPanel).toHaveBeenCalled();
-	});
-
 	it("uses surface-primary colors for the detail terminal panel", async () => {
 		await act(async () => {
 			root.render(
@@ -549,7 +394,7 @@ describe("CardDetailView", () => {
 		});
 	});
 
-	it("queues Add diff comments into the cline composer without sending them", async () => {
+	it("routes Add diff comments to the review comments handler", async () => {
 		const onAddReviewComments = vi.fn();
 
 		await act(async () => {
@@ -557,7 +402,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="claude"
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -580,11 +425,10 @@ describe("CardDetailView", () => {
 			diffProps.onAddToTerminal?.("src/example.ts:4 | value\n> Add tests");
 		});
 
-		expect(onAddReviewComments).not.toHaveBeenCalled();
-		expect(mockClineAppendToDraft).toHaveBeenCalledWith("src/example.ts:4 | value\n> Add tests");
+		expect(onAddReviewComments).toHaveBeenCalledWith("task-1", "src/example.ts:4 | value\n> Add tests");
 	});
 
-	it("routes Send diff comments through the mounted cline panel", async () => {
+	it("routes Send diff comments to the send review comments handler", async () => {
 		const onSendReviewComments = vi.fn();
 
 		await act(async () => {
@@ -592,7 +436,7 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="claude"
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -616,8 +460,7 @@ describe("CardDetailView", () => {
 			await Promise.resolve();
 		});
 
-		expect(onSendReviewComments).not.toHaveBeenCalled();
-		expect(mockClineSendText).toHaveBeenCalledWith("src/example.ts:8 | done\n> Ship this");
+		expect(onSendReviewComments).toHaveBeenCalledWith("task-1", "src/example.ts:8 | done\n> Ship this");
 	});
 
 	it("loads the saved agent-to-diff panel ratio from local storage", async () => {

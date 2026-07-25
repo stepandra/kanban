@@ -22,11 +22,6 @@ function createBoard(): RuntimeBoardData {
 						autoReviewEnabled: true,
 						autoReviewMode: "pr",
 						agentId: "codex",
-						clineSettings: {
-							providerId: "openai",
-							modelId: "gpt-5",
-							reasoningEffort: "high",
-						},
 						images: [
 							{
 								id: "image-a",
@@ -167,11 +162,18 @@ describe("indexed JSON import validation", () => {
 		if (!firstCard) {
 			throw new Error("Missing fixture card.");
 		}
-		firstCard.clineSettings = {
-			reasoningEffort: "high",
-			modelId: "gpt-5",
-			providerId: "openai",
-		};
+		const firstImage = firstCard.images?.[0];
+		if (!firstImage) {
+			throw new Error("Missing fixture image.");
+		}
+		firstCard.images = [
+			{
+				name: firstImage.name,
+				mimeType: firstImage.mimeType,
+				data: firstImage.data,
+				id: firstImage.id,
+			},
+		];
 		const second = createIndexedJsonImport(createSnapshot(reorderedSettings));
 
 		expect(first.source).toEqual({

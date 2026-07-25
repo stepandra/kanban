@@ -4,6 +4,8 @@ import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { buildShellCommandLine } from "../../../src/core/shell";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 
+import { reduceSessionTransition } from "../../../src/terminal/session-state-machine";
+
 function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
 		taskId: "task-1",
@@ -23,6 +25,18 @@ function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): Runt
 }
 
 describe("TerminalSessionManager", () => {
+	it("marks an interactive agent startup gate as awaiting operator attention", () => {
+		const blocked = reduceSessionTransition(createSummary(), { type: "agent.attention-required" });
+
+		expect(blocked.changed).toBe(true);
+		expect(blocked.patch).toMatchObject({
+			state: "awaiting_review",
+			reviewReason: "attention",
+			warningMessage: "Agent startup requires operator attention.",
+		});
+		expect(blocked.clearAttentionBuffer).toBe(true);
+	});
+
 	it("clears trust prompt state when transitioning to review", () => {
 		const manager = new TerminalSessionManager();
 		const entry = {
