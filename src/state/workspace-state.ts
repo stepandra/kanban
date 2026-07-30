@@ -626,6 +626,20 @@ export class WorkspaceStateConflictError extends Error {
 	}
 }
 
+function assertNoReviewAcceptanceViaSnapshotSave(currentBoard: RuntimeBoardData, nextBoard: RuntimeBoardData): void {
+	const reviewTaskIds = new Set(
+		currentBoard.columns.find((column) => column.id === "review")?.cards.map((card) => card.id) ?? [],
+	);
+	const acceptedThroughSnapshot = nextBoard.columns
+		.find((column) => column.id === "trash")
+		?.cards.find((card) => reviewTaskIds.has(card.id));
+	if (acceptedThroughSnapshot) {
+		throw new Error(
+			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to Done through a board snapshot save. Use the reviewer-only task accept command with verified remote revision evidence.`,
+		);
+	}
+}
+
 export async function loadWorkspaceContext(
 	cwd: string,
 	options: LoadWorkspaceContextOptions = {},
@@ -786,7 +800,9 @@ export async function saveWorkspaceState(
 		) {
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
+		const currentBoard = await readWorkspaceBoard(context.workspaceId);
 		const board = parsedPayload.board;
+		assertNoReviewAcceptanceViaSnapshotSave(currentBoard, board);
 		const sessions = parsedPayload.sessions;
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {

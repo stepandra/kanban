@@ -260,3 +260,33 @@ that approximation without changing the projection contract.
 another workflow authority or presenting speculative controls. Progress is
 useful now, while its legacy acceptance approximation remains explicit rather
 than being mistaken for proof of promotion.
+
+## D-016 — Review acceptance fails closed on verified remote revision evidence
+
+- **Status:** Accepted; safety boundary implemented 2026-07-31
+- **Date:** 2026-07-31
+
+Moving a task from Review to Done is no longer a generic board move. The
+reviewer-only `task accept` command requires a full commit ID and an exact
+task-scoped remote ref under `refs/heads/kanban/<task-id>-*`. Kanban resolves
+the repository's existing `origin`, verifies that exact pair with
+`git ls-remote`, stores the evidence on the task, and only then performs the
+terminal move and guarded cleanup. The command also requires the matching
+`KANBAN_REVIEW_TASK_ID` injected into the isolated per-task Fixer process, so
+ordinary worker and Architect contexts fail closed before remote verification.
+
+`task done`/`task trash`, drag-and-drop, bulk actions, whole-board snapshot
+saves, and browser auto-review cannot accept Review work. Runtime shutdown
+marks non-durable process telemetry interrupted but does not move cards to Done
+or reap their task workspaces.
+
+This evidence is a bounded safety seam, not the full vNext promotion protocol:
+immutable submission provenance, independently persisted Promoter attempts,
+promotion receipts, integration leases, and final acceptance receipts remain
+the next repository-stage migration. The UI therefore says “verified remote
+revision” rather than claiming a complete promotion receipt.
+
+**Consequence:** A worker exit, clean diff, UI gesture, runtime shutdown, or
+reviewer assertion cannot silently become acceptance. Existing review
+publication continues to work, while the remaining receipt migration stays
+explicit instead of being approximated in the data model.

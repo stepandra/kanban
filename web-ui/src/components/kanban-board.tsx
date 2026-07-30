@@ -463,7 +463,7 @@ export function KanbanBoard({
 
 	const selectedColumnCounts = useMemo(() => {
 		const selectedIds = selection.selectedTaskIdSet;
-		const counts = { backlog: 0, trash: 0, other: 0 };
+		const counts = { backlog: 0, inProgress: 0, review: 0, trash: 0 };
 		for (const column of data.columns) {
 			for (const card of column.cards) {
 				if (!selectedIds.has(card.id)) {
@@ -471,10 +471,12 @@ export function KanbanBoard({
 				}
 				if (column.id === "backlog") {
 					counts.backlog += 1;
+				} else if (column.id === "in_progress") {
+					counts.inProgress += 1;
+				} else if (column.id === "review") {
+					counts.review += 1;
 				} else if (column.id === "trash") {
 					counts.trash += 1;
-				} else {
-					counts.other += 1;
 				}
 			}
 		}
@@ -566,7 +568,11 @@ export function KanbanBoard({
 								selectedCount={selection.selectedTaskIds.length}
 								canStart={selectedColumnCounts.backlog > 0}
 								canMoveToReview={selectedColumnCounts.trash > 0}
-								canMoveToTrash={selectedColumnCounts.backlog + selectedColumnCounts.other > 0}
+								canMoveToTrash={
+									selectedColumnCounts.review === 0 &&
+									selectedColumnCounts.trash === 0 &&
+									selectedColumnCounts.backlog + selectedColumnCounts.inProgress > 0
+								}
 								onMoveToColumn={handleBulkMoveToColumn}
 								onClearSelection={selection.clearSelection}
 							/>

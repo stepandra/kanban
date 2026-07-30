@@ -145,6 +145,54 @@ describe.sequential("workspace-state integration", () => {
 		});
 	});
 
+	it("rejects Review to Done through whole-board snapshot saves", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-acceptance-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-acceptance");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const initial = await loadWorkspaceState(workspacePath);
+				const reviewBoard = createBoard("Review task");
+				const task = reviewBoard.columns[0]?.cards[0];
+				const backlogColumn = reviewBoard.columns.find((column) => column.id === "backlog");
+				const reviewColumn = reviewBoard.columns.find((column) => column.id === "review");
+				if (!task || !backlogColumn || !reviewColumn) {
+					throw new Error("Expected acceptance test task and authority columns.");
+				}
+				backlogColumn.cards = [];
+				reviewColumn.cards = [task];
+				const saved = await saveWorkspaceState(workspacePath, {
+					board: reviewBoard,
+					sessions: {},
+					expectedRevision: initial.revision,
+				});
+				const bypassBoard: RuntimeBoardData = {
+					...saved.board,
+					columns: saved.board.columns.map((column) => {
+						if (column.id === "review") {
+							return { ...column, cards: [] };
+						}
+						if (column.id === "trash") {
+							return { ...column, cards: [task] };
+						}
+						return column;
+					}),
+				};
+
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: bypassBoard,
+						sessions: {},
+						expectedRevision: saved.revision,
+					}),
+				).rejects.toThrow("cannot move from Review to Done through a board snapshot save");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
 	it("persists live task summaries without invalidating the board revision", async () => {
 		await withTemporaryHome(async () => {
 			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-session-");

@@ -172,15 +172,15 @@ describe.sequential("shutdown coordinator durable-session guard", () => {
 				const inProgress = after.board.columns.find((column) => column.id === "in_progress")?.cards ?? [];
 				const trash = after.board.columns.find((column) => column.id === "trash")?.cards ?? [];
 
-				// The durable task is left alone: not trashed, not interrupted, and
-				// its worktree is still on disk because its zmx agent is alive.
-				expect(inProgress.map((card) => card.id)).toEqual(["durable-task"]);
-				expect(trash.map((card) => card.id)).toEqual(["plain-task"]);
+				// Shutdown interrupts process telemetry but cannot imply task
+				// acceptance or reap either generation workspace.
+				expect(inProgress.map((card) => card.id)).toEqual(["durable-task", "plain-task"]);
+				expect(trash).toEqual([]);
 				expect(after.sessions["durable-task"]?.state).toBe("running");
 				expect(after.sessions["durable-task"]?.durableSessionName).toBe(durableSessionName);
 				expect(after.sessions["plain-task"]?.state).toBe("interrupted");
 				expect(existsSync(durableWorktreePath)).toBe(true);
-				expect(existsSync(plainWorktreePath)).toBe(false);
+				expect(existsSync(plainWorktreePath)).toBe(true);
 			} finally {
 				cleanup();
 			}
@@ -213,12 +213,12 @@ describe.sequential("shutdown coordinator durable-session guard", () => {
 				const after = await loadWorkspaceState(projectPath);
 				const inProgress = after.board.columns.find((column) => column.id === "in_progress")?.cards ?? [];
 				const trash = after.board.columns.find((column) => column.id === "trash")?.cards ?? [];
-				expect(inProgress.map((card) => card.id)).toEqual(["durable-task"]);
-				expect(trash.map((card) => card.id)).toEqual(["plain-task"]);
+				expect(inProgress.map((card) => card.id)).toEqual(["durable-task", "plain-task"]);
+				expect(trash).toEqual([]);
 				expect(after.sessions["durable-task"]?.state).toBe("running");
 				expect(after.sessions["plain-task"]?.state).toBe("interrupted");
 				expect(existsSync(durableWorktreePath)).toBe(true);
-				expect(existsSync(plainWorktreePath)).toBe(false);
+				expect(existsSync(plainWorktreePath)).toBe(true);
 			} finally {
 				cleanup();
 			}

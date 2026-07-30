@@ -2,6 +2,7 @@ import type {
 	RuntimeAgentId,
 	RuntimeBoardColumnId,
 	RuntimeMilestone,
+	RuntimeTaskAcceptanceEvidence,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
@@ -54,6 +55,7 @@ export interface BoardCard {
 	origin?: RuntimeTaskOrigin;
 	execution?: RuntimeTaskExecutionAttemptReference;
 	planning?: RuntimeTaskPlanningContext;
+	acceptanceEvidence?: RuntimeTaskAcceptanceEvidence;
 	baseRef: string;
 	createdAt: number;
 	updatedAt: number;

@@ -45,6 +45,7 @@ export function TaskOperationalOverview({
 	const status = isStaleAttempt
 		? "stale"
 		: (execution?.status ?? (selection.card.execution ? "checking" : "not queued"));
+	const acceptanceEvidence = selection.card.acceptanceEvidence;
 
 	return (
 		<section
@@ -112,9 +113,18 @@ export function TaskOperationalOverview({
 					<div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-text-tertiary">
 						{selection.column.id === "review" ? <ShieldCheck size={12} /> : <AlertTriangle size={12} />} Review
 					</div>
-					<div className="mt-1 text-xs text-text-primary">
-						{selection.column.id === "review" ? "Awaiting operator" : "No submission receipt"}
+					<div className="mt-1 text-xs text-text-primary" title={acceptanceEvidence?.acceptedRevision.remoteRef}>
+						{acceptanceEvidence
+							? `${compactId(acceptanceEvidence.acceptedRevision.sha)} verified`
+							: selection.column.id === "review"
+								? "Remote proof required"
+								: "Not accepted"}
 					</div>
+					{acceptanceEvidence ? (
+						<div className="mt-0.5 truncate font-mono text-[10px] text-text-tertiary">
+							{acceptanceEvidence.acceptedRevision.remoteRef.replace("refs/heads/", "")}
+						</div>
+					) : null}
 				</div>
 			</div>
 			{selection.card.origin ? (

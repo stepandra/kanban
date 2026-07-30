@@ -78,16 +78,27 @@ export default function (amp: PluginAPI): void {
 	amp.registerTool({
 		name: KANBAN_TOOL_NAME,
 		description:
-			`Manage tasks with the installed stepandra/kanban application (${KANBAN_REPOSITORY}) for Amp's current workspace or an explicit Kanban project path. This never means Hermes or another task board. Use this when the user explicitly asks to list, create, update, link, start, submit for review, accept, or delete Kanban tasks. Assign Amp Orb work with agentId=amp; Claude, Codex, Grok, Kimi, and other local agents use their matching agentId. Executors submit completed work to review, which hands the task to an isolated per-task Fixer Amp thread; only that accepting reviewer uses done. For decomposition, create concrete independently executable tasks and link only real prerequisites: taskId waits on linkedTaskId. Actions other than list mutate the board.`,
+			`Manage tasks with the installed stepandra/kanban application (${KANBAN_REPOSITORY}) for Amp's current workspace or an explicit Kanban project path. This never means Hermes or another task board. Use this when the user explicitly asks to list, create, update, link, start, submit for review, accept, or delete Kanban tasks. Assign Amp Orb work with agentId=amp; Claude, Codex, Grok, Kimi, and other local agents use their matching agentId. Executors submit completed work to review, which hands the task to an isolated per-task Fixer Amp thread; only that reviewer may accept with verified task-specific remote revision evidence. For decomposition, create concrete independently executable tasks and link only real prerequisites: taskId waits on linkedTaskId. Actions other than list mutate the board.`,
 		inputSchema: {
 			type: "object",
 			properties: {
 				action: {
 					type: "string",
-					enum: ["list", "create", "update", "claim", "submit", "done", "delete", "link", "unlink", "start"],
+					enum: ["list", "create", "update", "claim", "submit", "accept", "done", "delete", "link", "unlink", "start"],
 					description: "Kanban task operation to perform.",
 				},
-				taskId: { type: "string", description: "Task ID for update, claim, submit, done, delete, link, or start." },
+				taskId: {
+					type: "string",
+					description: "Task ID for update, claim, submit, accept, done, delete, link, or start.",
+				},
+				acceptedRevision: {
+					type: "string",
+					description: "Full verified commit ID required for reviewer-only accept.",
+				},
+				remoteRef: {
+					type: "string",
+					description: "Exact task-specific refs/heads/kanban/<task-id>-* ref required for reviewer-only accept.",
+				},
 				linkedTaskId: {
 					type: "string",
 					description: "Prerequisite task ID for link. taskId waits on linkedTaskId.",
@@ -156,14 +167,14 @@ export default function (amp: PluginAPI): void {
 				}
 			}
 			const transitionedTask =
-				(action === "submit" || action === "done") && typeof input.taskId === "string"
+				(action === "submit" || action === "accept" || action === "done") && typeof input.taskId === "string"
 					? await getTask(input.taskId, workspacePath)
 					: undefined;
 			const args = buildTaskArgs(input, workspacePath, action === "create" ? ctx.thread.id : undefined);
 			const result = await runKanbanChecked(args, workspacePath);
-			// A task submitted, done, or trashed through this tool must end its Orb
+			// A task submitted, accepted, done, or trashed through this tool must end its Orb
 			// watch, or the watcher would later submit a stale receipt.
-			if (action === "submit" || action === "done" || action === "delete") {
+			if (action === "submit" || action === "accept" || action === "done" || action === "delete") {
 				await endAmpTaskWatches(amp, watches, action, input, workspacePath);
 			}
 			// `kanban task submit` owns the isolated per-task review handoff (fail-closed in CLI).
@@ -259,6 +270,11 @@ export function buildTaskArgs(
 		case "claim":
 		case "submit":
 			args.push("--task-id", requiredString(input, "taskId"));
+			break;
+		case "accept":
+			args.push("--task-id", requiredString(input, "taskId"));
+			args.push("--accepted-revision", requiredString(input, "acceptedRevision"));
+			args.push("--remote-ref", requiredString(input, "remoteRef"));
 			break;
 		case "done":
 		case "delete":

@@ -157,6 +157,16 @@ export const runtimeTaskPlanningContextSchema = z.object({
 });
 export type RuntimeTaskPlanningContext = z.infer<typeof runtimeTaskPlanningContextSchema>;
 
+export const runtimeTaskAcceptanceEvidenceSchema = z.object({
+	kind: z.literal("verified_remote_revision"),
+	acceptedRevision: z.object({
+		sha: z.string().regex(/^[0-9a-f]{40,64}$/u),
+		remoteRef: z.string().regex(/^refs\/heads\/kanban\/[A-Za-z0-9._/-]+$/u),
+	}),
+	verifiedAt: z.number().int().nonnegative(),
+});
+export type RuntimeTaskAcceptanceEvidence = z.infer<typeof runtimeTaskAcceptanceEvidenceSchema>;
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -173,6 +183,7 @@ export const runtimeBoardCardSchema = z
 		origin: runtimeTaskOriginSchema.optional(),
 		execution: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 		planning: runtimeTaskPlanningContextSchema.optional(),
+		acceptanceEvidence: runtimeTaskAcceptanceEvidenceSchema.optional(),
 		baseRef: z.string(),
 		createdAt: z.number(),
 		updatedAt: z.number(),

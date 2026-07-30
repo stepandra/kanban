@@ -30,4 +30,29 @@ describe("Amp Kanban task provenance", () => {
 		expect(updateArgs).not.toContain("--origin-amp-thread-id");
 		expect(updateArgs).not.toContain(threadId);
 	});
+
+	it("passes exact revision evidence to reviewer-only accept", () => {
+		expect(
+			buildTaskArgs(
+				{
+					action: "accept",
+					taskId: "task-1",
+					acceptedRevision: "0123456789abcdef0123456789abcdef01234567",
+					remoteRef: "refs/heads/kanban/task-1-review",
+				},
+				"/workspace",
+			),
+		).toEqual([
+			"task",
+			"accept",
+			"--task-id",
+			"task-1",
+			"--accepted-revision",
+			"0123456789abcdef0123456789abcdef01234567",
+			"--remote-ref",
+			"refs/heads/kanban/task-1-review",
+			"--project-path",
+			"/workspace",
+		]);
+	});
 });

@@ -8,13 +8,16 @@ import { resolveTaskAutoReviewMode } from "@/types";
 
 const AUTO_REVIEW_ACTION_DELAY_MS = 500;
 
-type ScheduledAutoReviewAction = TaskAutoReviewMode | "move_to_done_after_git_action";
+type ScheduledAutoReviewAction = TaskAutoReviewMode;
 
 /**
  * Explicit auto-review state machine (one instance per task in the review column).
  *
  * Happy path:
- *   idle -> scheduled-git-action -> awaiting-clean -> scheduled-move-to-done -> moving-to-done -> idle
+ *   idle -> scheduled-git-action -> awaiting-clean -> idle
+ *
+ * A clean workspace ends UI automation but leaves the task in Review.
+ * Reviewer-only acceptance is a separate, verified server-side command.
  * Failure path:
  *   awaiting-clean -> failed (git action did not trigger; the recorded attempt key guards
  *   against the silent-retry-loop bug class by refusing to re-arm until the workspace
@@ -24,8 +27,6 @@ export type AutoReviewTaskState =
 	| { kind: "idle" }
 	| { kind: "scheduled-git-action"; action: TaskGitAction; timerId: number }
 	| { kind: "awaiting-clean"; action: TaskGitAction }
-	| { kind: "scheduled-move-to-done"; action: TaskGitAction; timerId: number }
-	| { kind: "moving-to-done"; action: TaskGitAction }
 	| { kind: "failed"; attemptKey: string };
 
 export type AutoReviewTaskEvent =
@@ -34,26 +35,19 @@ export type AutoReviewTaskEvent =
 	| { type: "git-action-fired" }
 	| { type: "git-action-triggered" }
 	| { type: "git-action-failed"; action: TaskGitAction; attemptKey: string | null }
-	| { type: "move-to-done-fired" }
-	| { type: "move-to-done-settled" }
+	| { type: "workspace-clean" }
 	| { type: "reset" };
 
 export const IDLE_AUTO_REVIEW_TASK_STATE: AutoReviewTaskState = { kind: "idle" };
 
 function isScheduledState(
 	state: AutoReviewTaskState,
-): state is Extract<AutoReviewTaskState, { kind: "scheduled-git-action" | "scheduled-move-to-done" }> {
-	return state.kind === "scheduled-git-action" || state.kind === "scheduled-move-to-done";
+): state is Extract<AutoReviewTaskState, { kind: "scheduled-git-action" }> {
+	return state.kind === "scheduled-git-action";
 }
 
 function getScheduledAction(state: AutoReviewTaskState): ScheduledAutoReviewAction | null {
-	if (state.kind === "scheduled-git-action") {
-		return state.action;
-	}
-	if (state.kind === "scheduled-move-to-done") {
-		return "move_to_done_after_git_action";
-	}
-	return null;
+	return state.kind === "scheduled-git-action" ? state.action : null;
 }
 
 export function autoReviewTaskReducer(state: AutoReviewTaskState, event: AutoReviewTaskEvent): AutoReviewTaskState {
@@ -61,20 +55,9 @@ export function autoReviewTaskReducer(state: AutoReviewTaskState, event: AutoRev
 		case "reset":
 			return IDLE_AUTO_REVIEW_TASK_STATE;
 		case "schedule":
-			if (event.action === "move_to_done_after_git_action") {
-				return state.kind === "awaiting-clean"
-					? { kind: "scheduled-move-to-done", action: state.action, timerId: event.timerId }
-					: state;
-			}
 			return { kind: "scheduled-git-action", action: event.action, timerId: event.timerId };
 		case "cancel-schedule":
-			if (state.kind === "scheduled-git-action") {
-				return IDLE_AUTO_REVIEW_TASK_STATE;
-			}
-			if (state.kind === "scheduled-move-to-done") {
-				return { kind: "awaiting-clean", action: state.action };
-			}
-			return state;
+			return state.kind === "scheduled-git-action" ? IDLE_AUTO_REVIEW_TASK_STATE : state;
 		case "git-action-fired":
 			return state.kind === "scheduled-git-action" ? { kind: "awaiting-clean", action: state.action } : state;
 		case "git-action-triggered":
@@ -85,17 +68,9 @@ export function autoReviewTaskReducer(state: AutoReviewTaskState, event: AutoRev
 				return event.attemptKey ? { kind: "failed", attemptKey: event.attemptKey } : IDLE_AUTO_REVIEW_TASK_STATE;
 			}
 			return state;
-		case "move-to-done-fired":
-			return state.kind === "scheduled-move-to-done" ? { kind: "moving-to-done", action: state.action } : state;
-		case "move-to-done-settled":
-			return state.kind === "awaiting-clean" || isScheduledMoveOrMoving(state) ? IDLE_AUTO_REVIEW_TASK_STATE : state;
+		case "workspace-clean":
+			return state.kind === "awaiting-clean" ? IDLE_AUTO_REVIEW_TASK_STATE : state;
 	}
-}
-
-function isScheduledMoveOrMoving(
-	state: AutoReviewTaskState,
-): state is Extract<AutoReviewTaskState, { kind: "scheduled-move-to-done" | "moving-to-done" }> {
-	return state.kind === "scheduled-move-to-done" || state.kind === "moving-to-done";
 }
 
 function getAutoReviewAttemptKey(task: BoardCard, action: TaskGitAction): string | null {
@@ -123,19 +98,10 @@ interface TaskGitActionLoadingStateLike {
 	prSource: string | null;
 }
 
-interface RequestMoveTaskToTrashOptions {
-	skipWorkingChangeWarning?: boolean;
-}
-
 interface UseReviewAutoActionsOptions {
 	board: BoardData;
 	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
 	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
-	requestMoveTaskToTrash: (
-		taskId: string,
-		fromColumnId: BoardColumnId,
-		options?: RequestMoveTaskToTrashOptions,
-	) => Promise<void>;
 	resetKey?: string | null;
 }
 
@@ -143,12 +109,10 @@ export function useReviewAutoActions({
 	board,
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
-	requestMoveTaskToTrash,
 	resetKey,
 }: UseReviewAutoActionsOptions): void {
 	const boardRef = useRef<BoardData>(board);
 	const runAutoReviewGitActionRef = useRef(runAutoReviewGitAction);
-	const requestMoveTaskToTrashRef = useRef(requestMoveTaskToTrash);
 	const taskStateByIdRef = useRef<Record<string, AutoReviewTaskState>>({});
 
 	useEffect(() => {
@@ -158,10 +122,6 @@ export function useReviewAutoActions({
 	useEffect(() => {
 		runAutoReviewGitActionRef.current = runAutoReviewGitAction;
 	}, [runAutoReviewGitAction]);
-
-	useEffect(() => {
-		requestMoveTaskToTrashRef.current = requestMoveTaskToTrash;
-	}, [requestMoveTaskToTrash]);
 
 	const getTaskState = useCallback((taskId: string): AutoReviewTaskState => {
 		return taskStateByIdRef.current[taskId] ?? IDLE_AUTO_REVIEW_TASK_STATE;
@@ -267,34 +227,13 @@ export function useReviewAutoActions({
 				// - Once armed, a later review state with zero changes is treated as commit/pr success, then we auto-move to done.
 				const changedFiles = getTaskWorkspaceSnapshot(reviewTask.id)?.changedFiles;
 				const taskState = getTaskState(reviewTask.id);
-				const awaitingAction =
-					taskState.kind === "awaiting-clean" || isScheduledMoveOrMoving(taskState) ? taskState.action : null;
+				const awaitingAction = taskState.kind === "awaiting-clean" ? taskState.action : null;
 				if (awaitingAction) {
-					if (changedFiles === 0 && !isGitActionInFlight && taskState.kind !== "moving-to-done") {
-						scheduleAutoReviewAction(reviewTask.id, "move_to_done_after_git_action", () => {
-							const latestSelection = findCardSelection(boardRef.current, reviewTask.id);
-							if (!latestSelection || latestSelection.column.id !== "review") {
-								dispatchTaskEvent(reviewTask.id, { type: "cancel-schedule" });
-								return;
-							}
-							if (!isTaskAutoReviewEnabled(latestSelection.card)) {
-								dispatchTaskEvent(reviewTask.id, { type: "cancel-schedule" });
-								return;
-							}
-							const latestMode = resolveTaskAutoReviewMode(latestSelection.card.autoReviewMode);
-							if (latestMode !== autoReviewMode) {
-								dispatchTaskEvent(reviewTask.id, { type: "cancel-schedule" });
-								return;
-							}
-							dispatchTaskEvent(reviewTask.id, { type: "move-to-done-fired" });
-							void requestMoveTaskToTrashRef
-								.current(reviewTask.id, "review", {
-									skipWorkingChangeWarning: true,
-								})
-								.finally(() => {
-									dispatchTaskEvent(reviewTask.id, { type: "move-to-done-settled" });
-								});
-						});
+					if (changedFiles === 0 && !isGitActionInFlight) {
+						// Commit/PR automation may prepare a review artifact, but it
+						// cannot accept the task. Acceptance is a separate reviewer
+						// command with verified remote revision evidence.
+						dispatchTaskEvent(reviewTask.id, { type: "workspace-clean" });
 					} else {
 						clearAutoReviewTimer(reviewTask.id);
 					}

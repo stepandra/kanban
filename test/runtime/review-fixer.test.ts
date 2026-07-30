@@ -95,6 +95,9 @@ describe("dispatchReviewFixer", () => {
 			expect(prompt).toContain("use Jujutsu only when `jj root` succeeds");
 			expect(prompt).toContain("otherwise, when `git rev-parse --show-toplevel` succeeds, use plain Git");
 			expect(prompt).toContain("git push origin kanban/abc123-review");
+			expect(prompt).toContain("`action=accept`");
+			expect(prompt).toContain("`acceptedRevision=<full verified commit ID>`");
+			expect(prompt).toContain("Never use `action=done` to accept Review work.");
 		} finally {
 			cleanup();
 		}

@@ -36,12 +36,12 @@ function createBoard(dependencies: BoardDependency[] = []): BoardData {
 				title: "Backlog",
 				cards: [createTask("task-1", "Backlog task", 1), createTask("task-3", "Second backlog task", 3)],
 			},
-			{ id: "in_progress", title: "In Progress", cards: [] },
 			{
-				id: "review",
-				title: "Review",
-				cards: [createTask("task-2", "Review task", 2)],
+				id: "in_progress",
+				title: "In Progress",
+				cards: [createTask("task-2", "In-progress task", 2)],
 			},
+			{ id: "review", title: "Review", cards: [] },
 			{ id: "trash", title: "Done", cards: [] },
 		],
 		dependencies,
@@ -213,13 +213,13 @@ describe("useLinkedBacklogTaskActions", () => {
 			throw new Error("Expected a hook snapshot.");
 		}
 		const initialSnapshot = latestSnapshot as HookSnapshot;
-		const reviewTask = initialSnapshot.board.columns.find((column) => column.id === "review")?.cards[0];
-		if (!reviewTask) {
-			throw new Error("Expected a review task.");
+		const activeTask = initialSnapshot.board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		if (!activeTask) {
+			throw new Error("Expected an in-progress task.");
 		}
 
 		await act(async () => {
-			await initialSnapshot.confirmMoveTaskToTrash(reviewTask, initialSnapshot.board);
+			await initialSnapshot.confirmMoveTaskToTrash(activeTask, initialSnapshot.board);
 		});
 
 		expect(kickoffTaskInProgress).toHaveBeenCalledTimes(2);
@@ -255,13 +255,13 @@ describe("useLinkedBacklogTaskActions", () => {
 			throw new Error("Expected a hook snapshot.");
 		}
 		const initialSnapshot = latestSnapshot as HookSnapshot;
-		const reviewTask = initialSnapshot.board.columns.find((column) => column.id === "review")?.cards[0];
-		if (!reviewTask) {
-			throw new Error("Expected a review task.");
+		const activeTask = initialSnapshot.board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		if (!activeTask) {
+			throw new Error("Expected an in-progress task.");
 		}
 
 		await act(async () => {
-			await initialSnapshot.confirmMoveTaskToTrash(reviewTask, initialSnapshot.board);
+			await initialSnapshot.confirmMoveTaskToTrash(activeTask, initialSnapshot.board);
 		});
 
 		expect(startBacklogTaskWithAnimation).toHaveBeenCalledTimes(2);
@@ -291,18 +291,18 @@ describe("useLinkedBacklogTaskActions", () => {
 			throw new Error("Expected a hook snapshot.");
 		}
 		const initialSnapshot = latestSnapshot as HookSnapshot;
-		const reviewTask = initialSnapshot.board.columns.find((column) => column.id === "review")?.cards[0];
-		if (!reviewTask) {
-			throw new Error("Expected a review task.");
+		const activeTask = initialSnapshot.board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		if (!activeTask) {
+			throw new Error("Expected an in-progress task.");
 		}
 
 		await act(async () => {
-			await initialSnapshot.confirmMoveTaskToTrash(reviewTask, initialSnapshot.board);
+			await initialSnapshot.confirmMoveTaskToTrash(activeTask, initialSnapshot.board);
 		});
 
 		expect(stopTaskSession).toHaveBeenCalledTimes(2);
-		expect(stopTaskSession).toHaveBeenNthCalledWith(1, reviewTask.id);
-		expect(stopTaskSession).toHaveBeenNthCalledWith(2, getDetailTerminalTaskId(reviewTask.id));
+		expect(stopTaskSession).toHaveBeenNthCalledWith(1, activeTask.id);
+		expect(stopTaskSession).toHaveBeenNthCalledWith(2, getDetailTerminalTaskId(activeTask.id));
 	});
 
 	it("trashes tasks directly through the request handler", async () => {
@@ -326,14 +326,14 @@ describe("useLinkedBacklogTaskActions", () => {
 		const initialSnapshot = latestSnapshot as HookSnapshot;
 
 		await act(async () => {
-			await initialSnapshot.requestMoveTaskToTrash("task-2", "review");
+			await initialSnapshot.requestMoveTaskToTrash("task-2", "in_progress");
 		});
 
 		if (latestSnapshot === null) {
 			throw new Error("Expected an updated hook snapshot.");
 		}
 		const nextSnapshot = latestSnapshot as HookSnapshot;
-		expect(nextSnapshot.board.columns.find((column) => column.id === "review")?.cards).toHaveLength(0);
+		expect(nextSnapshot.board.columns.find((column) => column.id === "in_progress")?.cards).toHaveLength(0);
 		expect(nextSnapshot.board.columns.find((column) => column.id === "trash")?.cards[0]?.id).toBe("task-2");
 		expect(cleanupTaskWorkspace).toHaveBeenCalledWith("task-2");
 	});
@@ -375,14 +375,14 @@ describe("useLinkedBacklogTaskActions", () => {
 			throw new Error("Expected a hook snapshot.");
 		}
 		const initialSnapshot = latestSnapshot as HookSnapshot;
-		const reviewTask = initialSnapshot.board.columns.find((column) => column.id === "review")?.cards[0];
-		if (!reviewTask) {
-			throw new Error("Expected a review task.");
+		const activeTask = initialSnapshot.board.columns.find((column) => column.id === "in_progress")?.cards[0];
+		if (!activeTask) {
+			throw new Error("Expected an in-progress task.");
 		}
 
 		let movePromise: Promise<void> | null = null;
 		await act(async () => {
-			movePromise = initialSnapshot.confirmMoveTaskToTrash(reviewTask, initialSnapshot.board);
+			movePromise = initialSnapshot.confirmMoveTaskToTrash(activeTask, initialSnapshot.board);
 			await Promise.resolve();
 		});
 

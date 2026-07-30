@@ -540,7 +540,6 @@ export function useBoardInteractions({
 		board,
 		taskGitActionLoadingByTaskId,
 		runAutoReviewGitAction,
-		requestMoveTaskToTrash: requestMoveTaskToTrashWithAnimation,
 		resetKey: currentProjectId,
 	});
 

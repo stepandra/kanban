@@ -23,6 +23,30 @@ function createBoard(): RuntimeBoardData {
 	};
 }
 
+function attachAcceptanceEvidence(board: RuntimeBoardData, taskId: string): RuntimeBoardData {
+	return {
+		...board,
+		columns: board.columns.map((column) => ({
+			...column,
+			cards: column.cards.map((card) =>
+				card.id === taskId
+					? {
+							...card,
+							acceptanceEvidence: {
+								kind: "verified_remote_revision",
+								acceptedRevision: {
+									sha: "0123456789abcdef0123456789abcdef01234567",
+									remoteRef: `refs/heads/kanban/${taskId}-review`,
+								},
+								verifiedAt: 2,
+							},
+						}
+					: card,
+			),
+		})),
+	};
+}
+
 describe("dependency readiness", () => {
 	it("starts a dependent task only after all of its prerequisites are done", () => {
 		const createDependent = addTaskToColumn(
@@ -52,11 +76,11 @@ describe("dependency readiness", () => {
 			throw new Error("Expected second dependency to be created.");
 		}
 
-		const firstDone = trashTaskAndGetReadyLinkedTaskIds(secondLink.board, "bbbbb");
+		const firstDone = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(secondLink.board, "bbbbb"), "bbbbb");
 		expect(firstDone.readyTaskIds).toEqual([]);
 		expect(firstDone.board.dependencies).toHaveLength(1);
 
-		const allDone = trashTaskAndGetReadyLinkedTaskIds(firstDone.board, "ccccc");
+		const allDone = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(firstDone.board, "ccccc"), "ccccc");
 		expect(allDone.readyTaskIds).toEqual(["aaaaa"]);
 		expect(allDone.board.dependencies).toEqual([]);
 	});
@@ -124,7 +148,7 @@ describe("dependency readiness", () => {
 		if (!linked.added) {
 			throw new Error("Expected dependency to be created.");
 		}
-		const firstTrash = trashTaskAndGetReadyLinkedTaskIds(linked.board, "bbbbb");
+		const firstTrash = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(linked.board, "bbbbb"), "bbbbb");
 		expect(firstTrash.readyTaskIds).toEqual(["aaaaa"]);
 
 		const secondTrash = trashTaskAndGetReadyLinkedTaskIds(firstTrash.board, "bbbbb");

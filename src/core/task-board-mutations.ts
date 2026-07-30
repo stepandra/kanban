@@ -4,6 +4,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeBoardDependency,
+	RuntimeTaskAcceptanceEvidence,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
@@ -127,6 +128,10 @@ export interface RuntimeRemoveTaskDependencyResult {
 
 export interface RuntimeTrashTaskResult extends RuntimeMoveTaskResult {
 	readyTaskIds: string[];
+}
+
+export interface RuntimeAcceptTaskResult extends RuntimeTrashTaskResult {
+	acceptanceEvidence: RuntimeTaskAcceptanceEvidence | null;
 }
 
 export interface RuntimeDeleteTasksResult {
@@ -592,6 +597,14 @@ export function moveTaskToColumn(
 			fromColumnId: found.columnId,
 		};
 	}
+	if (found.columnId === "review" && targetColumnId === "trash" && !found.task.acceptanceEvidence) {
+		return {
+			moved: false,
+			board,
+			task: found.task,
+			fromColumnId: found.columnId,
+		};
+	}
 	const targetColumnIndex = board.columns.findIndex((column) => column.id === targetColumnId);
 	if (targetColumnIndex === -1) {
 		return {
@@ -654,6 +667,52 @@ export function moveTaskToColumn(
 		}),
 		task: movedTask,
 		fromColumnId: found.columnId,
+	};
+}
+
+export function acceptTaskWithEvidence(
+	board: RuntimeBoardData,
+	taskId: string,
+	acceptanceEvidence: RuntimeTaskAcceptanceEvidence,
+): RuntimeAcceptTaskResult {
+	const found = findTaskLocation(board, taskId);
+	if (!found || found.columnId !== "review") {
+		return {
+			moved: false,
+			board,
+			task: found?.task ?? null,
+			fromColumnId: found?.columnId ?? null,
+			readyTaskIds: [],
+			acceptanceEvidence: found?.task.acceptanceEvidence ?? null,
+		};
+	}
+	const columnsWithEvidence = board.columns.map((column, columnIndex) => {
+		if (columnIndex !== found.columnIndex) {
+			return column;
+		}
+		return {
+			...column,
+			cards: column.cards.map((card, cardIndex) =>
+				cardIndex === found.taskIndex
+					? {
+							...card,
+							acceptanceEvidence,
+							updatedAt: Date.now(),
+						}
+					: card,
+			),
+		};
+	});
+	const moved = trashTaskAndGetReadyLinkedTaskIds(
+		{
+			...board,
+			columns: columnsWithEvidence,
+		},
+		taskId,
+	);
+	return {
+		...moved,
+		acceptanceEvidence: moved.task?.acceptanceEvidence ?? null,
 	};
 }
 

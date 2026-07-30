@@ -6,6 +6,7 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
+	RuntimeTaskAcceptanceEvidence,
 	RuntimeTaskOrigin,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
@@ -13,6 +14,7 @@ import { runtimeAgentIdSchema, runtimeAmpThreadIdSchema } from "../core/api-cont
 import { dispatchReviewFixer } from "../core/review-fixer";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
+	acceptTaskWithEvidence,
 	addTaskDependency,
 	addTaskToColumn,
 	deleteTasksFromBoard,
@@ -31,8 +33,10 @@ import {
 } from "../core/task-execution-reference";
 import { enqueueAbsurdTaskStart } from "../orchestration/absurd-task-start";
 import { resolveProjectInputPath } from "../projects/project-path";
-import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
+import { detectRepositoryKind, loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import { runGit } from "../workspace/git-utils";
+import { runJj } from "../workspace/jj-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
@@ -250,6 +254,7 @@ function formatTaskRecord(
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		...(task.agentId ? { agentId: task.agentId } : {}),
 		...(task.origin ? { origin: task.origin } : {}),
+		...(task.acceptanceEvidence ? { acceptanceEvidence: task.acceptanceEvidence } : {}),
 		generation: resolveTaskGeneration(task.generation),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
@@ -878,6 +883,91 @@ interface TrashTaskMutationValue {
 	alreadyInTrash: boolean;
 }
 
+function normalizeAcceptedRevisionSha(value: string): string {
+	const normalized = value.trim().toLowerCase();
+	if (!/^[0-9a-f]{40,64}$/u.test(normalized)) {
+		throw new Error("Accepted revision must be a full 40-64 character hexadecimal commit ID.");
+	}
+	return normalized;
+}
+
+function normalizeTaskAcceptanceRemoteRef(taskId: string, value: string): string {
+	const normalized = value.trim();
+	const requiredPrefix = `refs/heads/kanban/${taskId}-`;
+	if (
+		!normalized.startsWith(requiredPrefix) ||
+		normalized.includes("..") ||
+		!/^refs\/heads\/kanban\/[A-Za-z0-9._/-]+$/u.test(normalized)
+	) {
+		throw new Error(`Acceptance remote ref must be a task-specific branch under ${requiredPrefix}*.`);
+	}
+	return normalized;
+}
+
+function assertReviewerTaskContext(taskId: string): void {
+	const reviewerTaskId = process.env.KANBAN_REVIEW_TASK_ID?.trim();
+	if (reviewerTaskId !== taskId) {
+		throw new Error(
+			`Task "${taskId}" can only be accepted from its isolated reviewer context (KANBAN_REVIEW_TASK_ID=${taskId}).`,
+		);
+	}
+}
+
+async function resolveOriginRemoteUrl(taskWorkspacePath: string): Promise<string> {
+	const vcs = detectRepositoryKind(taskWorkspacePath);
+	if (vcs === "jj") {
+		const remotes = await runJj(taskWorkspacePath, ["git", "remote", "list"]);
+		if (!remotes.ok) {
+			throw new Error(remotes.stderr || "Could not list jj Git remotes.");
+		}
+		for (const line of remotes.stdout.split("\n")) {
+			const [name, ...urlParts] = line.trim().split(/\s+/u);
+			if (name === "origin" && urlParts.length > 0) {
+				return urlParts.join(" ");
+			}
+		}
+		throw new Error("The task jj workspace has no origin remote.");
+	}
+	if (vcs !== "git") {
+		throw new Error(`No Git or jj repository detected at task workspace ${taskWorkspacePath}.`);
+	}
+	const remote = await runGit(taskWorkspacePath, ["remote", "get-url", "origin"]);
+	if (!remote.ok || !remote.stdout) {
+		throw new Error(remote.stderr || remote.error || "The task Git workspace has no origin remote.");
+	}
+	return remote.stdout;
+}
+
+async function verifyTaskAcceptanceRemoteRevision(input: {
+	taskId: string;
+	taskWorkspacePath: string;
+	acceptedRevisionSha: string;
+	remoteRef: string;
+}): Promise<RuntimeTaskAcceptanceEvidence> {
+	const acceptedRevisionSha = normalizeAcceptedRevisionSha(input.acceptedRevisionSha);
+	const remoteRef = normalizeTaskAcceptanceRemoteRef(input.taskId, input.remoteRef);
+	const remoteUrl = await resolveOriginRemoteUrl(input.taskWorkspacePath);
+	const remoteRevision = await runGit(input.taskWorkspacePath, ["ls-remote", remoteUrl, remoteRef]);
+	if (!remoteRevision.ok) {
+		throw new Error(remoteRevision.stderr || remoteRevision.error || `Could not verify ${remoteRef} on origin.`);
+	}
+	const matchingLine = remoteRevision.stdout
+		.split("\n")
+		.map((line) => line.trim().split(/\s+/u))
+		.find(([sha, ref]) => sha?.toLowerCase() === acceptedRevisionSha && ref === remoteRef);
+	if (!matchingLine) {
+		throw new Error(`Remote ref ${remoteRef} does not resolve to accepted revision ${acceptedRevisionSha}.`);
+	}
+	return {
+		kind: "verified_remote_revision",
+		acceptedRevision: {
+			sha: acceptedRevisionSha,
+			remoteRef,
+		},
+		verifiedAt: Date.now(),
+	};
+}
+
 function columnCanHaveLiveTaskSession(columnId: ListTaskColumn): boolean {
 	return columnId === "in_progress" || columnId === "review";
 }
@@ -888,6 +978,7 @@ async function trashTaskById(input: {
 	projectPath?: string;
 	workspaceRepoPath: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
+	acceptanceEvidence?: RuntimeTaskAcceptanceEvidence;
 }): Promise<TrashTaskExecutionResult> {
 	const mutation = await mutateWorkspaceState<TrashTaskMutationValue>(input.workspaceRepoPath, (latestState) => {
 		const latestRecord = findTaskRecord(latestState, input.taskId);
@@ -906,8 +997,15 @@ async function trashTaskById(input: {
 				save: false,
 			};
 		}
+		if (latestRecord.columnId === "review" && !input.acceptanceEvidence) {
+			throw new Error(
+				`Task "${input.taskId}" is in Review and requires reviewer-only acceptance with verified remote revision evidence.`,
+			);
+		}
 
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(latestState.board, input.taskId);
+		const trashed = input.acceptanceEvidence
+			? acceptTaskWithEvidence(latestState.board, input.taskId, input.acceptanceEvidence)
+			: trashTaskAndGetReadyLinkedTaskIds(latestState.board, input.taskId);
 		if (!trashed.moved || !trashed.task) {
 			throw new Error(`Task "${input.taskId}" could not be moved to done.`);
 		}
@@ -968,6 +1066,59 @@ async function trashTaskById(input: {
 		worktreeDeleted: deletedWorkspace.removed,
 		worktreeDeleteError: deletedWorkspace.error,
 		alreadyInTrash: false,
+	};
+}
+
+async function acceptTask(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	acceptedRevisionSha: string;
+	remoteRef: string;
+}): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const initialState = await runtimeClient.workspace.getState.query();
+	const record = findTaskRecord(initialState, input.taskId);
+	if (!record) {
+		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+	}
+	if (record.columnId !== "review") {
+		throw new Error(`Task "${input.taskId}" must be in Review before it can be accepted.`);
+	}
+	assertReviewerTaskContext(input.taskId);
+	const taskWorkspace = await getTaskWorkspacePathInfo({
+		cwd: workspaceRepoPath,
+		taskId: input.taskId,
+		baseRef: record.task.baseRef,
+	});
+	if (!taskWorkspace.exists) {
+		throw new Error(`Task workspace does not exist for task "${input.taskId}".`);
+	}
+	const acceptanceEvidence = await verifyTaskAcceptanceRemoteRevision({
+		taskId: input.taskId,
+		taskWorkspacePath: taskWorkspace.path,
+		acceptedRevisionSha: input.acceptedRevisionSha,
+		remoteRef: input.remoteRef,
+	});
+	const accepted = await trashTaskById({
+		cwd: input.cwd,
+		taskId: input.taskId,
+		projectPath: input.projectPath,
+		workspaceRepoPath,
+		runtimeClient,
+		acceptanceEvidence,
+	});
+	return {
+		ok: true,
+		task: accepted.task,
+		acceptanceEvidence,
+		workspacePath: workspaceRepoPath,
+		readyTaskIds: accepted.readyTaskIds,
+		autoStartedTasks: accepted.autoStartedTasks,
+		worktreeDeleted: accepted.worktreeDeleted,
+		worktreeDeleteError: accepted.worktreeDeleteError,
 	};
 }
 
@@ -1295,6 +1446,28 @@ export function registerTaskCommand(program: Command): void {
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId),
+						}),
+				);
+			},
+		);
+
+	task
+		.command("accept")
+		.description("Accept a Review task after verifying its exact task-specific remote revision.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--accepted-revision <sha>", "Full accepted commit ID.")
+		.requiredOption("--remote-ref <ref>", "Task-specific remote ref under refs/heads/kanban/<task-id>-*.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(
+			async (options: { taskId: string; acceptedRevision: string; remoteRef: string; projectPath?: string }) => {
+				await runTaskCommand(
+					async () =>
+						await acceptTask({
+							cwd: process.cwd(),
+							taskId: options.taskId,
+							projectPath: options.projectPath,
+							acceptedRevisionSha: options.acceptedRevision,
+							remoteRef: options.remoteRef,
 						}),
 				);
 			},

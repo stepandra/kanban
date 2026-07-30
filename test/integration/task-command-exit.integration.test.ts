@@ -404,7 +404,7 @@ describe("source task commands", () => {
 		}
 	});
 
-	it("supports claim, submit, done, and trash lifecycle commands", { timeout: 90_000 }, async () => {
+	it("supports claim, submit, verified accept, and trash lifecycle commands", { timeout: 90_000 }, async () => {
 		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-done-delete-");
 		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-done-delete-");
 
@@ -412,6 +412,11 @@ describe("source task commands", () => {
 			initGitRepository(projectPath);
 			writeFileSync(join(projectPath, "README.md"), "# Task Done Delete Test\n", "utf8");
 			commitAll(projectPath, "init");
+			const remotePath = join(homeDir, "acceptance-remote.git");
+			mkdirSync(remotePath, { recursive: true });
+			runGit(remotePath, ["init", "--bare"]);
+			runGit(projectPath, ["remote", "add", "origin", remotePath]);
+			runGit(projectPath, ["push", "-u", "origin", "main"]);
 
 			const port = String(await getAvailablePort());
 			// Stub the headless Fixer agent so `task submit` exercises the native
@@ -493,6 +498,10 @@ describe("source task commands", () => {
 				expect(preparedPayload.task?.projectPath).toBe(realpathSync(projectPath));
 				expect(preparedPayload.task?.taskWorkspacePath).toBeTruthy();
 				expect(existsSync(preparedPayload.task?.taskWorkspacePath ?? "")).toBe(true);
+				const taskWorkspacePath = preparedPayload.task?.taskWorkspacePath;
+				if (!taskWorkspacePath) {
+					throw new Error("Expected prepared task workspace path.");
+				}
 
 				const listedPrepared = await runCliCommandAndCollectOutput({
 					args: ["task", "list", "--column", "in_progress", "--project-path", projectPath],
@@ -542,8 +551,67 @@ describe("source task commands", () => {
 					movedByDoneAlias.didExit,
 					`task done did not exit in time.\nstdout:\n${movedByDoneAlias.stdout}\nstderr:\n${movedByDoneAlias.stderr}`,
 				).toBe(true);
-				expect(movedByDoneAlias.exitCode).toBe(0);
-				expect(movedByDoneAlias.stdout).toContain('"ok": true');
+				expect(movedByDoneAlias.exitCode).toBe(1);
+				expect(`${movedByDoneAlias.stdout}\n${movedByDoneAlias.stderr}`).toContain(
+					"requires reviewer-only acceptance",
+				);
+
+				const acceptedRevision = runGit(taskWorkspacePath, ["rev-parse", "HEAD"]);
+				const acceptedRemoteRef = `refs/heads/kanban/${taskIds[0] ?? ""}-review`;
+				runGit(taskWorkspacePath, ["push", "origin", `${acceptedRevision}:${acceptedRemoteRef}`]);
+				const rejectedOutsideReviewer = await runCliCommandAndCollectOutput({
+					args: [
+						"task",
+						"accept",
+						"--task-id",
+						taskIds[0] ?? "",
+						"--accepted-revision",
+						acceptedRevision,
+						"--remote-ref",
+						acceptedRemoteRef,
+						"--project-path",
+						projectPath,
+					],
+					cwd: projectPath,
+					env,
+				});
+				expect(rejectedOutsideReviewer.didExit).toBe(true);
+				expect(rejectedOutsideReviewer.exitCode).toBe(1);
+				expect(`${rejectedOutsideReviewer.stdout}\n${rejectedOutsideReviewer.stderr}`).toContain(
+					"isolated reviewer context",
+				);
+				const accepted = await runCliCommandAndCollectOutput({
+					args: [
+						"task",
+						"accept",
+						"--task-id",
+						taskIds[0] ?? "",
+						"--accepted-revision",
+						acceptedRevision,
+						"--remote-ref",
+						acceptedRemoteRef,
+						"--project-path",
+						projectPath,
+					],
+					cwd: projectPath,
+					env: {
+						...env,
+						KANBAN_REVIEW_TASK_ID: taskIds[0] ?? "",
+					},
+				});
+				expect(accepted.didExit).toBe(true);
+				expect(accepted.exitCode).toBe(0);
+				const acceptedPayload = JSON.parse(accepted.stdout) as {
+					ok?: boolean;
+					acceptanceEvidence?: {
+						acceptedRevision?: { sha?: string; remoteRef?: string };
+					};
+				};
+				expect(acceptedPayload.ok).toBe(true);
+				expect(acceptedPayload.acceptanceEvidence?.acceptedRevision).toEqual({
+					sha: acceptedRevision,
+					remoteRef: acceptedRemoteRef,
+				});
 
 				const movedByTrashCommand = await runCliCommandAndCollectOutput({
 					args: ["task", "trash", "--column", "backlog", "--project-path", projectPath],

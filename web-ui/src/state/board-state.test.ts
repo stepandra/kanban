@@ -14,6 +14,7 @@ import {
 	updateTaskTitle,
 } from "@/state/board-state";
 import type { ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+import type { BoardData } from "@/types";
 
 function createBacklogBoard(taskPrompts: string[]): {
 	board: ReturnType<typeof createInitialBoardData>;
@@ -42,6 +43,30 @@ function requireTaskId(taskId: string | undefined, taskPrompt: string): string {
 		throw new Error(`Missing task id for ${taskPrompt}`);
 	}
 	return taskId;
+}
+
+function attachAcceptanceEvidence(board: BoardData, taskId: string): BoardData {
+	return {
+		...board,
+		columns: board.columns.map((column) => ({
+			...column,
+			cards: column.cards.map((card) =>
+				card.id === taskId
+					? {
+							...card,
+							acceptanceEvidence: {
+								kind: "verified_remote_revision",
+								acceptedRevision: {
+									sha: "0123456789abcdef0123456789abcdef01234567",
+									remoteRef: `refs/heads/kanban/${taskId}-review`,
+								},
+								verifiedAt: 2,
+							},
+						}
+					: card,
+			),
+		})),
+	};
 }
 
 afterEach(() => {
@@ -152,12 +177,12 @@ describe("board dependency state", () => {
 		const dependencyB = addTaskDependency(dependencyA.board, taskC, taskB);
 		expect(dependencyB.added).toBe(true);
 
-		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskA);
+		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(dependencyB.board, taskA), taskA);
 		expect(moveATrash.moved).toBe(true);
 		expect(moveATrash.board.dependencies).toHaveLength(1);
 		expect(moveATrash.readyTaskIds).toEqual([]);
 
-		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(moveATrash.board, taskB);
+		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(moveATrash.board, taskB), taskB);
 		expect(moveBTrash.moved).toBe(true);
 		expect(moveBTrash.readyTaskIds).toEqual([taskC]);
 	});
@@ -223,7 +248,7 @@ describe("board dependency state", () => {
 		const trashA = trashTaskAndGetReadyLinkedTaskIds(secondLink.board, taskA);
 		expect(trashA.readyTaskIds).toEqual([]);
 
-		const trashB = trashTaskAndGetReadyLinkedTaskIds(trashA.board, taskB);
+		const trashB = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(trashA.board, taskB), taskB);
 		expect(trashB.readyTaskIds).toEqual([taskC]);
 
 		const autoStarted = moveTaskToColumn(trashB.board, taskC, "in_progress");
@@ -392,7 +417,7 @@ describe("board dependency state", () => {
 		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskA, taskC]);
 	});
 
-	it("preserves manual cross-column trash drop positions", () => {
+	it("rejects manual Review to Done drags", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -414,13 +439,9 @@ describe("board dependency state", () => {
 			reason: "DROP",
 			combine: null,
 		});
-		expect(movedToTrash.moveEvent).toMatchObject({
-			taskId: taskC,
-			fromColumnId: "review",
-			toColumnId: "trash",
-		});
+		expect(movedToTrash.moveEvent).toBeUndefined();
 		const trashColumn = movedToTrash.board.columns.find((column) => column.id === "trash");
-		expect(trashColumn?.cards.map((card) => card.id)).toEqual([taskB, taskA, taskC]);
+		expect(trashColumn?.cards.map((card) => card.id)).toEqual([taskB, taskA]);
 	});
 
 	it("allows manual trash to review drags", () => {
@@ -452,7 +473,7 @@ describe("board dependency state", () => {
 		expect(reviewColumn?.cards.map((card) => card.id)).toEqual([taskB, taskA]);
 	});
 
-	it("inserts programmatic trash drags at the top of trash", () => {
+	it("rejects programmatic Review to Done drags without acceptance evidence", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -485,13 +506,9 @@ describe("board dependency state", () => {
 				},
 			},
 		);
-		expect(movedToTrash.moveEvent).toMatchObject({
-			taskId: taskC,
-			fromColumnId: "review",
-			toColumnId: "trash",
-		});
+		expect(movedToTrash.moveEvent).toBeUndefined();
 		const trashColumn = movedToTrash.board.columns.find((column) => column.id === "trash");
-		expect(trashColumn?.cards.map((card) => card.id)).toEqual([taskC, taskB, taskA]);
+		expect(trashColumn?.cards.map((card) => card.id)).toEqual([taskB, taskA]);
 	});
 
 	it("can insert moved cards at the top when requested", () => {
@@ -516,10 +533,7 @@ describe("board dependency state", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "review");
-		expect(movedA.moved).toBe(true);
-
-		const linked = addTaskDependency(movedA.board, taskA, taskB);
+		const linked = addTaskDependency(fixture.board, taskA, taskB);
 		expect(linked.added).toBe(true);
 		expect(linked.board.dependencies.length).toBe(1);
 

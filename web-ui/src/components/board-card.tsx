@@ -12,7 +12,7 @@ import {
 	Pencil,
 	Play,
 	RotateCcw,
-	Trash2,
+	ShieldCheck,
 	Waypoints,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
@@ -228,7 +228,6 @@ export const BoardCard = memo(function BoardCard({
 	keyboardFocused = false,
 	onClick,
 	onStart,
-	onMoveToTrash,
 	onRestoreFromTrash,
 	onSaveTitle,
 	onCommit,
@@ -236,7 +235,6 @@ export const BoardCard = memo(function BoardCard({
 	onCancelAutomaticAction,
 	isCommitLoading = false,
 	isOpenPrLoading = false,
-	isMoveToTrashLoading = false,
 	onDependencyPointerDown,
 	onDependencyPointerEnter,
 	isDependencySource = false,
@@ -407,9 +405,7 @@ export const BoardCard = memo(function BoardCard({
 	}, [descriptionFont, descriptionWidth, displayDescription]);
 
 	const isRemovedWorker = card.removedAgentId === "cline";
-	const isStaleExecution = Boolean(
-		executionProjection && executionProjection.generation !== (card.generation ?? 1),
-	);
+	const isStaleExecution = Boolean(executionProjection && executionProjection.generation !== (card.generation ?? 1));
 	const isCreditLimit = isCardCreditLimitError(sessionSummary);
 	const renderStatusMarker = () => {
 		if (isRemovedWorker) {
@@ -638,18 +634,13 @@ export const BoardCard = memo(function BoardCard({
 										}}
 									/>
 								) : columnId === "review" ? (
-									<Button
-										icon={isMoveToTrashLoading ? <Spinner size={13} /> : <Trash2 size={13} />}
-										variant="ghost"
-										size="sm"
-										disabled={isMoveToTrashLoading}
-										aria-label="Move task to done"
-										onMouseDown={stopEvent}
-										onClick={(event) => {
-											stopEvent(event);
-											onMoveToTrash?.(card.id);
-										}}
-									/>
+									<span
+										className="inline-flex size-7 items-center justify-center text-text-tertiary"
+										title="Only the isolated reviewer can accept a verified task-specific remote revision"
+									>
+										<ShieldCheck size={14} />
+										<span className="sr-only">Awaiting verified reviewer acceptance</span>
+									</span>
 								) : columnId === "trash" ? (
 									<Tooltip
 										side="bottom"
