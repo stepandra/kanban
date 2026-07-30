@@ -7,6 +7,7 @@ import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-pa
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { TaskOperationalOverview } from "@/components/task-operational-overview";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useIsMobile } from "@/hooks/use-is-mobile";
@@ -18,12 +19,13 @@ import type {
 	RuntimeAgentId,
 	RuntimeConfigResponse,
 	RuntimeTaskSessionSummary,
+	RuntimeTaskExecutionProjection,
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
+import { type BoardCard, type BoardDependency, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { useWindowEvent } from "@/utils/react-use";
 
 // We still poll the open detail diff because line content can change without changing
@@ -310,6 +312,8 @@ export function CardDetailView({
 	selectedAgentId = null,
 	runtimeConfig = null,
 	sessionSummary,
+	executionProjection,
+	dependencies = [],
 	taskSessions,
 	onSessionSummary,
 	onCardSelect,
@@ -362,6 +366,8 @@ export function CardDetailView({
 	selectedAgentId?: RuntimeAgentId | null;
 	runtimeConfig?: RuntimeConfigResponse | null;
 	sessionSummary: RuntimeTaskSessionSummary | null;
+	executionProjection?: RuntimeTaskExecutionProjection | null;
+	dependencies?: BoardDependency[];
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	onSessionSummary: (summary: RuntimeTaskSessionSummary) => void;
 	onCardSelect: (taskId: string) => void;
@@ -632,6 +638,7 @@ export function CardDetailView({
 	if (isMobile) {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0">
+				<TaskOperationalOverview selection={selection} execution={executionProjection} dependencies={dependencies} />
 				<MobileDetailTabBar activeTab={mobileTab} onTabChange={setMobileTab} />
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -759,6 +766,9 @@ export function CardDetailView({
 				className="flex min-h-0 min-w-0 flex-col overflow-hidden"
 				style={{ width: isDiffExpanded ? "100%" : detailContentPanelPercent }}
 			>
+				{!isDiffExpanded ? (
+					<TaskOperationalOverview selection={selection} execution={executionProjection} dependencies={dependencies} />
+				) : null}
 				{gitHistoryPanel ? (
 					<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
 				) : (

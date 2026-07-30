@@ -83,8 +83,8 @@ vi.mock("@runtime-agent-catalog", () => ({
 		autonomousArgs: [],
 	})),
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
-		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
+		{ id: "codex", label: "OpenAI Codex", binary: "codex" },
 	]),
 }));
 

@@ -26,6 +26,8 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeJjGraphRequest,
+	RuntimeJjGraphResponse,
 	RuntimeOpenFileRequest,
 	RuntimeOpenFileResponse,
 	RuntimeProjectAddRequest,
@@ -39,6 +41,11 @@ import type {
 	RuntimeShellSessionStartResponse,
 	RuntimeTaskSessionInputRequest,
 	RuntimeTaskSessionInputResponse,
+	RuntimeTaskExecutionEnqueueRequest,
+	RuntimeTaskExecutionEnqueueResponse,
+	RuntimeTaskExecutionProjectionRequest,
+	RuntimeTaskExecutionProjectionResponse,
+	RuntimeSystemReadinessResponse,
 	RuntimeTaskSessionStartRequest,
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionStopRequest,
@@ -79,6 +86,8 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeJjGraphRequestSchema,
+	runtimeJjGraphResponseSchema,
 	runtimeOpenFileRequestSchema,
 	runtimeOpenFileResponseSchema,
 	runtimeProjectAddRequestSchema,
@@ -92,6 +101,11 @@ import {
 	runtimeShellSessionStartResponseSchema,
 	runtimeTaskSessionInputRequestSchema,
 	runtimeTaskSessionInputResponseSchema,
+	runtimeTaskExecutionEnqueueRequestSchema,
+	runtimeTaskExecutionEnqueueResponseSchema,
+	runtimeTaskExecutionProjectionRequestSchema,
+	runtimeTaskExecutionProjectionResponseSchema,
+	runtimeSystemReadinessResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
 	runtimeTaskSessionStartResponseSchema,
 	runtimeTaskSessionStopRequestSchema,
@@ -120,6 +134,7 @@ export interface RuntimeTrpcWorkspaceScope {
 export interface RuntimeTrpcContext {
 	requestedWorkspaceId: string | null;
 	workspaceScope: RuntimeTrpcWorkspaceScope | null;
+	isInternalRequest: boolean;
 	runtimeApi: {
 		loadConfig: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeConfigResponse>;
 		saveConfig: (
@@ -130,6 +145,15 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
 		) => Promise<RuntimeTaskSessionStartResponse>;
+		enqueueTaskExecution: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskExecutionEnqueueRequest,
+		) => Promise<RuntimeTaskExecutionEnqueueResponse>;
+		getTaskExecutionProjections: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskExecutionProjectionRequest,
+		) => Promise<RuntimeTaskExecutionProjectionResponse>;
+		getSystemReadiness: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeSystemReadinessResponse>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
@@ -196,6 +220,7 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeWorkspaceStateResponse>;
 		loadWorkspaceChanges: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeWorkspaceChangesResponse>;
 		loadGitLog: (scope: RuntimeTrpcWorkspaceScope, input: RuntimeGitLogRequest) => Promise<RuntimeGitLogResponse>;
+		loadJjGraph: (scope: RuntimeTrpcWorkspaceScope, input: RuntimeJjGraphRequest) => Promise<RuntimeJjGraphResponse>;
 		loadGitRefs: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskWorkspaceInfoRequest | null,
@@ -275,6 +300,16 @@ const workspaceProcedure = t.procedure.use(({ ctx, next }) => {
 	});
 });
 
+const internalWorkspaceProcedure = workspaceProcedure.use(({ ctx, next }) => {
+	if (!ctx.isInternalRequest) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "Direct task-session start is reserved for the internal Absurd worker boundary.",
+		});
+	}
+	return next({ ctx });
+});
+
 const optionalTaskWorkspaceInfoRequestSchema = runtimeTaskWorkspaceInfoRequestSchema.nullable().optional();
 const gitSyncActionInputSchema = z.object({
 	action: runtimeGitSyncActionSchema,
@@ -291,7 +326,24 @@ export const runtimeAppRouter = t.router({
 			.mutation(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.saveConfig(ctx.workspaceScope, input);
 			}),
-		startTaskSession: workspaceProcedure
+		enqueueTaskExecution: workspaceProcedure
+			.input(runtimeTaskExecutionEnqueueRequestSchema)
+			.output(runtimeTaskExecutionEnqueueResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.enqueueTaskExecution(ctx.workspaceScope, input);
+			}),
+		getTaskExecutionProjections: workspaceProcedure
+			.input(runtimeTaskExecutionProjectionRequestSchema)
+			.output(runtimeTaskExecutionProjectionResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getTaskExecutionProjections(ctx.workspaceScope, input);
+			}),
+		getSystemReadiness: workspaceProcedure
+			.output(runtimeSystemReadinessResponseSchema)
+			.query(async ({ ctx }) => {
+				return await ctx.runtimeApi.getSystemReadiness(ctx.workspaceScope);
+			}),
+		startTaskSession: internalWorkspaceProcedure
 			.input(runtimeTaskSessionStartRequestSchema)
 			.output(runtimeTaskSessionStartResponseSchema)
 			.mutation(async ({ ctx, input }) => {
@@ -414,6 +466,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeGitLogResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadGitLog(ctx.workspaceScope, input);
+			}),
+		getJjGraph: workspaceProcedure
+			.input(runtimeJjGraphRequestSchema)
+			.output(runtimeJjGraphResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.loadJjGraph(ctx.workspaceScope, input);
 			}),
 		getGitRefs: workspaceProcedure
 			.input(optionalTaskWorkspaceInfoRequestSchema)

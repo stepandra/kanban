@@ -44,7 +44,7 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 		description:
 			"Create dependency chains of linked tasks that start one another automatically. Agents can auto commit their work as they finish, so you can orchestrate tasks in order and watch the board burn them down automatically.",
 		assetVideoUrl: "https://github.com/user-attachments/assets/9a979242-bd22-4ac1-94c5-3ed5351a99d1",
-		assetAlt: "Linking task cards in Cline Kanban",
+		assetAlt: "Linking task cards in Kanban",
 		assetWidthPx: 1156,
 		assetHeightPx: 720,
 	},
@@ -54,7 +54,7 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 		description:
 			"Your workflow will feel like writing tickets, reviewing code, and shipping. Watch the agent work next to real-time diffs, then click lines to leave comments like you're reviewing a PR.",
 		assetVideoUrl: "https://github.com/user-attachments/assets/17992035-c1ca-449a-a48b-bb094007f0a1",
-		assetAlt: "Leaving comments on code diffs in Cline Kanban",
+		assetAlt: "Leaving comments on code diffs in Kanban",
 		assetWidthPx: 1616,
 		assetHeightPx: 1080,
 	},
@@ -65,7 +65,7 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	},
 ];
 
-const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "grok", "kimi", "droid", "kiro"];
+const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["claude", "codex", "grok", "kimi"];
 const FALLBACK_ONBOARDING_SLIDE: OnboardingSlide = {
 	kind: "agent-selection",
 	title: "",
@@ -272,9 +272,6 @@ function OnboardingMedia({
 }
 
 function resolveInstallInstructions(agentId: RuntimeAgentId): string {
-	if (agentId === "cline") {
-		return "Agentic coding CLI with support for many LLM providers.";
-	}
 	if (agentId === "claude") {
 		return "Anthropic's coding agent CLI with access to Claude models.";
 	}

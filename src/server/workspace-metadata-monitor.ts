@@ -114,6 +114,7 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.branch === b.branch &&
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
+		a.changeId === b.changeId &&
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions &&
@@ -227,6 +228,7 @@ async function loadTaskWorkspaceMetadata(
 				branch: null,
 				isDetached: false,
 				headCommit: null,
+				changeId: null,
 				changedFiles: null,
 				additions: null,
 				deletions: null,
@@ -256,6 +258,7 @@ async function loadTaskWorkspaceMetadata(
 					branch: null,
 					isDetached: false,
 					headCommit: state.commitId,
+					changeId: state.changeId,
 					changedFiles: state.changedFiles,
 					additions: state.additions,
 					deletions: state.deletions,
@@ -284,6 +287,7 @@ async function loadTaskWorkspaceMetadata(
 				branch: probe.currentBranch,
 				isDetached: probe.headCommit !== null && probe.currentBranch === null,
 				headCommit: probe.headCommit,
+				changeId: null,
 				changedFiles: summary.changedFiles,
 				additions: summary.additions,
 				deletions: summary.deletions,
@@ -304,6 +308,7 @@ async function loadTaskWorkspaceMetadata(
 				branch: null,
 				isDetached: false,
 				headCommit: null,
+				changeId: null,
 				changedFiles: null,
 				additions: null,
 				deletions: null,

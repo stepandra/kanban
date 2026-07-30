@@ -69,9 +69,11 @@ export const runtimeAgentIdSchema = z.enum([
 	"opencode",
 	"droid",
 	"kiro",
-	"cline",
 ]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
+
+const runtimeRemovedAgentIdSchema = z.literal("cline");
+const runtimePersistedBoardAgentIdSchema = z.union([runtimeAgentIdSchema, runtimeRemovedAgentIdSchema]);
 
 const runtimeBoardColumnIdEnum = z.enum(["backlog", "in_progress", "review", "trash"]);
 export const runtimeBoardColumnIdSchema = z.preprocess(
@@ -95,6 +97,20 @@ export const runtimeTaskImageSchema = z.object({
 });
 export type RuntimeTaskImage = z.infer<typeof runtimeTaskImageSchema>;
 
+export const runtimeAmpThreadIdSchema = z.string().regex(/^T-[A-Za-z0-9][A-Za-z0-9-]*$/u);
+export const runtimeTaskOriginSchema = z.object({
+	kind: z.literal("amp_architect"),
+	threadId: runtimeAmpThreadIdSchema,
+});
+export type RuntimeTaskOrigin = z.infer<typeof runtimeTaskOriginSchema>;
+
+export const runtimeTaskExecutionAttemptReferenceSchema = z.object({
+	attemptId: z.string().min(1),
+	generation: z.number().int().positive(),
+	queuedAt: z.number(),
+});
+export type RuntimeTaskExecutionAttemptReference = z.infer<typeof runtimeTaskExecutionAttemptReferenceSchema>;
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -104,15 +120,23 @@ export const runtimeBoardCardSchema = z
 		autoReviewEnabled: z.boolean().optional(),
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
-		agentId: runtimeAgentIdSchema.optional(),
+		agentId: runtimePersistedBoardAgentIdSchema.optional(),
+		removedAgentId: runtimeRemovedAgentIdSchema.optional(),
 		priority: z.number().optional(),
+		generation: z.number().int().positive().optional(),
+		origin: runtimeTaskOriginSchema.optional(),
+		execution: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 		baseRef: z.string(),
 		createdAt: z.number(),
 		updatedAt: z.number(),
 	})
-	.transform((card) => {
+	.transform(({ agentId, removedAgentId, ...card }) => {
+		const migratedRemovedAgentId: "cline" | undefined =
+			agentId === "cline" || removedAgentId === "cline" ? "cline" : undefined;
 		return {
 			...card,
+			...(agentId && agentId !== "cline" ? { agentId } : {}),
+			...(migratedRemovedAgentId ? { removedAgentId: migratedRemovedAgentId } : {}),
 			title: resolveTaskTitle(card.title, card.prompt),
 		};
 	});
@@ -309,6 +333,7 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	branch: z.string().nullable(),
 	isDetached: z.boolean(),
 	headCommit: z.string().nullable(),
+	changeId: z.string().nullable(),
 	changedFiles: z.number().nullable(),
 	additions: z.number().nullable(),
 	deletions: z.number().nullable(),
@@ -644,6 +669,73 @@ export const runtimeTaskSessionStartResponseSchema = z.object({
 });
 export type RuntimeTaskSessionStartResponse = z.infer<typeof runtimeTaskSessionStartResponseSchema>;
 
+export const runtimeTaskExecutionEnqueueRequestSchema = z.object({
+	taskId: z.string(),
+	resumeFromTrash: z.boolean().optional(),
+});
+export type RuntimeTaskExecutionEnqueueRequest = z.infer<typeof runtimeTaskExecutionEnqueueRequestSchema>;
+
+export const runtimeTaskExecutionEnqueueResponseSchema = z.object({
+	ok: z.boolean(),
+	state: z.literal("queued").nullable(),
+	task: z
+		.object({
+			id: z.string(),
+			generation: z.number().int().positive(),
+		})
+		.nullable(),
+	attempt: runtimeTaskExecutionAttemptReferenceSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskExecutionEnqueueResponse = z.infer<typeof runtimeTaskExecutionEnqueueResponseSchema>;
+
+export const runtimeTaskExecutionProjectionStatusSchema = z.enum([
+	"pending",
+	"running",
+	"sleeping",
+	"completed",
+	"failed",
+	"cancelled",
+	"unknown",
+]);
+export type RuntimeTaskExecutionProjectionStatus = z.infer<typeof runtimeTaskExecutionProjectionStatusSchema>;
+
+export const runtimeTaskExecutionProjectionRequestSchema = z.object({
+	attempts: z.array(runtimeTaskExecutionAttemptReferenceSchema).max(100),
+});
+export type RuntimeTaskExecutionProjectionRequest = z.infer<typeof runtimeTaskExecutionProjectionRequestSchema>;
+
+export const runtimeTaskExecutionProjectionSchema = runtimeTaskExecutionAttemptReferenceSchema.extend({
+	status: runtimeTaskExecutionProjectionStatusSchema,
+	runId: z.string().nullable(),
+	currentAttempt: z.number().int().positive().nullable(),
+	maxAttempts: z.number().int().positive().nullable(),
+	createdAt: z.string().nullable(),
+	updatedAt: z.string().nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskExecutionProjection = z.infer<typeof runtimeTaskExecutionProjectionSchema>;
+
+export const runtimeTaskExecutionProjectionResponseSchema = z.object({
+	generatedAt: z.number(),
+	attempts: z.array(runtimeTaskExecutionProjectionSchema),
+});
+export type RuntimeTaskExecutionProjectionResponse = z.infer<typeof runtimeTaskExecutionProjectionResponseSchema>;
+
+export const runtimeSystemReadinessCheckSchema = z.object({
+	id: z.enum(["absurd_queue", "absurd_worker", "jujutsu", "amp_architect", "worker_commands"]),
+	label: z.string(),
+	status: z.enum(["ready", "stopped", "unavailable", "degraded"]),
+	detail: z.string(),
+});
+export type RuntimeSystemReadinessCheck = z.infer<typeof runtimeSystemReadinessCheckSchema>;
+
+export const runtimeSystemReadinessResponseSchema = z.object({
+	generatedAt: z.number(),
+	checks: z.array(runtimeSystemReadinessCheckSchema),
+});
+export type RuntimeSystemReadinessResponse = z.infer<typeof runtimeSystemReadinessResponseSchema>;
+
 export const runtimeTaskSessionStopRequestSchema = z.object({
 	taskId: z.string(),
 });
@@ -793,6 +885,47 @@ export const runtimeGitLogResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeGitLogResponse = z.infer<typeof runtimeGitLogResponseSchema>;
+
+export const runtimeJjGraphRequestSchema = z.object({
+	maxCount: z.number().int().positive().max(200).optional(),
+});
+export type RuntimeJjGraphRequest = z.infer<typeof runtimeJjGraphRequestSchema>;
+
+export const runtimeJjGraphNodeSchema = z.object({
+	kind: z.literal("node"),
+	graphPrefix: z.string(),
+	changeId: z.string(),
+	commitId: z.string(),
+	parentCommitIds: z.array(z.string()),
+	description: z.string(),
+	bookmarks: z.array(z.string()),
+	workspaces: z.array(z.string()),
+	currentWorkingCopy: z.boolean(),
+	empty: z.boolean(),
+	conflict: z.boolean(),
+});
+export type RuntimeJjGraphNode = z.infer<typeof runtimeJjGraphNodeSchema>;
+
+export const runtimeJjGraphEdgeSchema = z.object({
+	kind: z.literal("edge"),
+	graphPrefix: z.string(),
+});
+export type RuntimeJjGraphEdge = z.infer<typeof runtimeJjGraphEdgeSchema>;
+
+export const runtimeJjGraphRowSchema = z.discriminatedUnion("kind", [
+	runtimeJjGraphNodeSchema,
+	runtimeJjGraphEdgeSchema,
+]);
+export type RuntimeJjGraphRow = z.infer<typeof runtimeJjGraphRowSchema>;
+
+export const runtimeJjGraphResponseSchema = z.object({
+	ok: z.boolean(),
+	rows: z.array(runtimeJjGraphRowSchema),
+	changeCount: z.number().int().nonnegative(),
+	truncated: z.boolean(),
+	error: z.string().optional(),
+});
+export type RuntimeJjGraphResponse = z.infer<typeof runtimeJjGraphResponseSchema>;
 
 export const runtimeGitCommitDiffFileSchema = z.object({
 	path: z.string(),

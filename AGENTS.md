@@ -14,7 +14,7 @@ What NOT to add: Stuff you can figure out from reading a few files, obvious patt
 TypeScript principles
 - No any types unless absolutely necessary.
 - Check node_modules for external API type definitions instead of guessing.
-- Prefer SDK-provided types, schemas, helpers, and model metadata over local redefinitions. For things like Cline SDK reasoning settings, use the SDK's source of truth whenever possible instead of recreating unions, support checks, or shapes in Kanban.
+- Prefer SDK-provided types, schemas, helpers, and model metadata over local redefinitions.
 - NEVER use inline imports. No await import("./foo.js"), no import("pkg").Type in type positions, and no dynamic imports for types. Always use standard top-level imports.
 - NEVER remove or downgrade code to fix type errors from outdated dependencies. Upgrade the dependency instead.
 
@@ -87,7 +87,7 @@ Dark theme
 - Do NOT use Blueprint, Tailwind's light-mode defaults, or any `dark:` prefix. The theme is always dark.
 
 Misc. tribal knowledge
-- Kanban no longer ships a native Cline runtime: `src/cline-sdk/` and the `@clinebot/*` packages were removed. Cline runs as an external CLI (`cline` binary) through the same PTY-backed terminal runtime as every other agent. See the decision record in `docs/architecture.md` for the upstream-merge tradeoff.
+- Kanban no longer ships Cline as either a native runtime or an external worker. `src/cline-sdk/`, the `@clinebot/*` packages, the Cline agent catalog entry, and its PTY adapter were removed. Persisted Cline cards are migration input only: retain them as blocked legacy cards and require explicit reassignment before start. See `docs/architecture.md` for the upstream-merge tradeoff.
 - Kanban is launched from the user's shell and inherits its environment. For agent detection and task-agent startup, prefer direct PATH checks and direct process launches over spawning an interactive shell. Avoid `zsh -i`, shell fallback command discovery, or "launch shell then type command into it" on hot paths. On setups with heavy shell init like `conda` or `nvm`, doing that per task can freeze the runtime and even make new Terminal.app windows feel hung when several tasks start at once. It's fine to use an actual interactive shell for explicit shell terminals, not for normal agent session work.
 - If CI hangs on Node 22 after tests seem to finish, suspect a live subprocess before assuming a slow test body. Read `.plan/docs/node22-ci-hanging-tests-investigation.md` before repeating that investigation. The big prior culprit was a unit-style suite booting the (now removed) Cline SDK host.
 - When Kanban runs on a headless remote Linux instance (for example over SSH+tunnel), native folder picker commands may be unavailable (`zenity`/`kdialog`). Treat this as a normal remote-runtime limitation and use manual path entry fallback instead of requiring desktop packages.

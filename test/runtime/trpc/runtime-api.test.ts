@@ -22,6 +22,10 @@ const browserMocks = vi.hoisted(() => ({
 	openInBrowser: vi.fn(),
 }));
 
+const absurdTaskStartMocks = vi.hoisted(() => ({
+	enqueueAbsurdTaskStart: vi.fn(),
+}));
+
 vi.mock("../../../src/terminal/agent-registry.js", () => ({
 	resolveAgentCommand: agentRegistryMocks.resolveAgentCommand,
 	buildRuntimeConfigResponse: agentRegistryMocks.buildRuntimeConfigResponse,
@@ -39,15 +43,26 @@ vi.mock("../../../src/server/browser.js", () => ({
 	openInBrowser: browserMocks.openInBrowser,
 }));
 
+vi.mock("../../../src/orchestration/absurd-task-start.js", () => ({
+	enqueueAbsurdTaskStart: absurdTaskStartMocks.enqueueAbsurdTaskStart,
+}));
+
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
 function createTestRuntimeApi(
-	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow"> &
-		Partial<Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow">>,
+	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot"> &
+		Partial<
+			Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot">
+		>,
 ): RuntimeTrpcContext["runtimeApi"] {
 	return createRuntimeApi({
 		...deps,
+		buildWorkspaceStateSnapshot:
+			deps.buildWorkspaceStateSnapshot ??
+			vi.fn(async () => {
+				throw new Error("Unexpected workspace state snapshot request.");
+			}),
 		getUpdateStatus:
 			deps.getUpdateStatus ??
 			vi.fn(() => ({
@@ -112,6 +127,11 @@ describe("createRuntimeApi startTaskSession", () => {
 		taskWorktreeMocks.resolveTaskCwd.mockReset();
 		turnCheckpointMocks.captureBestEffortTurnCheckpoint.mockReset();
 		browserMocks.openInBrowser.mockReset();
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockReset();
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockResolvedValue({
+			attemptId: "absurd-task-1",
+			raw: { task_id: "absurd-task-1" },
+		});
 
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 			agentId: "claude",
@@ -512,5 +532,75 @@ describe("createRuntimeApi update handlers", () => {
 			message: "Updated Kanban to 0.2.0.",
 		});
 		expect(runUpdateNow).toHaveBeenCalledTimes(1);
+	});
+
+	it("enqueues browser starts through Absurd with generation and resume intent", async () => {
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			buildWorkspaceStateSnapshot: vi.fn(async () => ({
+				repoPath: "/tmp/repo",
+				statePath: "/tmp/state.json",
+				vcs: "jj" as const,
+				git: {
+					currentBranch: null,
+					defaultBranch: "main",
+					branches: ["main"],
+				},
+				board: {
+					columns: [
+						{ id: "backlog" as const, title: "Backlog", cards: [] },
+						{ id: "in_progress" as const, title: "In Progress", cards: [] },
+						{ id: "review" as const, title: "Review", cards: [] },
+						{
+							id: "trash" as const,
+							title: "Done",
+							cards: [
+								{
+									id: "task-1",
+									title: "Resume me",
+									prompt: "Continue",
+									baseRef: "main",
+									generation: 4,
+									createdAt: 1,
+									updatedAt: 1,
+									startInPlanMode: false,
+									autoReviewEnabled: false,
+									autoReviewMode: "commit" as const,
+								},
+							],
+						},
+					],
+					dependencies: [],
+				},
+				sessions: {},
+				revision: 1,
+			})),
+		});
+
+		await expect(
+			api.enqueueTaskExecution(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", resumeFromTrash: true },
+			),
+		).resolves.toEqual({
+			ok: true,
+			state: "queued",
+			task: { id: "task-1", generation: 4 },
+			attempt: {
+				attemptId: "absurd-task-1",
+				generation: 4,
+				queuedAt: expect.any(Number),
+			},
+		});
+		expect(absurdTaskStartMocks.enqueueAbsurdTaskStart).toHaveBeenCalledWith({
+			taskExecutionReference: "task-1~g4~resume",
+			projectPath: "/tmp/repo",
+			agentId: "claude",
+		});
 	});
 });

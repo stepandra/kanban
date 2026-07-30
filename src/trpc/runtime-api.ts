@@ -10,9 +10,13 @@ import { TRPCError } from "@trpc/server";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
 import type {
+	RuntimeBoardCard,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeSystemReadinessResponse,
+	RuntimeTaskExecutionProjectionResponse,
 	RuntimeUpdateStatusResponse,
+	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
 	parseCommandRunRequest,
@@ -22,6 +26,9 @@ import {
 	parseTaskSessionStartRequest,
 	parseTaskSessionStopRequest,
 } from "../core/api-validation";
+import { formatTaskExecutionReference, resolveTaskGeneration } from "../core/task-execution-reference";
+import { enqueueAbsurdTaskStart } from "../orchestration/absurd-task-start";
+import { getAbsurdTaskProjections, getSystemReadiness } from "../orchestration/absurd-task-status";
 import { openInBrowser } from "../server/browser";
 import { getLegacyTaskWorktreesHomePath, getTaskWorkspacesHomePath } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
@@ -41,6 +48,22 @@ export interface CreateRuntimeApiDependencies {
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
+	buildWorkspaceStateSnapshot: (workspaceId: string, workspacePath: string) => Promise<RuntimeWorkspaceStateResponse>;
+}
+
+const ABSURD_WORKER_AGENT_IDS = new Set(["claude", "codex", "grok", "kimi"]);
+
+function findBoardTask(
+	state: RuntimeWorkspaceStateResponse,
+	taskId: string,
+): { card: RuntimeBoardCard; columnId: string } | null {
+	for (const column of state.board.columns) {
+		const card = column.cards.find((candidate) => candidate.id === taskId);
+		if (card) {
+			return { card, columnId: column.id };
+		}
+	}
+	return null;
 }
 
 async function resolveExistingTaskCwdOrEnsure(options: {
@@ -111,6 +134,76 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			}
 			return buildRuntimeConfigResponse(nextRuntimeConfig);
 		},
+		enqueueTaskExecution: async (workspaceScope, input) => {
+			try {
+				const taskId = input.taskId.trim();
+				if (!taskId) {
+					throw new Error("Task execution taskId cannot be empty.");
+				}
+				const state = await deps.buildWorkspaceStateSnapshot(workspaceScope.workspaceId, workspaceScope.workspacePath);
+				const record = findBoardTask(state, taskId);
+				if (!record) {
+					throw new Error(`Task "${taskId}" was not found.`);
+				}
+				const allowedColumns = input.resumeFromTrash
+					? new Set(["trash", "review", "in_progress"])
+					: new Set(["backlog", "in_progress"]);
+				if (!allowedColumns.has(record.columnId)) {
+					throw new Error(
+						`Task "${taskId}" is in "${record.columnId}" and cannot be ${input.resumeFromTrash ? "resumed" : "started"}.`,
+					);
+				}
+				if (record.card.removedAgentId === "cline") {
+					throw new Error(
+						`Task "${taskId}" still references the removed Cline worker. Assign a supported worker before starting it.`,
+					);
+				}
+				const runtimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+				const agentId = record.card.agentId ?? runtimeConfig.selectedAgentId;
+				if (!ABSURD_WORKER_AGENT_IDS.has(agentId)) {
+					throw new Error(
+						`Worker "${agentId}" is not supported by the Absurd Kanban execution queue. Assign Claude, Codex, Grok, or Kimi.`,
+					);
+				}
+				const generation = resolveTaskGeneration(record.card.generation);
+				const receipt = await enqueueAbsurdTaskStart({
+					taskExecutionReference: formatTaskExecutionReference(record.card.id, generation, {
+						resumeFromTrash: input.resumeFromTrash,
+					}),
+					projectPath: workspaceScope.workspacePath,
+					agentId,
+				});
+				return {
+					ok: true,
+					state: "queued",
+					task: {
+						id: record.card.id,
+						generation,
+					},
+					attempt: {
+						attemptId: receipt.attemptId,
+						generation,
+						queuedAt: Date.now(),
+					},
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					state: null,
+					task: null,
+					attempt: null,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		getTaskExecutionProjections: async (_workspaceScope, input): Promise<RuntimeTaskExecutionProjectionResponse> => ({
+			generatedAt: Date.now(),
+			attempts: await getAbsurdTaskProjections(input.attempts),
+		}),
+		getSystemReadiness: async (workspaceScope): Promise<RuntimeSystemReadinessResponse> => ({
+			generatedAt: Date.now(),
+			checks: await getSystemReadiness(workspaceScope.workspacePath),
+		}),
 		startTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStartRequest(input);

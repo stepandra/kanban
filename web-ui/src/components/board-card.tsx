@@ -2,15 +2,28 @@ import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { buildTaskWorkspaceDisplayPath } from "@runtime-task-worktree-path";
 import { formatToolCallLabel } from "@runtime-tool-call-display";
-import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
+import {
+	AlertCircle,
+	AlertTriangle,
+	Archive,
+	Bot,
+	Clock3,
+	GitBranch,
+	Pencil,
+	Play,
+	RotateCcw,
+	Trash2,
+	Waypoints,
+} from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { TaskOriginBadge } from "@/components/task-origin-context";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskExecutionProjection, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
@@ -210,6 +223,7 @@ export const BoardCard = memo(function BoardCard({
 	index,
 	columnId,
 	sessionSummary,
+	executionProjection,
 	selected = false,
 	keyboardFocused = false,
 	onClick,
@@ -234,6 +248,7 @@ export const BoardCard = memo(function BoardCard({
 	index: number;
 	columnId: BoardColumnId;
 	sessionSummary?: RuntimeTaskSessionSummary;
+	executionProjection?: RuntimeTaskExecutionProjection;
 	selected?: boolean;
 	keyboardFocused?: boolean;
 	onClick?: (card: BoardCardModel, event: MouseEvent<HTMLElement>) => void;
@@ -391,16 +406,36 @@ export const BoardCard = memo(function BoardCard({
 		};
 	}, [descriptionFont, descriptionWidth, displayDescription]);
 
+	const isRemovedWorker = card.removedAgentId === "cline";
+	const isStaleExecution = Boolean(
+		executionProjection && executionProjection.generation !== (card.generation ?? 1),
+	);
 	const isCreditLimit = isCardCreditLimitError(sessionSummary);
 	const renderStatusMarker = () => {
+		if (isRemovedWorker) {
+			return <AlertTriangle size={12} className="text-status-orange" aria-label="Worker reassignment required" />;
+		}
 		if (isCreditLimit) {
+			return <AlertTriangle size={12} className="text-status-orange" />;
+		}
+		if (
+			isStaleExecution ||
+			executionProjection?.status === "failed" ||
+			executionProjection?.status === "cancelled" ||
+			executionProjection?.status === "unknown"
+		) {
 			return <AlertTriangle size={12} className="text-status-orange" />;
 		}
 		if (columnId === "in_progress") {
 			if (sessionSummary?.state === "failed") {
 				return <AlertCircle size={12} className="text-status-red" />;
 			}
-			return <Spinner size={12} />;
+			if (executionProjection?.status === "pending") {
+				return <Clock3 size={12} className="text-status-blue" />;
+			}
+			return executionProjection?.status === "running" || sessionSummary?.state === "running" ? (
+				<Spinner size={12} />
+			) : null;
 		}
 		return null;
 	};
@@ -411,7 +446,22 @@ export const BoardCard = memo(function BoardCard({
 		: isTrashCard
 			? reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
-	const reviewRefLabel = reviewWorkspaceSnapshot?.branch ?? reviewWorkspaceSnapshot?.headCommit?.slice(0, 8) ?? "HEAD";
+	const isWorkspacePending = Boolean(reviewWorkspaceSnapshot && !reviewWorkspaceSnapshot.exists);
+	const isJjWorkspace = Boolean(reviewWorkspaceSnapshot?.exists && reviewWorkspaceSnapshot.changeId);
+	const reviewRefLabel = isWorkspacePending
+		? "Workspace pending"
+		: reviewWorkspaceSnapshot?.changeId
+			? `jj ${reviewWorkspaceSnapshot.changeId.slice(0, 8)}`
+			: (reviewWorkspaceSnapshot?.branch ?? reviewWorkspaceSnapshot?.headCommit?.slice(0, 8) ?? "HEAD");
+	const reviewWorkspaceTooltip = reviewWorkspaceSnapshot
+		? [
+				reviewWorkspacePath,
+				reviewWorkspaceSnapshot.changeId ? `change ${reviewWorkspaceSnapshot.changeId}` : null,
+				reviewWorkspaceSnapshot.headCommit ? `commit ${reviewWorkspaceSnapshot.headCommit}` : null,
+			]
+				.filter(Boolean)
+				.join(" · ")
+		: reviewWorkspacePath;
 	const reviewChangeSummary = reviewWorkspaceSnapshot
 		? reviewWorkspaceSnapshot.changedFiles == null
 			? null
@@ -426,8 +476,15 @@ export const BoardCard = memo(function BoardCard({
 	const cancelAutomaticActionLabel =
 		!isTrashCard && card.autoReviewEnabled ? getTaskAutoReviewCancelButtonLabel(card.autoReviewMode) : null;
 	const agentOverrideLabel = useMemo(
-		() => (card.agentId ? (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId) : null),
-		[card.agentId],
+		() =>
+			isRemovedWorker
+				? "Worker removed · reassign"
+				: card.agentId
+					? card.agentId === "amp"
+						? "Amp Orb"
+						: (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId)
+					: null,
+		[card.agentId, isRemovedWorker],
 	);
 	const taskAgentSettingsLabel = agentOverrideLabel;
 
@@ -572,7 +629,8 @@ export const BoardCard = memo(function BoardCard({
 										icon={<Play size={14} />}
 										variant="ghost"
 										size="sm"
-										aria-label="Start task"
+										disabled={isRemovedWorker}
+										aria-label={isRemovedWorker ? "Assign a supported worker before starting" : "Queue task"}
 										onMouseDown={stopEvent}
 										onClick={(event) => {
 											stopEvent(event);
@@ -675,19 +733,24 @@ export const BoardCard = memo(function BoardCard({
 									</p>
 								</div>
 							) : null}
-							{taskAgentSettingsLabel ? (
-								<div className="mt-1">
-									<span
-										className={cn(
-											"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
-											isTrashCard
-												? "border-border text-text-tertiary bg-surface-1"
-												: "border-status-blue/30 bg-status-blue/10 text-status-blue",
-										)}
-									>
-										<Bot size={12} className="shrink-0" />
-										<span className="truncate">{taskAgentSettingsLabel}</span>
-									</span>
+							{taskAgentSettingsLabel || card.origin ? (
+								<div className="mt-1 flex flex-wrap items-center gap-1">
+									{card.origin ? <TaskOriginBadge origin={card.origin} muted={isTrashCard} /> : null}
+									{taskAgentSettingsLabel ? (
+										<span
+											className={cn(
+												"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+												isTrashCard
+													? "border-border text-text-tertiary bg-surface-1"
+													: isRemovedWorker
+														? "border-status-orange/30 bg-status-orange/10 text-status-orange"
+														: "border-status-blue/30 bg-status-blue/10 text-status-blue",
+											)}
+										>
+											<Bot size={12} className="shrink-0" />
+											<span className="truncate">{taskAgentSettingsLabel}</span>
+										</span>
+									) : null}
 								</div>
 							) : null}
 							{sessionActivity ? (
@@ -714,53 +777,29 @@ export const BoardCard = memo(function BoardCard({
 								</div>
 							) : null}
 							{showWorkspaceStatus && reviewWorkspacePath ? (
-								<p
-									className="font-mono"
-									style={{
-										margin: "4px 0 0",
-										fontSize: 12,
-										lineHeight: 1.4,
-										whiteSpace: "normal",
-										overflowWrap: "anywhere",
-										color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
-									}}
-								>
-									{isTrashCard ? (
-										<span
-											style={{
-												color: SESSION_ACTIVITY_COLOR.muted,
-												textDecoration: "line-through",
-											}}
-										>
-											{reviewWorkspacePath}
+								<div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-xs text-text-tertiary">
+									<Tooltip content={reviewWorkspaceTooltip}>
+										<span className="flex min-w-0 items-center gap-1">
+											{isTrashCard ? (
+												<Archive size={11} className="shrink-0" />
+											) : isWorkspacePending ? (
+												<Clock3 size={11} className="shrink-0 text-status-gold" />
+											) : isJjWorkspace ? (
+												<Waypoints size={11} className="shrink-0 text-status-purple" />
+											) : (
+												<GitBranch size={11} className="shrink-0" />
+											)}
+											<span className="truncate">{isTrashCard ? "Workspace archived" : reviewRefLabel}</span>
 										</span>
-									) : reviewWorkspaceSnapshot ? (
-										<>
-											<span style={{ color: SESSION_ACTIVITY_COLOR.secondary }}>{reviewWorkspacePath}</span>
-											<GitBranch
-												size={10}
-												style={{
-													display: "inline",
-													color: SESSION_ACTIVITY_COLOR.secondary,
-													margin: "0px 4px 2px",
-													verticalAlign: "middle",
-												}}
-											/>
-											<span style={{ color: SESSION_ACTIVITY_COLOR.secondary }}>{reviewRefLabel}</span>
-											{reviewChangeSummary ? (
-												<>
-													<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}> (</span>
-													<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>
-														{reviewChangeSummary.filesLabel}
-													</span>
-													<span className="text-status-green"> +{reviewChangeSummary.additions}</span>
-													<span className="text-status-red"> -{reviewChangeSummary.deletions}</span>
-													<span style={{ color: SESSION_ACTIVITY_COLOR.muted }}>)</span>
-												</>
-											) : null}
-										</>
+									</Tooltip>
+									{!isTrashCard && !isWorkspacePending && reviewChangeSummary ? (
+										<span className="ml-auto flex shrink-0 items-center gap-1">
+											<span>{reviewChangeSummary.filesLabel}</span>
+											<span className="text-status-green">+{reviewChangeSummary.additions}</span>
+											<span className="text-status-red">−{reviewChangeSummary.deletions}</span>
+										</span>
 									) : null}
-								</p>
+								</div>
 							) : null}
 							{showReviewGitActions ? (
 								<div className="flex gap-1.5 mt-1.5">

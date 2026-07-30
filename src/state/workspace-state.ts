@@ -327,7 +327,24 @@ export async function loadWorkspaceBoardById(workspaceId: string): Promise<Runti
 async function readWorkspaceSessions(workspaceId: string): Promise<Record<string, RuntimeTaskSessionSummary>> {
 	const sessionsPath = getWorkspaceSessionsPath(workspaceId);
 	const rawSessions = await readJsonFile(sessionsPath);
-	return parsePersistedStateFile(sessionsPath, SESSIONS_FILENAME, rawSessions, workspaceSessionsSchema, {});
+	const migratedSessions =
+		rawSessions && typeof rawSessions === "object" && !Array.isArray(rawSessions)
+			? Object.fromEntries(
+					Object.entries(rawSessions).map(([taskId, session]) => {
+						if (
+							session &&
+							typeof session === "object" &&
+							!Array.isArray(session) &&
+							"agentId" in session &&
+							session.agentId === "cline"
+						) {
+							return [taskId, { ...session, agentId: null }];
+						}
+						return [taskId, session];
+					}),
+				)
+			: rawSessions;
+	return parsePersistedStateFile(sessionsPath, SESSIONS_FILENAME, migratedSessions, workspaceSessionsSchema, {});
 }
 
 async function readWorkspaceMeta(workspaceId: string): Promise<WorkspaceStateMeta> {

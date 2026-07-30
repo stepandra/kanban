@@ -99,7 +99,7 @@ function createSummary(
 	return {
 		taskId: "task-1",
 		state,
-		agentId: "cline",
+		agentId: "codex",
 		workspacePath: "/tmp/worktree",
 		pid: null,
 		startedAt: 1,
@@ -212,6 +212,28 @@ describe("BoardCard", () => {
 		expect(trashButton?.querySelector("svg.animate-spin")).toBeTruthy();
 	});
 
+	it("shows Amp Architect provenance as a compact origin marker", async () => {
+		const threadId = "T-019fb3aa-000b-752a-a88e-337592dae657";
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard({
+						origin: {
+							kind: "amp_architect",
+							threadId,
+						},
+					})}
+					index={0}
+					columnId="backlog"
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Amp Architect");
+		expect(container.textContent).not.toContain(threadId);
+		expect(container.querySelector(`[title="Created from Amp Architect thread ${threadId}"]`)).toBeTruthy();
+	});
+
 	it("shows inline see more and less controls for long descriptions", async () => {
 		const description =
 			"Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau final hidden segment";
@@ -248,7 +270,7 @@ describe("BoardCard", () => {
 		expect(container.textContent).not.toContain("final hidden segment");
 	});
 
-	it("reconstructs and shows trashed worktree path when workspace metadata is not tracked", async () => {
+	it("keeps archived workspace paths out of the default card hierarchy", async () => {
 		await act(async () => {
 			root.render(
 				<TooltipProvider>
@@ -262,7 +284,37 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.textContent).toContain("~/.local/share/kanban/task-workspaces/trash-task-1/kanban");
+		expect(container.textContent).toContain("Workspace archived");
+		expect(container.textContent).not.toContain("~/.local/share/kanban/task-workspaces/trash-task-1/kanban");
+	});
+
+	it("shows a compact jj change identity instead of the full workspace path", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/Users/alice/.local/share/kanban/task-workspaces/task-1/kanban",
+			exists: true,
+			branch: null,
+			isDetached: false,
+			headCommit: "11223344556677889900",
+			changeId: "zzxxyywwvvuuttssrrqq",
+			changedFiles: 3,
+			additions: 24,
+			deletions: 7,
+		};
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="in_progress" />
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).toContain("jj zzxxyyww");
+		expect(container.textContent).toContain("3 files");
+		expect(container.textContent).toContain("+24");
+		expect(container.textContent).toContain("−7");
+		expect(container.textContent).not.toContain("/Users/alice");
 	});
 
 	it("shows the agent override label on the card", async () => {
@@ -281,6 +333,26 @@ describe("BoardCard", () => {
 		expect(container.textContent).toContain("OpenAI Codex");
 	});
 
+	it("marks a legacy Cline task for reassignment and disables its start control", async () => {
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard({
+						removedAgentId: "cline",
+					})}
+					index={0}
+					columnId="backlog"
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Worker removed · reassign");
+		const startButton = container.querySelector<HTMLButtonElement>(
+			'button[aria-label="Assign a supported worker before starting"]',
+		);
+		expect(startButton?.disabled).toBe(true);
+	});
+
 	it("shows tool input details in the session preview text", async () => {
 		await act(async () => {
 			root.render(
@@ -291,7 +363,7 @@ describe("BoardCard", () => {
 					sessionSummary={{
 						taskId: "task-1",
 						state: "running",
-						agentId: "cline",
+						agentId: "codex",
 						workspacePath: "/tmp/worktree",
 						pid: null,
 						startedAt: Date.now(),
@@ -307,7 +379,7 @@ describe("BoardCard", () => {
 							finalMessage: null,
 							hookEventName: "tool_call",
 							notificationType: null,
-							source: "cline-sdk",
+							source: "codex",
 						},
 						latestTurnCheckpoint: null,
 						previousTurnCheckpoint: null,
@@ -320,7 +392,7 @@ describe("BoardCard", () => {
 		expect(container.textContent).not.toContain("Using Read");
 	});
 
-	it("shows non-cline tool activity in the compact tool label format", async () => {
+	it("shows tool activity in the compact tool label format", async () => {
 		await act(async () => {
 			root.render(
 				<BoardCard
@@ -427,7 +499,7 @@ describe("BoardCard", () => {
 		expect(container.textContent).not.toContain("fs_write");
 	});
 
-	it("keeps showing the last cline tool label during assistant streaming", async () => {
+	it("keeps showing the last tool label during assistant streaming", async () => {
 		await act(async () => {
 			root.render(
 				<BoardCard
@@ -437,7 +509,7 @@ describe("BoardCard", () => {
 					sessionSummary={{
 						taskId: "task-1",
 						state: "running",
-						agentId: "cline",
+						agentId: "codex",
 						workspacePath: "/tmp/worktree",
 						pid: null,
 						startedAt: Date.now(),
@@ -453,7 +525,7 @@ describe("BoardCard", () => {
 							finalMessage: "Looking at the file now",
 							hookEventName: "assistant_delta",
 							notificationType: null,
-							source: "cline-sdk",
+							source: "codex",
 						},
 						latestTurnCheckpoint: null,
 						previousTurnCheckpoint: null,

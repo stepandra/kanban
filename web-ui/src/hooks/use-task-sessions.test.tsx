@@ -5,14 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
 import type { BoardCard } from "@/types";
 
-const startTaskSessionMutateMock = vi.hoisted(() => vi.fn());
+const enqueueTaskExecutionMutateMock = vi.hoisted(() => vi.fn());
 const trackTaskResumedFromTrashMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
-			startTaskSession: {
-				mutate: startTaskSessionMutateMock,
+			enqueueTaskExecution: {
+				mutate: enqueueTaskExecutionMutateMock,
 			},
 		},
 	}),
@@ -65,24 +65,12 @@ describe("useTaskSessions", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
-		startTaskSessionMutateMock.mockReset();
+		enqueueTaskExecutionMutateMock.mockReset();
 		trackTaskResumedFromTrashMock.mockReset();
-		startTaskSessionMutateMock.mockResolvedValue({
+		enqueueTaskExecutionMutateMock.mockResolvedValue({
 			ok: true,
-			summary: {
-				taskId: "task-1",
-				state: "running",
-				agentId: "codex",
-				workspacePath: "/tmp/task-1",
-				pid: 123,
-				startedAt: 1,
-				updatedAt: 1,
-				lastOutputAt: null,
-				reviewReason: null,
-				exitCode: null,
-				lastHookAt: null,
-				latestHookActivity: null,
-			},
+			state: "queued",
+			task: { id: "task-1", generation: 1 },
 		});
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
@@ -153,7 +141,37 @@ describe("useTaskSessions", () => {
 		expect(trackTaskResumedFromTrashMock).not.toHaveBeenCalled();
 	});
 
-	it("forwards start-in-plan-mode from the task card when starting a task", async () => {
+	it("blocks legacy tasks that still reference the removed Cline worker", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+
+		const snapshot = latestSnapshot as HookSnapshot;
+		const result = await snapshot.startTaskSession({
+			...createTask(),
+			removedAgentId: "cline",
+		});
+
+		expect(result).toEqual({
+			ok: false,
+			message: "This task references the removed Cline worker. Assign a supported worker before starting it.",
+		});
+		expect(enqueueTaskExecutionMutateMock).not.toHaveBeenCalled();
+	});
+
+	it("enqueues a regular start by task identity", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {
@@ -171,27 +189,16 @@ describe("useTaskSessions", () => {
 		}
 
 		await act(async () => {
-			await latestSnapshot?.startTaskSession({
-				...createTask(),
-				startInPlanMode: true,
-			});
+			await latestSnapshot?.startTaskSession(createTask());
 		});
 
-		expect(startTaskSessionMutateMock).toHaveBeenCalledWith({
+		expect(enqueueTaskExecutionMutateMock).toHaveBeenCalledWith({
 			taskId: "task-1",
-			prompt: "Resume me",
-			taskTitle: "Resume me",
-			images: undefined,
-			startInPlanMode: true,
 			resumeFromTrash: undefined,
-			baseRef: "main",
-			cols: 120,
-			rows: 40,
-			agentId: undefined,
 		});
 	});
 
-	it("forwards task images when starting a task", async () => {
+	it("carries resume intent to the generation-fenced enqueue boundary", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
 		await act(async () => {
@@ -209,28 +216,12 @@ describe("useTaskSessions", () => {
 		}
 
 		await act(async () => {
-			await latestSnapshot?.startTaskSession({
-				...createTask(),
-				images: [
-					{
-						id: "img-1",
-						data: "abc123",
-						mimeType: "image/png",
-					},
-				],
-			});
+			await latestSnapshot?.startTaskSession(createTask(), { resumeFromTrash: true });
 		});
 
-		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
-			expect.objectContaining({
-				images: [
-					{
-						id: "img-1",
-						data: "abc123",
-						mimeType: "image/png",
-					},
-				],
-			}),
-		);
+		expect(enqueueTaskExecutionMutateMock).toHaveBeenCalledWith({
+			taskId: "task-1",
+			resumeFromTrash: true,
+		});
 	});
 });

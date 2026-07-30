@@ -65,9 +65,11 @@ function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata): Review
 	return {
 		taskId: metadata.taskId,
 		path: metadata.path,
+		exists: metadata.exists,
 		branch: metadata.branch,
 		isDetached: metadata.isDetached,
 		headCommit: metadata.headCommit,
+		changeId: metadata.changeId,
 		changedFiles: metadata.changedFiles,
 		additions: metadata.additions,
 		deletions: metadata.deletions,
@@ -142,9 +144,11 @@ function areTaskWorkspaceSnapshotsEqual(
 	return (
 		a.taskId === b.taskId &&
 		a.path === b.path &&
+		a.exists === b.exists &&
 		a.branch === b.branch &&
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
+		a.changeId === b.changeId &&
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions

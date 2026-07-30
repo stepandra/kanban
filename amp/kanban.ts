@@ -9,7 +9,7 @@ const KANBAN_BIN_ENV = "KANBAN_BIN";
 const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
 const AMP_WATCH_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const KANBAN_CONTEXT = `[stepandra/kanban]
-In this environment, Kanban means the installed stepandra/kanban fork of cline/kanban, not upstream cline/kanban and not Hermes.
+In this environment, Kanban means the installed stepandra/kanban application, not Hermes or another task board.
 The kanban_tasks tool and local kanban CLI are the durable source of truth for tasks, dependencies, task workspaces, review, and acceptance.
 Interactive Codex, Claude, Grok, and Kimi execution is owned by Kanban's terminal runtime; Zellij is only a replaceable view of durable sessions.
 Submitting a task to Review hands it to an isolated per-task Fixer Amp thread; the worker never accepts its own task.`;
@@ -78,7 +78,7 @@ export default function (amp: PluginAPI): void {
 	amp.registerTool({
 		name: KANBAN_TOOL_NAME,
 		description:
-			`Manage tasks with the installed stepandra/kanban fork of cline/kanban (${KANBAN_REPOSITORY}) for Amp's current workspace or an explicit Kanban project path. This never means Hermes or upstream cline/kanban. Use this when the user explicitly asks to list, create, update, link, start, submit for review, accept, or delete Kanban tasks. Assign Amp Orb work with agentId=amp; Claude, Codex, Grok, Kimi, and other local agents use their matching agentId. Executors submit completed work to review, which hands the task to an isolated per-task Fixer Amp thread; only that accepting reviewer uses done. For decomposition, create concrete independently executable tasks and link only real prerequisites: taskId waits on linkedTaskId. Actions other than list mutate the board.`,
+			`Manage tasks with the installed stepandra/kanban application (${KANBAN_REPOSITORY}) for Amp's current workspace or an explicit Kanban project path. This never means Hermes or another task board. Use this when the user explicitly asks to list, create, update, link, start, submit for review, accept, or delete Kanban tasks. Assign Amp Orb work with agentId=amp; Claude, Codex, Grok, Kimi, and other local agents use their matching agentId. Executors submit completed work to review, which hands the task to an isolated per-task Fixer Amp thread; only that accepting reviewer uses done. For decomposition, create concrete independently executable tasks and link only real prerequisites: taskId waits on linkedTaskId. Actions other than list mutate the board.`,
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -102,7 +102,7 @@ export default function (amp: PluginAPI): void {
 				prompt: { type: "string", description: "Task instructions for create/update." },
 				agentId: {
 					type: "string",
-					enum: ["amp", "claude", "codex", "grok", "kimi", "cline", "droid", "kiro", "gemini", "opencode"],
+					enum: ["amp", "claude", "codex", "grok", "kimi", "droid", "kiro", "gemini", "opencode"],
 					description: "Executor for create/update. amp runs the task in an Orb; other values select a local Kanban agent.",
 				},
 				baseRef: { type: "string", description: "Optional base revision for create/update." },
@@ -159,7 +159,7 @@ export default function (amp: PluginAPI): void {
 				(action === "submit" || action === "done") && typeof input.taskId === "string"
 					? await getTask(input.taskId, workspacePath)
 					: undefined;
-			const args = buildTaskArgs(input, workspacePath);
+			const args = buildTaskArgs(input, workspacePath, action === "create" ? ctx.thread.id : undefined);
 			const result = await runKanbanChecked(args, workspacePath);
 			// A task submitted, done, or trashed through this tool must end its Orb
 			// watch, or the watcher would later submit a stale receipt.
@@ -230,7 +230,11 @@ function getProjectPath(input: Record<string, unknown>, workspacePath: string): 
 	return explicitProjectPath ? resolve(workspacePath, explicitProjectPath) : workspacePath;
 }
 
-function buildTaskArgs(input: Record<string, unknown>, workspacePath: string): string[] {
+export function buildTaskArgs(
+	input: Record<string, unknown>,
+	workspacePath: string,
+	ampArchitectThreadId?: string,
+): string[] {
 	const action = requiredString(input, "action");
 	const args = ["task", action];
 
@@ -242,6 +246,9 @@ function buildTaskArgs(input: Record<string, unknown>, workspacePath: string): s
 			appendStringOption(args, "--title", input.title);
 			args.push("--prompt", requiredString(input, "prompt"));
 			appendTaskOptions(args, input);
+			if (ampArchitectThreadId) {
+				args.push("--origin-amp-thread-id", ampArchitectThreadId);
+			}
 			break;
 		case "update":
 			args.push("--task-id", requiredString(input, "taskId"));

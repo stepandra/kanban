@@ -6,17 +6,16 @@ import { useCallback } from "react";
 
 import { notifyError } from "@/components/app-toaster";
 import { selectNewestTaskSessionSummary } from "@/hooks/task-session-summary";
-import { estimateTaskSessionGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeTaskSessionSummary,
+	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeWorktreeDeleteResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "@/runtime/types";
 import { trackTaskResumedFromTrash } from "@/telemetry/events";
 import { getTerminalController } from "@/terminal/terminal-controller-registry";
-import { getTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard } from "@/types";
 
@@ -39,6 +38,7 @@ interface SendTaskSessionInputResult {
 interface StartTaskSessionResult {
 	ok: boolean;
 	message?: string;
+	attempt?: RuntimeTaskExecutionAttemptReference;
 }
 
 interface StartTaskSessionOptions {
@@ -128,40 +128,34 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 			if (!currentProjectId) {
 				return { ok: false, message: "No project selected." };
 			}
+			if (task.removedAgentId === "cline") {
+				return {
+					ok: false,
+					message: "This task references the removed Cline worker. Assign a supported worker before starting it.",
+				};
+			}
 			try {
-				const kickoffPrompt = options?.resumeFromTrash ? "" : task.prompt.trim();
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				const geometry =
-					getTerminalGeometry(task.id) ?? estimateTaskSessionGeometry(window.innerWidth, window.innerHeight);
-				const payload = await trpcClient.runtime.startTaskSession.mutate({
+				const payload = await trpcClient.runtime.enqueueTaskExecution.mutate({
 					taskId: task.id,
-					prompt: kickoffPrompt,
-					taskTitle: task.title,
-					images: options?.resumeFromTrash ? undefined : task.images,
-					startInPlanMode: options?.resumeFromTrash ? undefined : task.startInPlanMode,
 					resumeFromTrash: options?.resumeFromTrash,
-					baseRef: task.baseRef,
-					cols: geometry.cols,
-					rows: geometry.rows,
-					agentId: task.agentId,
 				});
-				if (!payload.ok || !payload.summary) {
+				if (!payload.ok) {
 					return {
 						ok: false,
-						message: payload.error ?? "Task session start failed.",
+						message: payload.error ?? "Task execution enqueue failed.",
 					};
 				}
-				upsertSession(payload.summary);
 				if (options?.resumeFromTrash) {
 					trackTaskResumedFromTrash();
 				}
-				return { ok: true };
+				return { ok: true, ...(payload.attempt ? { attempt: payload.attempt } : {}) };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { ok: false, message };
 			}
 		},
-		[currentProjectId, upsertSession],
+		[currentProjectId],
 	);
 
 	const stopTaskSession = useCallback(

@@ -12,6 +12,7 @@ import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import { DebugDialog } from "@/components/debug-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
+import { buildJjTaskLinks, JjHistoryView } from "@/components/jj-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
@@ -47,6 +48,7 @@ import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 import { useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import { useTaskBranchOptions } from "@/hooks/use-task-branch-options";
 import { useTaskEditor } from "@/hooks/use-task-editor";
+import { useTaskExecutionProjections } from "@/hooks/use-task-execution-projections";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
 import { useTaskStartActions } from "@/hooks/use-task-start-actions";
 import { useTerminalPanels } from "@/hooks/use-terminal-panels";
@@ -203,6 +205,7 @@ export default function App(): ReactElement {
 		setCanPersistWorkspaceState,
 	});
 	const gitFeaturesEnabled = workspaceVcs === "git";
+	const executionProjections = useTaskExecutionProjections({ board, currentProjectId });
 	const { selectedTaskId, selectedCard, setSelectedTaskId, handleBack } = useDetailTaskNavigation({
 		board,
 		currentProjectId,
@@ -317,10 +320,10 @@ export default function App(): ReactElement {
 	});
 
 	useEffect(() => {
-		if (!gitFeaturesEnabled) {
+		if (!workspaceVcs) {
 			setIsGitHistoryOpen(false);
 		}
-	}, [gitFeaturesEnabled]);
+	}, [workspaceVcs]);
 
 	useEffect(() => {
 		taskEditorResetRef.current = resetTaskEditorState;
@@ -526,6 +529,10 @@ export default function App(): ReactElement {
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
 	}, []);
+	const jjTaskLinks = useMemo(
+		() => buildJjTaskLinks(board, workspaceMetadata?.taskWorkspaces ?? []),
+		[board, workspaceMetadata],
+	);
 
 	const {
 		handleProgrammaticCardMoveReady,
@@ -588,7 +595,7 @@ export default function App(): ReactElement {
 		selectedCard,
 		isDetailTerminalOpen,
 		isHomeTerminalOpen: showHomeBottomTerminal,
-		isHomeGitHistoryOpen: gitFeaturesEnabled && !selectedCard && isGitHistoryOpen,
+		isHomeGitHistoryOpen: workspaceVcs !== null && !selectedCard && isGitHistoryOpen,
 		canUseCreateTaskShortcut: !hasNoProjects && currentProjectId !== null,
 		handleToggleDetailTerminal,
 		handleToggleHomeTerminal,
@@ -842,11 +849,24 @@ export default function App(): ReactElement {
 												}}
 												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
 											/>
+										) : workspaceVcs === "jj" && isGitHistoryOpen ? (
+											<JjHistoryView
+												workspaceId={currentProjectId}
+												taskLinks={jjTaskLinks}
+												onSelectTask={(taskId) => {
+													setIsGitHistoryOpen(false);
+													handleCardSelect(taskId);
+												}}
+												onClose={handleCloseGitHistory}
+											/>
 										) : (
 											<KanbanBoard
 												data={board}
 												taskSessions={sessions}
+												executionProjections={executionProjections}
 												workspacePath={workspacePath}
+												workspaceVcs={workspaceVcs}
+												onOpenRepositoryView={workspaceVcs === "jj" ? handleToggleGitHistory : undefined}
 												onCardSelect={handleCardSelect}
 												onCreateTask={handleOpenCreateTask}
 												onStartTask={handleStartTaskFromBoard}
@@ -929,6 +949,8 @@ export default function App(): ReactElement {
 									selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 									runtimeConfig={runtimeProjectConfig ?? null}
 									sessionSummary={detailSession}
+									executionProjection={executionProjections[selectedCard.card.id] ?? null}
+									dependencies={board.dependencies}
 									taskSessions={sessions}
 									onSessionSummary={upsertSession}
 									onCardSelect={handleCardSelect}

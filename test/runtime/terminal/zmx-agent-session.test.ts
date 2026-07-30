@@ -100,7 +100,7 @@ describe("prepareZmxAgentSession", () => {
 	});
 
 	it("rejects agents whose catalog entry opts out of durable sessions", () => {
-		for (const agentId of ["cline", "droid", "kiro"] as const) {
+		for (const agentId of ["droid", "kiro"] as const) {
 			expect(
 				prepareZmxAgentSession({
 					agentId,
@@ -129,7 +129,6 @@ describe("durable-session eligibility (RUNTIME_AGENT_CATALOG)", () => {
 			codex: true,
 			grok: true,
 			kimi: true,
-			cline: false,
 			opencode: false,
 			droid: false,
 			kiro: false,

@@ -5,6 +5,7 @@ import type {
 	RuntimeGitSummaryResponse,
 	RuntimeGitSyncAction,
 	RuntimeGitSyncResponse,
+	RuntimeJjGraphResponse,
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceFileSearchResponse,
 	RuntimeWorkspaceStateResponse,
@@ -24,6 +25,7 @@ import {
 } from "../workspace/get-workspace-changes";
 import { getCommitDiff, getGitLog, getGitRefs } from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
+import { getJjGraph } from "../workspace/jj-graph";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
 import {
 	deleteTaskWorktree,
@@ -368,6 +370,12 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				refs: input.refs ?? null,
 				maxCount: input.maxCount,
 				skip: input.skip,
+			});
+		},
+		loadJjGraph: async (workspaceScope, input): Promise<RuntimeJjGraphResponse> => {
+			return await getJjGraph({
+				cwd: workspaceScope.workspacePath,
+				maxCount: input.maxCount,
 			});
 		},
 		loadGitRefs: async (workspaceScope, input) => {

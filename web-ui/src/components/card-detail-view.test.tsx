@@ -50,6 +50,7 @@ vi.mock("@/runtime/use-runtime-workspace-changes", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceStateVersionValue: () => 0,
+	useTaskWorkspaceSnapshotValue: () => null,
 }));
 
 vi.mock("@/resize/layout-customizations", () => ({
@@ -618,5 +619,36 @@ describe("CardDetailView", () => {
 		});
 
 		expect(requireDetailDiffFileTreePanel(container).style.flex).toBe("0 0 18%");
+	});
+
+	it("shows the Amp Architect reference and a supported continuation command", async () => {
+		const selection = createSelection();
+		selection.card.origin = {
+			kind: "amp_architect",
+			threadId: "T-019fb3aa-000b-752a-a88e-337592dae657",
+		};
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Origin · Amp Architect");
+		expect(container.textContent).toContain("amp threads continue T-019fb3aa-000b-752a-a88e-337592dae657");
+		expect(container.querySelector('button[title^="amp threads continue T-"]')).toBeInstanceOf(HTMLButtonElement);
 	});
 });

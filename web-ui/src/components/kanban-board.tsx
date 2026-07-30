@@ -16,13 +16,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardBulkActionBar } from "@/components/board-bulk-action-bar";
 import { BoardColumn } from "@/components/board-column";
 import { BoardFilterControls } from "@/components/board-filter-controls";
+import { BoardOperationalSummary } from "@/components/board-operational-summary";
 import { DependencyOverlay } from "@/components/dependencies/dependency-overlay";
 import { useDependencyLinking } from "@/components/dependencies/use-dependency-linking";
 import { Button } from "@/components/ui/button";
 import { useBoardFilter } from "@/hooks/use-board-filter";
 import { useBoardSelection } from "@/hooks/use-board-selection";
 import { useBoardSpatialNavigation } from "@/hooks/use-board-spatial-navigation";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskExecutionProjection, RuntimeTaskSessionSummary, RuntimeVcsMode } from "@/runtime/types";
 import { canCreateTaskDependency } from "@/state/board-state";
 import { findCardColumnId, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard, BoardColumnId, BoardData, BoardDependency } from "@/types";
@@ -38,6 +39,7 @@ function isRectVerticallyVisibleWithinContainer(rect: DOMRect, containerRect: DO
 export function KanbanBoard({
 	data,
 	taskSessions,
+	executionProjections = {},
 	onCardSelect,
 	onCreateTask,
 	onStartTask,
@@ -61,11 +63,14 @@ export function KanbanBoard({
 	onDragEnd,
 	onRequestProgrammaticCardMoveReady,
 	workspacePath,
+	workspaceVcs,
+	onOpenRepositoryView,
 	onMoveTasksToColumn,
 	isInteractionActive = true,
 }: {
 	data: BoardData;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
+	executionProjections?: Record<string, RuntimeTaskExecutionProjection>;
 	onCardSelect: (taskId: string) => void;
 	onCreateTask: () => void;
 	onStartTask?: (taskId: string) => void;
@@ -89,6 +94,8 @@ export function KanbanBoard({
 	onDragEnd: (result: DropResult) => void;
 	onRequestProgrammaticCardMoveReady?: (requestMove: RequestProgrammaticCardMove | null) => void;
 	workspacePath?: string | null;
+	workspaceVcs?: RuntimeVcsMode | null;
+	onOpenRepositoryView?: () => void;
 	onMoveTasksToColumn?: (taskIds: string[], toColumnId: BoardColumnId) => void;
 	isInteractionActive?: boolean;
 }): React.ReactElement {
@@ -98,6 +105,8 @@ export function KanbanBoard({
 	const latestDataRef = useRef<BoardData>(data);
 	const programmaticCardMoveInFlightRef = useRef<ProgrammaticCardMoveInFlight | null>(null);
 	const [activeDragTaskId, setActiveDragTaskId] = useState<string | null>(null);
+	const [attentionOnly, setAttentionOnly] = useState(false);
+	const [reviewOnly, setReviewOnly] = useState(false);
 
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardColumnId | null>(null);
 	const [programmaticCardMoveInFlight, setProgrammaticCardMoveInFlight] =
@@ -388,14 +397,36 @@ export function KanbanBoard({
 	const selection = useBoardSelection(data);
 
 	const visibleColumns = useMemo(() => {
-		if (!boardFilter.isFilterActive) {
+		if (!boardFilter.isFilterActive && !attentionOnly && !reviewOnly) {
 			return data.columns;
 		}
 		return data.columns.map((column) => ({
 			...column,
-			cards: column.cards.filter((card) => boardFilter.isCardVisible(card, taskSessions[card.id])),
+			cards: column.cards.filter((card) => {
+				if (reviewOnly && column.id !== "review") {
+					return false;
+				}
+				if (!boardFilter.isCardVisible(card, taskSessions[card.id])) {
+					return false;
+				}
+				if (!attentionOnly) {
+					return true;
+				}
+				const sessionState = taskSessions[card.id]?.state;
+				const execution = executionProjections[card.id];
+				return Boolean(
+					card.removedAgentId ||
+						sessionState === "failed" ||
+						sessionState === "interrupted" ||
+						(execution &&
+							(execution.generation !== (card.generation ?? 1) ||
+								execution.status === "failed" ||
+								execution.status === "cancelled" ||
+								execution.status === "unknown")),
+				);
+			}),
 		}));
-	}, [boardFilter, data.columns, taskSessions]);
+	}, [attentionOnly, boardFilter, data.columns, executionProjections, reviewOnly, taskSessions]);
 
 	const visibleCardCount = useMemo(
 		() => visibleColumns.reduce((count, column) => count + column.cards.length, 0),
@@ -412,7 +443,10 @@ export function KanbanBoard({
 					continue;
 				}
 				if (!labelByAgentId.has(card.agentId)) {
-					labelByAgentId.set(card.agentId, getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId);
+					labelByAgentId.set(
+						card.agentId,
+						card.agentId === "amp" ? "Amp Orb" : (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId),
+					);
 				}
 			}
 		}
@@ -494,37 +528,55 @@ export function KanbanBoard({
 			sensors={[programmaticSensor]}
 		>
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-				<div className="flex items-center justify-between gap-2 px-2 pt-2">
-					<BoardFilterControls
-						query={boardFilter.query}
-						onQueryChange={boardFilter.setQuery}
-						agentId={boardFilter.agentId}
-						onAgentIdChange={boardFilter.setAgentId}
-						sessionState={boardFilter.sessionState}
-						onSessionStateChange={boardFilter.setSessionState}
-						agentOptions={agentFilterOptions}
-						isBoardActive={isInteractionActive}
+				<div className="flex items-center gap-2 px-2 pt-2">
+					<BoardOperationalSummary
+						data={data}
+						taskSessions={taskSessions}
+						executionProjections={executionProjections}
+						workspaceVcs={workspaceVcs}
+						onOpenRepositoryView={onOpenRepositoryView}
+						onShowReview={() => {
+							setReviewOnly((current) => !current);
+							setAttentionOnly(false);
+						}}
+						onShowAttention={() => {
+							setAttentionOnly((current) => !current);
+							setReviewOnly(false);
+						}}
+						attentionActive={attentionOnly}
 					/>
-					{selection.selectedTaskIds.length > 0 ? (
-						<BoardBulkActionBar
-							selectedCount={selection.selectedTaskIds.length}
-							canStart={selectedColumnCounts.backlog > 0}
-							canMoveToReview={selectedColumnCounts.trash > 0}
-							canMoveToTrash={selectedColumnCounts.backlog + selectedColumnCounts.other > 0}
-							onMoveToColumn={handleBulkMoveToColumn}
-							onClearSelection={selection.clearSelection}
+					<div className="ml-auto flex min-w-0 items-center gap-2">
+						<BoardFilterControls
+							query={boardFilter.query}
+							onQueryChange={boardFilter.setQuery}
+							agentId={boardFilter.agentId}
+							onAgentIdChange={boardFilter.setAgentId}
+							sessionState={boardFilter.sessionState}
+							onSessionStateChange={boardFilter.setSessionState}
+							agentOptions={agentFilterOptions}
+							isBoardActive={isInteractionActive}
 						/>
-					) : (
-						<Button
-							size="sm"
-							variant={selection.isSelectionMode ? "default" : "ghost"}
-							icon={<ListChecks size={14} />}
-							aria-pressed={selection.isSelectionMode}
-							onClick={() => selection.setIsSelectionMode(!selection.isSelectionMode)}
-						>
-							{selection.isSelectionMode ? "Done" : "Select"}
-						</Button>
-					)}
+						{selection.selectedTaskIds.length > 0 ? (
+							<BoardBulkActionBar
+								selectedCount={selection.selectedTaskIds.length}
+								canStart={selectedColumnCounts.backlog > 0}
+								canMoveToReview={selectedColumnCounts.trash > 0}
+								canMoveToTrash={selectedColumnCounts.backlog + selectedColumnCounts.other > 0}
+								onMoveToColumn={handleBulkMoveToColumn}
+								onClearSelection={selection.clearSelection}
+							/>
+						) : (
+							<Button
+								size="sm"
+								variant={selection.isSelectionMode ? "default" : "ghost"}
+								icon={<ListChecks size={14} />}
+								aria-pressed={selection.isSelectionMode}
+								onClick={() => selection.setIsSelectionMode(!selection.isSelectionMode)}
+							>
+								{selection.isSelectionMode ? "Done" : "Select"}
+							</Button>
+						)}
+					</div>
 				</div>
 				<div className="relative flex min-h-0 min-w-0 flex-1">
 					<section
@@ -537,6 +589,7 @@ export function KanbanBoard({
 								key={column.id}
 								column={column}
 								taskSessions={taskSessions}
+								executionProjections={executionProjections}
 								onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
 								onStartTask={column.id === "backlog" ? onStartTask : undefined}
 								onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}

@@ -18,6 +18,8 @@ import {
 	GitCommit,
 	Palette,
 	Plus,
+	RefreshCw,
+	ServerCog,
 	Settings,
 	SlidersHorizontal,
 	X,
@@ -38,14 +40,20 @@ import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-act
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
-import type { RuntimeAgentId, RuntimeConfigResponse, RuntimeProjectShortcut } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeConfigResponse,
+	RuntimeProjectShortcut,
+	RuntimeSystemReadinessResponse,
+} from "@/runtime/types";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import { useRuntimeConfig } from "@/runtime/use-runtime-config";
+import { useTrpcQuery } from "@/runtime/use-trpc-query";
 import {
 	type BrowserNotificationPermission,
 	getBrowserNotificationPermission,
 	requestBrowserNotificationPermission,
 } from "@/utils/notification-permission";
-import { formatPathForDisplay } from "@/utils/path-display";
 import { useUnmount, useWindowEvent } from "@/utils/react-use";
 
 interface RuntimeSettingsAgentRowModel {
@@ -79,17 +87,18 @@ const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }>
 
 export type RuntimeSettingsSection = "shortcuts";
 
-const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "droid", "kiro"];
+const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["claude", "codex", "grok", "kimi"];
 
-type SettingsNavId = "general" | "git-prompts" | "notifications" | "appearance" | "project";
+type SettingsNavId = "readiness" | "general" | "git-prompts" | "notifications" | "appearance" | "project";
 
 const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 	id: SettingsNavId;
 	label: string;
 	icon: React.ReactNode;
 }> = [
-	{ id: "general", label: "General", icon: <SlidersHorizontal size={16} /> },
-	{ id: "git-prompts", label: "Git Prompts", icon: <GitCommit size={16} /> },
+	{ id: "readiness", label: "System readiness", icon: <ServerCog size={16} /> },
+	{ id: "general", label: "Execution", icon: <SlidersHorizontal size={16} /> },
+	{ id: "git-prompts", label: "Review", icon: <GitCommit size={16} /> },
 	{ id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
 	{ id: "appearance", label: "Appearance", icon: <Palette size={16} /> },
 	{ id: "project", label: "Project", icon: <FolderOpen size={16} /> },
@@ -364,7 +373,18 @@ export function RuntimeSettingsDialog({
 	const shortcutRowRefs = useRef<Array<HTMLDivElement | null>>([]);
 	const bodyRef = useRef<HTMLDivElement>(null);
 	const isScrollingProgrammatically = useRef(false);
-	const [activeSection, setActiveSection] = useState<SettingsNavId>("general");
+	const [activeSection, setActiveSection] = useState<SettingsNavId>("readiness");
+	const readinessQueryFn = useCallback(async (): Promise<RuntimeSystemReadinessResponse> => {
+		if (!workspaceId) {
+			return { generatedAt: Date.now(), checks: [] };
+		}
+		return await getRuntimeTrpcClient(workspaceId).runtime.getSystemReadiness.query();
+	}, [workspaceId]);
+	const readinessQuery = useTrpcQuery({
+		enabled: open && Boolean(workspaceId),
+		queryFn: readinessQueryFn,
+		retainDataOnError: true,
+	});
 	const controlsDisabled = isLoading || isSaving || config === null;
 	const commitPromptTemplateDefault = config?.commitPromptTemplateDefault ?? "";
 	const openPrPromptTemplateDefault = config?.openPrPromptTemplateDefault ?? "";
@@ -473,6 +493,10 @@ export function RuntimeSettingsDialog({
 		if (!open) {
 			return;
 		}
+		if (initialSection !== "shortcuts") {
+			setActiveSection("readiness");
+			bodyRef.current?.scrollTo({ top: 0 });
+		}
 		setSelectedAgentId(configuredAgentId ?? fallbackAgentId);
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
@@ -512,6 +536,7 @@ export function RuntimeSettingsDialog({
 		if (!open || initialSection !== "shortcuts") {
 			return;
 		}
+		setActiveSection("project");
 		const timeout = window.setTimeout(() => {
 			shortcutsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
 		}, 500);
@@ -551,7 +576,7 @@ export function RuntimeSettingsDialog({
 		if (!body) return;
 		const headings = body.querySelectorAll<HTMLElement>("[data-settings-section]");
 		const bodyRect = body.getBoundingClientRect();
-		let current: SettingsNavId = "general";
+		let current: SettingsNavId = "readiness";
 
 		for (const heading of headings) {
 			const rect = heading.getBoundingClientRect();
@@ -697,12 +722,67 @@ export function RuntimeSettingsDialog({
 					onScroll={handleBodyScroll}
 					className="px-5 pb-5 overflow-y-auto overscroll-contain flex-1 min-h-0 bg-surface-1"
 				>
+					{/* ---- System readiness ---- */}
+					<div data-settings-section="readiness" />
+					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
+						<div className="flex items-center justify-between">
+							<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">
+								<ServerCog size={16} className="text-text-secondary" />
+								System readiness
+							</h2>
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<RefreshCw size={13} />}
+								onClick={() => void readinessQuery.refetch()}
+								disabled={readinessQuery.isLoading || !workspaceId}
+							>
+								Refresh
+							</Button>
+						</div>
+					</div>
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<p className="mt-0 mb-3 text-[13px] text-text-secondary">
+							Read-only checks. This page never starts workers, repairs state, or queues tasks.
+						</p>
+						<div className="grid gap-2">
+							{readinessQuery.data?.checks.map((check) => (
+								<div
+									key={check.id}
+									className="flex items-start justify-between gap-3 rounded-md border border-border bg-surface-2 px-3 py-2"
+								>
+									<div>
+										<div className="text-[13px] font-medium text-text-primary">{check.label}</div>
+										<div className="mt-0.5 text-xs text-text-secondary">{check.detail}</div>
+									</div>
+									<span
+										className={cn(
+											"rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+											check.status === "ready" && "bg-status-green/10 text-status-green",
+											check.status === "stopped" && "bg-status-gold/10 text-status-gold",
+											check.status === "degraded" && "bg-status-orange/10 text-status-orange",
+											check.status === "unavailable" && "bg-status-red/10 text-status-red",
+										)}
+									>
+										{check.status}
+									</span>
+								</div>
+							))}
+							{readinessQuery.isLoading && !readinessQuery.data ? (
+								<p className="text-[13px] text-text-secondary">Checking local control-plane dependencies…</p>
+							) : null}
+							{readinessQuery.isError && !readinessQuery.data ? (
+								<p className="text-[13px] text-status-red">Readiness checks are unavailable.</p>
+							) : null}
+						</div>
+					</div>
+
 					{/* ---- General ---- */}
 					<div data-settings-section="general" />
 					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
 						<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">
 							<SlidersHorizontal size={16} className="text-text-secondary" />
-							General
+							Execution
 						</h2>
 					</div>
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
@@ -749,7 +829,7 @@ export function RuntimeSettingsDialog({
 					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
 						<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">
 							<GitCommit size={16} className="text-text-secondary" />
-							Git Prompts
+							Review automation
 						</h2>
 					</div>
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
@@ -951,7 +1031,7 @@ export function RuntimeSettingsDialog({
 						</h2>
 					</div>
 					<p
-						className="text-text-secondary font-mono text-xs m-0 mb-3 break-all"
+						className="text-text-secondary text-xs m-0 mb-3"
 						style={{ cursor: config?.projectConfigPath ? "pointer" : undefined }}
 						onClick={() => {
 							if (config?.projectConfigPath) {
@@ -959,9 +1039,7 @@ export function RuntimeSettingsDialog({
 							}
 						}}
 					>
-						{config?.projectConfigPath
-							? formatPathForDisplay(config.projectConfigPath)
-							: "<project>/.cline/kanban/config.json"}
+						{config?.projectConfigPath ? "Project-scoped Kanban configuration" : "Project configuration"}
 						{config?.projectConfigPath ? <ExternalLink size={12} className="inline ml-1.5 align-middle" /> : null}
 					</p>
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
@@ -1070,7 +1148,7 @@ export function RuntimeSettingsDialog({
 					variant="ghost"
 					className="mr-auto mt-[3px]"
 					icon={<ExternalLink size={14} />}
-					onClick={() => window.open("https://docs.cline.bot/kanban/overview", "_blank")}
+					onClick={() => window.open("https://github.com/stepandra/kanban#readme", "_blank")}
 				>
 					Read the docs
 				</Button>

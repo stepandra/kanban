@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { RuntimeBoardData } from "../../src/core/api-contract";
+import { type RuntimeBoardData, runtimeBoardCardSchema } from "../../src/core/api-contract";
 import {
 	addTaskDependency,
 	addTaskToColumn,
@@ -397,5 +397,121 @@ describe("per-task agent overrides", () => {
 
 		expect(moved.moved).toBe(true);
 		expect(moved.task?.agentId).toBe("claude");
+	});
+});
+
+describe("task execution generation", () => {
+	it("starts new tasks at generation one", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", agentId: "codex" },
+			() => "aaaaa111",
+		);
+
+		expect(created.task.generation).toBe(1);
+	});
+
+	it("increments only when the execution contract changes", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", agentId: "codex", priority: 5 },
+			() => "aaaaa111",
+		);
+		const metadataOnly = updateTask(created.board, created.task.id, {
+			title: "Renamed task",
+			prompt: "Task",
+			baseRef: "main",
+			agentId: "codex",
+			priority: 10,
+		});
+		const changedPrompt = updateTask(metadataOnly.board, created.task.id, {
+			title: "Renamed task",
+			prompt: "Changed task",
+			baseRef: "main",
+			agentId: "codex",
+		});
+
+		expect(metadataOnly.task?.generation).toBe(1);
+		expect(changedPrompt.task?.generation).toBe(2);
+	});
+
+	it("preserves Amp Architect provenance without treating it as execution state", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{
+				prompt: "Task",
+				baseRef: "main",
+				agentId: "codex",
+				origin: {
+					kind: "amp_architect",
+					threadId: "T-019fb3aa-000b-752a-a88e-337592dae657",
+				},
+			},
+			() => "aaaaa111",
+		);
+		const updated = updateTask(created.board, created.task.id, {
+			title: "Renamed task",
+			prompt: "Task",
+			baseRef: "main",
+			agentId: "codex",
+		});
+
+		expect(created.task.origin).toEqual({
+			kind: "amp_architect",
+			threadId: "T-019fb3aa-000b-752a-a88e-337592dae657",
+		});
+		expect(updated.task?.origin).toEqual(created.task.origin);
+		expect(updated.task?.generation).toBe(1);
+	});
+
+	it("loads legacy tasks without provenance", () => {
+		const legacyCard = runtimeBoardCardSchema.parse({
+			id: "legacy",
+			title: "Legacy task",
+			prompt: "Legacy task",
+			startInPlanMode: false,
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+
+		expect(legacyCard.origin).toBeUndefined();
+	});
+
+	it("migrates legacy Cline cards to a blocked marker and advances on reassignment", () => {
+		const legacyCard = runtimeBoardCardSchema.parse({
+			id: "legacy",
+			title: "Legacy task",
+			prompt: "Legacy task",
+			startInPlanMode: false,
+			agentId: "cline",
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		const board: RuntimeBoardData = {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [legacyCard] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		};
+		const reassigned = updateTask(board, "legacy", {
+			title: "Legacy task",
+			prompt: "Legacy task",
+			baseRef: "main",
+			agentId: "codex",
+		});
+
+		expect(legacyCard.agentId).toBeUndefined();
+		expect(legacyCard.removedAgentId).toBe("cline");
+		expect(reassigned.task?.agentId).toBe("codex");
+		expect(reassigned.task?.removedAgentId).toBeUndefined();
+		expect(reassigned.task?.generation).toBe(2);
 	});
 });

@@ -6,7 +6,9 @@ import type {
 	RuntimeBoardDependency,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskImage,
+	RuntimeTaskOrigin,
 } from "./api-contract";
+import { incrementTaskGeneration, resolveTaskGeneration } from "./task-execution-reference";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
 
@@ -20,6 +22,7 @@ export interface RuntimeCreateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
 	priority?: number;
+	origin?: RuntimeTaskOrigin;
 	baseRef: string;
 }
 
@@ -45,6 +48,51 @@ function normalizeTaskAutoReviewMode(value: RuntimeTaskAutoReviewMode | null | u
 // Copy image metadata so board tasks do not retain caller-owned array or object references.
 function cloneTaskImages(images?: RuntimeTaskImage[]): RuntimeTaskImage[] | undefined {
 	return images && images.length > 0 ? images.map((image) => ({ ...image })) : undefined;
+}
+
+function areTaskImagesEqual(left: RuntimeTaskImage[] | undefined, right: RuntimeTaskImage[] | undefined): boolean {
+	if (left === right) {
+		return true;
+	}
+	if (!left || !right || left.length !== right.length) {
+		return false;
+	}
+	return left.every((image, index) => {
+		const candidate = right[index];
+		return (
+			candidate !== undefined &&
+			image.id === candidate.id &&
+			image.data === candidate.data &&
+			image.mimeType === candidate.mimeType &&
+			image.name === candidate.name
+		);
+	});
+}
+
+export interface RuntimeTaskExecutionContract {
+	prompt: string;
+	startInPlanMode: boolean;
+	images?: RuntimeTaskImage[];
+	agentId?: RuntimeAgentId;
+	removedAgentId?: "cline";
+	baseRef: string;
+}
+
+export function resolveUpdatedTaskGeneration(
+	task: Pick<
+		RuntimeBoardCard,
+		"generation" | "prompt" | "startInPlanMode" | "images" | "agentId" | "removedAgentId" | "baseRef"
+	>,
+	nextContract: RuntimeTaskExecutionContract,
+): number {
+	const executionContractChanged =
+		task.prompt !== nextContract.prompt ||
+		task.startInPlanMode !== nextContract.startInPlanMode ||
+		!areTaskImagesEqual(task.images, nextContract.images) ||
+		task.agentId !== nextContract.agentId ||
+		task.removedAgentId !== nextContract.removedAgentId ||
+		task.baseRef !== nextContract.baseRef;
+	return executionContractChanged ? incrementTaskGeneration(task.generation) : resolveTaskGeneration(task.generation);
 }
 
 export interface RuntimeCreateTaskResult {
@@ -336,6 +384,8 @@ export function addTaskToColumn(
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.priority !== undefined ? { priority: input.priority } : {}),
+		generation: 1,
+		...(input.origin ? { origin: { ...input.origin } } : {}),
 		baseRef,
 		createdAt: now,
 		updatedAt: now,
@@ -647,17 +697,30 @@ export function updateTask(
 			if (card.id !== normalizedTaskId) {
 				return card;
 			}
+			const images = input.images === undefined ? card.images : cloneTaskImages(input.images);
+			const agentId = input.agentId === undefined ? card.agentId : (input.agentId ?? undefined);
+			const removedAgentId = input.agentId === undefined ? card.removedAgentId : undefined;
+			const startInPlanMode = Boolean(input.startInPlanMode);
 			columnUpdated = true;
 			updatedTask = {
 				...card,
 				title: resolveTaskTitle(input.title, prompt),
 				prompt,
-				startInPlanMode: Boolean(input.startInPlanMode),
+				startInPlanMode,
 				autoReviewEnabled: Boolean(input.autoReviewEnabled),
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
-				images: input.images === undefined ? card.images : cloneTaskImages(input.images),
-				agentId: input.agentId === undefined ? card.agentId : (input.agentId ?? undefined),
-					priority: input.priority === undefined ? card.priority : (input.priority ?? undefined),
+				images,
+				agentId,
+				removedAgentId,
+				priority: input.priority === undefined ? card.priority : (input.priority ?? undefined),
+				generation: resolveUpdatedTaskGeneration(card, {
+					prompt,
+					startInPlanMode,
+					images,
+					agentId,
+					removedAgentId,
+					baseRef,
+				}),
 				baseRef,
 				updatedAt: now,
 			};

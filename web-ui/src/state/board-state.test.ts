@@ -566,6 +566,77 @@ describe("board dependency state", () => {
 		]);
 	});
 
+	it("normalizes legacy Cline cards as blocked generation-one tasks", () => {
+		const normalized = normalizeBoardData({
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "legacy",
+							prompt: "Legacy task",
+							startInPlanMode: false,
+							agentId: "cline",
+							baseRef: "main",
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		});
+		const legacyTask = normalized?.columns.find((column) => column.id === "backlog")?.cards[0];
+
+		expect(legacyTask?.agentId).toBeUndefined();
+		expect(legacyTask?.removedAgentId).toBe("cline");
+		expect(legacyTask?.generation).toBe(1);
+	});
+
+	it("preserves valid Amp Architect provenance and discards malformed origin metadata", () => {
+		const normalized = normalizeBoardData({
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "valid",
+							prompt: "Valid origin",
+							startInPlanMode: false,
+							baseRef: "main",
+							origin: {
+								kind: "amp_architect",
+								threadId: "T-019fb3aa-000b-752a-a88e-337592dae657",
+							},
+						},
+						{
+							id: "invalid",
+							prompt: "Invalid origin",
+							startInPlanMode: false,
+							baseRef: "main",
+							origin: {
+								kind: "amp_architect",
+								threadId: "not-a-thread",
+							},
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		});
+		const cards = normalized?.columns.find((column) => column.id === "backlog")?.cards ?? [];
+
+		expect(cards.find((card) => card.id === "valid")?.origin).toEqual({
+			kind: "amp_architect",
+			threadId: "T-019fb3aa-000b-752a-a88e-337592dae657",
+		});
+		expect(cards.find((card) => card.id === "invalid")?.origin).toBeUndefined();
+	});
+
 	it("disables auto-review settings for a task", () => {
 		let board = createInitialBoardData();
 		board = addTaskToColumn(board, "review", {

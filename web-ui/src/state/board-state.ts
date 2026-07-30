@@ -3,7 +3,7 @@ import { createShortTaskId } from "@runtime-task-id";
 import * as runtimeTaskState from "@runtime-task-state";
 
 import { createInitialBoardData } from "@/data/board-data";
-import type { RuntimeAgentId } from "@/runtime/types";
+import type { RuntimeAgentId, RuntimeTaskOrigin } from "@/runtime/types";
 import { isAllowedCrossColumnCardMove, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import {
 	type BoardCard,
@@ -95,6 +95,24 @@ function normalizeTaskImages(rawImages: unknown): TaskImage[] | undefined {
 	return images.length > 0 ? images : undefined;
 }
 
+function normalizeTaskOrigin(rawOrigin: unknown): RuntimeTaskOrigin | undefined {
+	if (!rawOrigin || typeof rawOrigin !== "object") {
+		return undefined;
+	}
+	const origin = rawOrigin as { kind?: unknown; threadId?: unknown };
+	if (
+		origin.kind !== "amp_architect" ||
+		typeof origin.threadId !== "string" ||
+		!/^T-[A-Za-z0-9][A-Za-z0-9-]*$/u.test(origin.threadId)
+	) {
+		return undefined;
+	}
+	return {
+		kind: "amp_architect",
+		threadId: origin.threadId,
+	};
+}
+
 function normalizeCard(rawCard: unknown): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
@@ -110,6 +128,10 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		images?: unknown;
 		baseRef?: unknown;
 		agentId?: unknown;
+		removedAgentId?: unknown;
+		generation?: unknown;
+		origin?: unknown;
+		execution?: unknown;
 		createdAt?: unknown;
 		updatedAt?: unknown;
 	};
@@ -126,6 +148,19 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		return null;
 	}
 	const now = Date.now();
+	const origin = normalizeTaskOrigin(card.origin);
+	const execution =
+		card.execution &&
+		typeof card.execution === "object" &&
+		typeof (card.execution as { attemptId?: unknown }).attemptId === "string" &&
+		typeof (card.execution as { generation?: unknown }).generation === "number" &&
+		typeof (card.execution as { queuedAt?: unknown }).queuedAt === "number"
+			? {
+					attemptId: (card.execution as { attemptId: string }).attemptId,
+					generation: (card.execution as { generation: number }).generation,
+					queuedAt: (card.execution as { queuedAt: number }).queuedAt,
+				}
+			: undefined;
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
@@ -138,10 +173,40 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		),
 		images: normalizeTaskImages(card.images),
 		baseRef,
-		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
+		...(typeof card.agentId === "string" && card.agentId !== "cline"
+			? { agentId: card.agentId as RuntimeAgentId }
+			: {}),
+		...(card.agentId === "cline" || card.removedAgentId === "cline" ? { removedAgentId: "cline" as const } : {}),
+		generation:
+			typeof card.generation === "number" && Number.isSafeInteger(card.generation) && card.generation > 0
+				? card.generation
+				: 1,
+		...(origin ? { origin } : {}),
+		...(execution ? { execution } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
 		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
 	};
+}
+
+export function recordTaskExecutionAttempt(
+	board: BoardData,
+	taskId: string,
+	execution: NonNullable<BoardCard["execution"]>,
+): BoardData {
+	let changed = false;
+	const columns = board.columns.map((column) => {
+		let columnChanged = false;
+		const cards = column.cards.map((card) => {
+			if (card.id !== taskId) {
+				return card;
+			}
+			changed = true;
+			columnChanged = true;
+			return { ...card, execution: { ...execution }, updatedAt: Date.now() };
+		});
+		return columnChanged ? { ...column, cards } : column;
+	});
+	return changed ? withUpdatedColumns(board, columns) : board;
 }
 
 function createDependencyId(): string {
@@ -466,22 +531,33 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 			if (card.id !== taskId) {
 				return card;
 			}
+			const images =
+				draft.images === undefined
+					? card.images
+					: draft.images.length > 0
+						? draft.images.map((image) => ({ ...image }))
+						: undefined;
+			const startInPlanMode = Boolean(draft.startInPlanMode);
 			columnUpdated = true;
 			updated = true;
 			return {
 				...card,
 				title: title || card.title,
 				prompt,
-				startInPlanMode: Boolean(draft.startInPlanMode),
+				startInPlanMode,
 				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
 				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
-				images:
-					draft.images === undefined
-						? card.images
-						: draft.images.length > 0
-							? draft.images.map((image) => ({ ...image }))
-							: undefined,
+				images,
 				agentId: draft.agentId,
+				removedAgentId: draft.agentId === undefined ? card.removedAgentId : undefined,
+				generation: runtimeTaskState.resolveUpdatedTaskGeneration(card, {
+					prompt,
+					startInPlanMode,
+					images,
+					agentId: draft.agentId,
+					removedAgentId: draft.agentId === undefined ? card.removedAgentId : undefined,
+					baseRef,
+				}),
 				baseRef,
 				updatedAt: Date.now(),
 			};

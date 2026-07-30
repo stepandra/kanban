@@ -38,9 +38,11 @@ const workspaceSnapshots: Record<string, ReviewTaskWorkspaceSnapshot> = {
 	"task-1": {
 		taskId: "task-1",
 		path: "/tmp/task-1",
+		exists: true,
 		branch: "task-1",
 		isDetached: false,
 		headCommit: "abc123",
+		changeId: null,
 		changedFiles: 3,
 		additions: 10,
 		deletions: 2,

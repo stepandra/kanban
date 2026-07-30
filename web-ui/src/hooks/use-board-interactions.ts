@@ -16,6 +16,7 @@ import {
 	findCardSelection,
 	getTaskColumnId,
 	moveTaskToColumn,
+	recordTaskExecutionAttempt,
 	updateTask,
 } from "@/state/board-state";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
@@ -354,6 +355,9 @@ export function useBoardInteractions({
 				}
 				return false;
 			}
+			if (started.attempt) {
+				setBoard((currentBoard) => recordTaskExecutionAttempt(currentBoard, taskId, started.attempt!));
+			}
 			if (!optimisticMove) {
 				setBoard((currentBoard) => {
 					const currentColumnId = getTaskColumnId(currentBoard, taskId);
@@ -572,7 +576,8 @@ export function useBoardInteractions({
 			if (resumed.ok) {
 				setBoard((currentBoard) => {
 					const disabledAutoReview = disableTaskAutoReview(currentBoard, taskId);
-					return disabledAutoReview.updated ? disabledAutoReview.board : currentBoard;
+					const nextBoard = disabledAutoReview.updated ? disabledAutoReview.board : currentBoard;
+					return resumed.attempt ? recordTaskExecutionAttempt(nextBoard, taskId, resumed.attempt) : nextBoard;
 				});
 				return;
 			}

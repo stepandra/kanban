@@ -13,20 +13,23 @@ If you remember nothing else, remember this:
 - agents are process-oriented
 - the backend coordinates everything through one runtime API and one state stream
 
-## Decision record: the native Cline SDK runtime was removed
+## Decision record: Cline was removed as a Kanban worker
 
 Kanban previously shipped a second execution path: Cline ran through a native
 SDK-backed chat runtime (`src/cline-sdk/` on top of the published
 `@clinebot/core` / `@clinebot/llms` packages), while every other agent ran as
-a PTY-backed CLI process. That native runtime has been removed:
+a PTY-backed CLI process. The native runtime and the later external Cline
+worker path have both been removed:
 
 - `src/cline-sdk/` and its TRPC surface (provider settings, OAuth, MCP
   settings, task chat endpoints) are gone
 - the `@clinebot/*` packages are no longer dependencies
 - the Cline web-ui surfaces (chat panel, provider/model pickers, account and
   MCP settings) are gone
-- Cline remains in the agent catalog as an external CLI (`cline` binary)
-  launched through the same PTY path as every other agent
+- Cline is not present in the agent catalog, launch adapters, task creation
+  controls, or Amp task schema
+- persisted cards that still reference Cline are retained as blocked legacy
+  cards and must be reassigned before they can start
 
 Tradeoff, stated plainly: removing the native runtime **diverges from upstream
 `cline/kanban`**, so upstream merges will be harder — anything upstream that
@@ -34,8 +37,8 @@ touches `src/cline-sdk/`, the Cline chat UI, or the provider-settings TRPC
 surface will conflict. We accepted that cost in exchange for a single agent
 execution model, a much smaller dependency and cold-start surface (the SDK
 host can no longer be started accidentally, e.g. on trash-restore probes), and
-the removal of an entire settings/OAuth/MCP stack that duplicated what the
-external Cline CLI already does itself.
+the removal of an entire settings/OAuth/MCP stack and an unused worker
+integration.
 
 ## System Diagram
 
@@ -67,7 +70,7 @@ external Cline CLI already does itself.
                                         v
 +---------------------------------------+------------------------------------------+
 | Worktrees and shell processes                                                    |
-| per-task cwd, CLI agents (Claude Code, Codex, Grok, Kimi, Cline, Droid, Kiro),   |
+| per-task cwd, CLI agents (Claude Code, Codex, Grok, Kimi, Droid, Kiro),          |
 | workspace shell                                                                  |
 +----------------------------------------------------------------------------------+
 ```
@@ -120,11 +123,14 @@ The browser layer is the presentation and orchestration layer. It renders the bo
 
 The runtime layer is the control layer. It decides what session to start, where it should run, what worktree or workspace it belongs to, what command should be used, and what state should be streamed back to the browser.
 
-The execution layer is the actual agent implementation: a CLI process attached to a PTY.
+The execution layer is the actual agent implementation: a CLI process attached
+to a durable zmx session. Absurd owns the queued/running execution attempt and
+admission; Kanban owns the task, generation, workspace, and deterministic zmx
+identity. A terminal attachment is only a local projection of that execution.
 
 That split explains a lot of the architecture:
 
-- the browser should not be the source of truth for session lifecycle
+- the browser should not be the source of truth for session or execution-attempt lifecycle
 - the runtime should coordinate work, not render UI
 - agent differences belong in the agent catalog and per-agent launch adapters, not in parallel runtime stacks
 
@@ -134,7 +140,7 @@ Kanban currently supports two runtime modes.
 
 | Runtime mode | Used for | Scope | Backing implementation | Why it exists |
 | --- | --- | --- | --- | --- |
-| CLI-backed task terminal | Claude Code, Codex, Grok, Kimi, Cline, Gemini, OpenCode, Droid, Kiro, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
+| CLI-backed task terminal | Claude Code, Codex, Grok, Kimi, Gemini, OpenCode, Droid, Kiro, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
 | Workspace shell terminal | the bottom shell panel | workspace-scoped | PTY-backed shell process | this is for manual commands in the repo, not task execution |
 
 ## Core Concepts
@@ -146,8 +152,8 @@ These terms come up everywhere in the codebase.
 | Workspace | an indexed git repository that Kanban has opened | most browser and runtime state is scoped to a workspace |
 | Task card | a board item with a prompt, base ref, and review settings | a task is the unit of work the board cares about |
 | Worktree | a per-task git worktree | most task agents run inside one |
-| Task session | the live runtime attached to a task card | a PTY process managed by the terminal session manager |
-| Runtime summary | the small state object the board uses to know whether a session is idle, running, awaiting review, interrupted, or failed | this is the bridge between long-running agent work and the UI |
+| Task session | the local runtime attachment associated with a task card | it is not proof that an Absurd attempt is queued or running |
+| Runtime summary | the small state object the board uses to know whether a local session is idle, running, awaiting review, interrupted, or failed | this is a bounded runtime projection, not scheduler truth |
 
 ## Who Owns What
 
@@ -157,7 +163,8 @@ One of the biggest cleanup themes was making ownership clearer. The system is mu
 | --- | --- | --- |
 | board state, workspace state, review state | Kanban | this is product state |
 | worktree lifecycle | Kanban | task worktrees are a Kanban concept |
-| agent process lifecycle | Kanban | the terminal runtime owns process start, resize, output, and stop |
+| execution attempts, admission, waits, retries, and results | Absurd | Kanban may retain an attempt reference and bounded read-only status projection |
+| deterministic zmx identity and process attachment | Kanban | retries within a task generation reuse the same identity |
 | agent authentication and provider settings | each agent CLI | CLIs own their own login and config; Kanban only launches them |
 | UI rendering state for detail view | browser hooks and components | local UI state belongs in the frontend |
 | live state fanout to the browser | `runtime-state-hub.ts` | the browser should react to streamed state, not poll |
@@ -185,7 +192,7 @@ The `src/terminal/` area owns everything process-oriented:
 - translating process lifecycle into Kanban runtime summaries
 - handling the workspace shell terminal
 
-This is the single execution path for every agent, including the external Cline CLI.
+This is the single execution path for every supported task agent.
 
 ### Workspace and config
 
@@ -221,10 +228,17 @@ Different state lives in different places on purpose.
 | per-project UI or workflow state | workspace state or project config | this is workspace-scoped product state |
 | agent credentials and provider settings | each agent CLI's own config | the CLIs already own auth and provider persistence |
 | task runtime summaries | Kanban runtime memory and state stream | the board needs a lightweight product-shaped summary of current work |
+| Amp Architect task origin | immutable task metadata in workspace board state | operators can return to the planning context without making Amp a lifecycle authority |
 
 ## Amp Task Planning
 
 Task decomposition lives in Amp through the self-contained `amp/kanban.ts` plugin. The plugin exposes typed Kanban task operations to the active Amp thread and a command-palette action that opens a native `medium` thread for focused decomposition. It can also start cards assigned to `amp` in an Orb and watches the native thread response before submitting successful work to review. Kanban does not embed a separate planning agent in the project sidebar.
+
+When that plugin creates a task, it captures the active Architect thread as
+immutable `origin.kind = "amp_architect"` metadata. Worker/Orb threads remain
+separate execution context. The board renders a compact human label and the
+detail view exposes the supported `amp threads continue <thread-id>` command;
+neither surface can update task lifecycle from Amp thread state.
 
 Task completion has two deliberately separate operations. `submit` moves in-progress work to review without cleanup or dependency unblocking; executors and runtime hooks use it when implementation is ready for inspection. `done` is the acceptance operation: it stops the session, removes the task workspace where appropriate, and unblocks linked work. An executor must not collapse those gates by calling `done` itself.
 
@@ -232,7 +246,20 @@ Task completion has two deliberately separate operations. `submit` moves in-prog
 
 ### Starting a task session
 
-When the user starts a task, the browser asks the runtime to start a task session. The runtime resolves the task cwd, resolves the effective agent (previous session's agent on trash-restore, then the card's override, then the workspace default), chooses the matching command from the agent catalog, and starts a PTY-backed process inside the task worktree. As the process runs, the terminal runtime emits summary updates and terminal output. The runtime state hub then streams those updates back to the browser so the board and detail view stay live.
+The authoritative CLI/Amp start path enqueues a generation-fenced execution
+reference through Absurd. After admission, the bounded Absurd worker invokes
+the hidden direct-start entrypoint; Kanban revalidates the generation, resolves
+the task workspace and effective worker, and attaches the deterministic zmx
+session. As the process runs, the terminal runtime emits attachment summaries
+and terminal output. The runtime state hub streams those projections back to
+the browser.
+
+The browser Start action uses the same enqueue boundary and receives a queued
+receipt rather than manufacturing a running session summary. Its compact
+execution reference also carries resume intent; after admission, direct-start
+reconstructs task images and plan mode from the authoritative card. The direct
+session endpoint rejects browser callers and accepts only the runtime's internal
+bearer context used by the Absurd worker.
 
 ### Turn checkpoints
 
@@ -261,8 +288,9 @@ These rules are intentionally narrow. They exist to protect the seams that are e
 
 Not everything is perfectly generalized, and that is okay. Some current tradeoffs are intentional.
 
-- removing the native Cline runtime diverges from upstream `cline/kanban`, making upstream merges harder (see the decision record above)
-- the external Cline CLI runs through the generic PTY adapter set, so Cline-specific UX (rich chat semantics, in-app provider settings) no longer exists
+- removing Cline as a native runtime and external worker diverges from upstream
+  `cline/kanban`, making upstream merges harder (see the decision record above)
+- legacy Cline task records are migration input only; they are never launchable
 
 The important thing is that these tradeoffs are now explicit. They are not random accidents spread through the codebase.
 
@@ -284,7 +312,7 @@ A new engineer opening this repo will probably notice a few things quickly:
 - the backend is long-lived and stateful, not a thin stateless API server
 - the browser is closer to a local control client than a traditional web app
 - the task system, review system, and runtime system are tightly connected
-- every agent, including Cline, runs through the same PTY-backed terminal runtime
+- every supported task agent runs through the same PTY-backed terminal runtime
 - the architecture now favors clean ownership over compatibility glue because this area did not have legacy users to preserve
 
 If you approach the code with those assumptions, the rest of the system starts to make sense much faster.

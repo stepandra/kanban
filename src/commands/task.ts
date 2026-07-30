@@ -1,6 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
 
@@ -9,9 +6,10 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
+	RuntimeTaskOrigin,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
-import { runtimeAgentIdSchema } from "../core/api-contract";
+import { runtimeAgentIdSchema, runtimeAmpThreadIdSchema } from "../core/api-contract";
 import { dispatchReviewFixer } from "../core/review-fixer";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
@@ -25,13 +23,19 @@ import {
 	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../core/task-board-mutations";
+import {
+	assertCurrentTaskExecutionReference,
+	formatTaskExecutionReference,
+	parseTaskExecutionReference,
+	resolveTaskGeneration,
+} from "../core/task-execution-reference";
+import { enqueueAbsurdTaskStart } from "../orchestration/absurd-task-start";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
-const execFileAsync = promisify(execFile);
 type ListTaskColumn = (typeof LIST_TASK_COLUMNS)[number];
 type TaskCommandTarget = { taskId?: string; column?: ListTaskColumn };
 
@@ -100,6 +104,20 @@ function parseAgentId(value: string | undefined): RuntimeAgentId | null | undefi
 		return result.data;
 	}
 	throw new Error(`Invalid agent ID "${value}". Expected one of: ${VALID_AGENT_IDS.join(", ")}, default.`);
+}
+
+function parseAmpArchitectOrigin(threadId: string | undefined): RuntimeTaskOrigin | undefined {
+	if (threadId === undefined) {
+		return undefined;
+	}
+	const parsed = runtimeAmpThreadIdSchema.safeParse(threadId.trim());
+	if (!parsed.success) {
+		throw new Error(`Invalid Amp Architect thread ID "${threadId}".`);
+	}
+	return {
+		kind: "amp_architect",
+		threadId: parsed.data,
+	};
 }
 
 function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string): ResolvedTaskCommandTarget {
@@ -231,6 +249,8 @@ function formatTaskRecord(
 		autoReviewEnabled: task.autoReviewEnabled === true,
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		...(task.agentId ? { agentId: task.agentId } : {}),
+		...(task.origin ? { origin: task.origin } : {}),
+		generation: resolveTaskGeneration(task.generation),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
 		session: session
@@ -382,6 +402,7 @@ async function createTask(input: {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
+	origin?: RuntimeTaskOrigin;
 }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -401,6 +422,7 @@ async function createTask(input: {
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
+				origin: input.origin,
 				baseRef: resolvedBaseRef,
 			},
 			() => globalThis.crypto.randomUUID(),
@@ -424,6 +446,8 @@ async function createTask(input: {
 			autoReviewEnabled: created.autoReviewEnabled === true,
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
+			...(created.origin ? { origin: created.origin } : {}),
+			generation: resolveTaskGeneration(created.generation),
 		},
 	};
 }
@@ -568,33 +592,17 @@ async function enqueueTaskStart(input: { cwd: string; taskId: string; projectPat
 			`Task "${input.taskId}" is in "${record.columnId}" and can only be started from backlog or in_progress.`,
 		);
 	}
-
-	const zjAgent = process.env.ZJ_AGENT_BIN ?? `${process.env.HOME}/.config/zellij/bin/zj-agent`;
-	let stdout: string;
-	try {
-		({ stdout } = await execFileAsync(
-			zjAgent,
-			[
-				"kanban-enqueue",
-				"--task-id",
-				record.task.id,
-				"--project-path",
-				workspaceRepoPath,
-				"--agent",
-				record.task.agentId ?? "codex",
-			],
-			{ encoding: "utf8", timeout: 10_000 },
-		));
-	} catch (error) {
-		throw new Error(`Could not enqueue task through Absurd: ${toErrorMessage(error)}`);
+	if (record.task.removedAgentId === "cline") {
+		throw new Error(
+			`Task "${record.task.id}" still references the removed Cline worker. Assign a supported worker before starting it.`,
+		);
 	}
 
-	let orchestration: unknown;
-	try {
-		orchestration = JSON.parse(stdout);
-	} catch {
-		throw new Error("Absurd enqueue returned invalid JSON.");
-	}
+	const orchestration = await enqueueAbsurdTaskStart({
+		taskExecutionReference: formatTaskExecutionReference(record.task.id, record.task.generation),
+		projectPath: workspaceRepoPath,
+		agentId: record.task.agentId ?? "codex",
+	});
 	return {
 		ok: true,
 		state: "queued",
@@ -602,6 +610,7 @@ async function enqueueTaskStart(input: { cwd: string; taskId: string; projectPat
 			id: record.task.id,
 			column: record.columnId,
 			agentId: record.task.agentId,
+			generation: resolveTaskGeneration(record.task.generation),
 			workspacePath: workspaceRepoPath,
 		},
 		orchestration,
@@ -609,26 +618,39 @@ async function enqueueTaskStart(input: { cwd: string; taskId: string; projectPat
 }
 
 async function startTaskDirect(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+	const executionReference = parseTaskExecutionReference(input.taskId);
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	const runtimeState = await runtimeClient.workspace.getState.query();
-	const fromColumnId = getTaskColumnId(runtimeState.board, input.taskId);
+	const fromColumnId = getTaskColumnId(runtimeState.board, executionReference.taskId);
 	if (!fromColumnId) {
-		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+		throw new Error(`Task "${executionReference.taskId}" was not found in workspace ${workspaceRepoPath}.`);
 	}
 
-	if (fromColumnId !== "backlog" && fromColumnId !== "in_progress") {
+	const canStartFromCurrentColumn =
+		fromColumnId === "backlog" ||
+		fromColumnId === "in_progress" ||
+		(executionReference.resumeFromTrash && (fromColumnId === "trash" || fromColumnId === "review"));
+	if (!canStartFromCurrentColumn) {
 		throw new Error(
-			`Task "${input.taskId}" is in "${fromColumnId}" and can only be started from backlog or in_progress.`,
+			`Task "${executionReference.taskId}" is in "${fromColumnId}" and cannot be ${
+				executionReference.resumeFromTrash ? "resumed" : "started"
+			}.`,
 		);
 	}
 
-	const currentRecord = findTaskRecord(runtimeState, input.taskId);
+	const currentRecord = findTaskRecord(runtimeState, executionReference.taskId);
 	const task = currentRecord?.task;
 	if (!task) {
-		throw new Error(`Task "${input.taskId}" could not be resolved.`);
+		throw new Error(`Task "${executionReference.taskId}" could not be resolved.`);
 	}
+	if (task.removedAgentId === "cline") {
+		throw new Error(
+			`Task "${task.id}" still references the removed Cline worker. Assign a supported worker before starting it.`,
+		);
+	}
+	assertCurrentTaskExecutionReference(executionReference, task.id, task.generation);
 
 	// startTaskSession is idempotent for a live manager and reattaches a durable
 	// zmx-backed session after a runtime restart. Do not trust a persisted
@@ -644,9 +666,11 @@ async function startTaskDirect(input: { cwd: string; taskId: string; projectPath
 
 		const started = await runtimeClient.runtime.startTaskSession.mutate({
 			taskId: task.id,
-			prompt: task.prompt,
+			prompt: executionReference.resumeFromTrash ? "" : task.prompt,
 			taskTitle: task.title,
-			startInPlanMode: task.startInPlanMode,
+			images: executionReference.resumeFromTrash ? undefined : task.images,
+			startInPlanMode: executionReference.resumeFromTrash ? undefined : task.startInPlanMode,
+			resumeFromTrash: executionReference.resumeFromTrash || undefined,
 			baseRef: task.baseRef,
 			agentId: task.agentId,
 		});
@@ -655,31 +679,45 @@ async function startTaskDirect(input: { cwd: string; taskId: string; projectPath
 		}
 	}
 
-	const moved = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (latestState) => {
-		const movement = moveTaskToColumn(latestState.board, input.taskId, "in_progress");
-		if (!movement.task) {
-			throw new Error(`Task "${input.taskId}" could not be resolved.`);
-		}
-		if (!movement.moved) {
+	let moved: ReturnType<typeof moveTaskToColumn>;
+	try {
+		moved = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (latestState) => {
+			const latestRecord = findTaskRecord(latestState, executionReference.taskId);
+			if (!latestRecord) {
+				throw new Error(`Task "${executionReference.taskId}" could not be resolved.`);
+			}
+			assertCurrentTaskExecutionReference(executionReference, latestRecord.task.id, latestRecord.task.generation);
+			const targetColumnId = executionReference.resumeFromTrash ? "review" : "in_progress";
+			const movement = moveTaskToColumn(latestState.board, executionReference.taskId, targetColumnId);
+			if (!movement.task) {
+				throw new Error(`Task "${executionReference.taskId}" could not be resolved.`);
+			}
+			if (!movement.moved) {
+				return {
+					board: latestState.board,
+					value: movement,
+				};
+			}
 			return {
-				board: latestState.board,
+				board: movement.board,
 				value: movement,
 			};
-		}
-		return {
-			board: movement.board,
-			value: movement,
-		};
-	});
+		});
+	} catch (error) {
+		await stopTaskRuntimeSession(runtimeClient, task.id).catch(() => undefined);
+		throw error;
+	}
 
 	if (!moved.moved) {
 		return {
 			ok: true,
-			message: `Task "${input.taskId}" is already in progress.`,
+			message: executionReference.resumeFromTrash
+				? `Task "${executionReference.taskId}" is already in review.`
+				: `Task "${executionReference.taskId}" is already in progress.`,
 			task: {
 				id: task.id,
 				prompt: task.prompt,
-				column: "in_progress",
+				column: executionReference.resumeFromTrash ? "review" : "in_progress",
 				workspacePath: workspaceRepoPath,
 			},
 		};
@@ -690,7 +728,7 @@ async function startTaskDirect(input: { cwd: string; taskId: string; projectPath
 		task: {
 			id: task.id,
 			prompt: task.prompt,
-			column: "in_progress",
+			column: executionReference.resumeFromTrash ? "review" : "in_progress",
 			workspacePath: workspaceRepoPath,
 		},
 	};
@@ -1189,6 +1227,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")} | default.`)
+		.option("--origin-amp-thread-id <thread-id>", "Amp Architect provenance supplied by the Amp plugin.")
 		.action(
 			async (options: {
 				title?: string;
@@ -1199,6 +1238,7 @@ export function registerTaskCommand(program: Command): void {
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
+				originAmpThreadId?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1212,6 +1252,7 @@ export function registerTaskCommand(program: Command): void {
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId) ?? undefined,
+							origin: parseAmpArchitectOrigin(options.originAmpThreadId),
 						}),
 				);
 			},
@@ -1423,7 +1464,7 @@ export function registerTaskCommand(program: Command): void {
 	task
 		.command("start-direct", { hidden: true })
 		.description("Internal Absurd worker entrypoint for starting a task session.")
-		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--task-id <reference>", "Generation-fenced task execution reference.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.action(async (options: { taskId: string; projectPath?: string }) => {
 			await runTaskCommand(async () => {

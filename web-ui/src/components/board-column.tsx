@@ -6,13 +6,14 @@ import { useCallback } from "react";
 import { BoardCard } from "@/components/board-card";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
-import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskExecutionProjection, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardCard as BoardCardModel, BoardColumnId, BoardColumn as BoardColumnModel } from "@/types";
 
 export function BoardColumn({
 	column,
 	taskSessions,
+	executionProjections = {},
 	onCreateTask,
 	onStartTask,
 	onStartAllTasks,
@@ -46,6 +47,7 @@ export function BoardColumn({
 }: {
 	column: BoardColumnModel;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
+	executionProjections?: Record<string, RuntimeTaskExecutionProjection>;
 	onCreateTask?: () => void;
 	onStartTask?: (taskId: string) => void;
 	onStartAllTasks?: () => void;
@@ -196,6 +198,7 @@ export function BoardColumn({
 											index={draggableIndex}
 											columnId={column.id}
 											sessionSummary={taskSessions[card.id]}
+											executionProjection={executionProjections[card.id]}
 											selected={selectedTaskIds?.has(card.id) ?? false}
 											keyboardFocused={keyboardFocusedTaskId === card.id}
 											onStart={onStartTask}

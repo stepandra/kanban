@@ -128,8 +128,7 @@ function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): 
 			agentId === "gemini" ||
 			agentId === "opencode" ||
 			agentId === "droid" ||
-			agentId === "kiro" ||
-			agentId === "cline") &&
+			agentId === "kiro") &&
 		isRuntimeAgentLaunchSupported(agentId)
 	) {
 		return agentId;

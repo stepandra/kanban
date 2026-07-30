@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeBoardData, RuntimeWorkspaceMetadata } from "../../src/core/api-contract";
 import { runtimeBoardDataSchema } from "../../src/core/api-contract";
 import { createWorkspaceMetadataMonitor } from "../../src/server/workspace-metadata-monitor";
+import { detectRepositoryKind } from "../../src/state/workspace-state";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../../src/workspace/git-sync";
+import { readJjWorkspaceState } from "../../src/workspace/jj-utils";
 import { getTaskWorkspacePathInfo } from "../../src/workspace/task-worktree";
 
 vi.mock("../../src/state/workspace-state", () => ({
@@ -28,6 +30,8 @@ vi.mock("../../src/workspace/task-worktree", () => ({
 
 const probeMock = vi.mocked(probeGitWorkspaceState);
 const summaryMock = vi.mocked(getGitSyncSummary);
+const detectRepositoryKindMock = vi.mocked(detectRepositoryKind);
+const readJjWorkspaceStateMock = vi.mocked(readJjWorkspaceState);
 const taskPathInfoMock = vi.mocked(getTaskWorkspacePathInfo);
 
 let stateToken = "token-0";
@@ -62,6 +66,9 @@ function createMonitor() {
 beforeEach(() => {
 	stateToken = "token-0";
 	changedFiles = 0;
+	detectRepositoryKindMock.mockReset();
+	detectRepositoryKindMock.mockReturnValue("git");
+	readJjWorkspaceStateMock.mockReset();
 	probeMock.mockReset();
 	probeMock.mockImplementation(async () => ({
 		repoRoot: "/repo",
@@ -98,6 +105,43 @@ afterEach(() => {
 });
 
 describe("createWorkspaceMetadataMonitor", () => {
+	it("publishes jj change identity with task workspace metadata", async () => {
+		detectRepositoryKindMock.mockReturnValue("jj");
+		taskPathInfoMock.mockResolvedValue({
+			taskId: "task-1",
+			path: "/repo/.worktrees/task-1",
+			exists: true,
+			baseRef: "main",
+		});
+		readJjWorkspaceStateMock.mockResolvedValue({
+			changeId: "zzxxyywwvvuuttssrrqq",
+			commitId: "11223344556677889900",
+			changedFiles: 3,
+			additions: 24,
+			deletions: 7,
+			stateToken: "jj-token-1",
+		});
+		const { monitor } = createMonitor();
+
+		try {
+			const snapshot = await monitor.connectWorkspace({
+				workspaceId: "ws-1",
+				workspacePath: "/repo",
+				board: makeBoard(["task-1"]),
+			});
+
+			expect(snapshot.homeGitSummary).toBeNull();
+			expect(snapshot.taskWorkspaces[0]).toMatchObject({
+				taskId: "task-1",
+				changeId: "zzxxyywwvvuuttssrrqq",
+				headCommit: "11223344556677889900",
+				changedFiles: 3,
+			});
+		} finally {
+			monitor.close();
+		}
+	});
+
 	it("backs off polling instead of running a fixed 1s subprocess while idle", async () => {
 		vi.useFakeTimers();
 		const { monitor, onMetadataUpdated } = createMonitor();

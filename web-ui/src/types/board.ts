@@ -3,6 +3,8 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskImage,
+	RuntimeTaskOrigin,
+	RuntimeTaskExecutionAttemptReference,
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
@@ -44,6 +46,10 @@ export interface BoardCard {
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
+	removedAgentId?: "cline";
+	generation?: number;
+	origin?: RuntimeTaskOrigin;
+	execution?: RuntimeTaskExecutionAttemptReference;
 	baseRef: string;
 	createdAt: number;
 	updatedAt: number;
@@ -70,9 +76,11 @@ export interface BoardData {
 export interface ReviewTaskWorkspaceSnapshot {
 	taskId: string;
 	path: string;
+	exists: boolean;
 	branch: string | null;
 	isDetached: boolean;
 	headCommit: string | null;
+	changeId: string | null;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;
