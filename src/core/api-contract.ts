@@ -111,6 +111,52 @@ export const runtimeTaskExecutionAttemptReferenceSchema = z.object({
 });
 export type RuntimeTaskExecutionAttemptReference = z.infer<typeof runtimeTaskExecutionAttemptReferenceSchema>;
 
+export const runtimeTrackIdSchema = z
+	.string()
+	.trim()
+	.min(1)
+	.max(80)
+	.regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u);
+export type RuntimeTrackId = z.infer<typeof runtimeTrackIdSchema>;
+
+export const runtimeMilestoneIdSchema = z
+	.string()
+	.trim()
+	.min(1)
+	.max(100)
+	.regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u);
+export type RuntimeMilestoneId = z.infer<typeof runtimeMilestoneIdSchema>;
+
+export const runtimeTrackSchema = z.object({
+	id: runtimeTrackIdSchema,
+	name: z.string().trim().min(1).max(120),
+	description: z.string().trim().min(1).max(1_000).optional(),
+	order: z.number().int().nonnegative(),
+	archivedAt: z.number().int().nonnegative().optional(),
+});
+export type RuntimeTrack = z.infer<typeof runtimeTrackSchema>;
+
+export const runtimeMilestoneStateSchema = z.enum(["planned", "active", "accepted", "archived"]);
+export type RuntimeMilestoneState = z.infer<typeof runtimeMilestoneStateSchema>;
+
+export const runtimeMilestoneSchema = z.object({
+	id: runtimeMilestoneIdSchema,
+	trackId: runtimeTrackIdSchema,
+	title: z.string().trim().min(1).max(160),
+	definitionOfDone: z.string().trim().min(1).max(2_000).optional(),
+	state: runtimeMilestoneStateSchema,
+	order: z.number().int().nonnegative(),
+	scopeRevision: z.number().int().nonnegative(),
+});
+export type RuntimeMilestone = z.infer<typeof runtimeMilestoneSchema>;
+
+export const runtimeTaskPlanningContextSchema = z.object({
+	trackId: runtimeTrackIdSchema,
+	milestoneId: runtimeMilestoneIdSchema,
+	weight: z.number().positive().max(100).optional(),
+});
+export type RuntimeTaskPlanningContext = z.infer<typeof runtimeTaskPlanningContextSchema>;
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -126,6 +172,7 @@ export const runtimeBoardCardSchema = z
 		generation: z.number().int().positive().optional(),
 		origin: runtimeTaskOriginSchema.optional(),
 		execution: runtimeTaskExecutionAttemptReferenceSchema.optional(),
+		planning: runtimeTaskPlanningContextSchema.optional(),
 		baseRef: z.string(),
 		createdAt: z.number(),
 		updatedAt: z.number(),
@@ -157,11 +204,157 @@ export const runtimeBoardDependencySchema = z.object({
 });
 export type RuntimeBoardDependency = z.infer<typeof runtimeBoardDependencySchema>;
 
-export const runtimeBoardDataSchema = z.object({
-	columns: z.array(runtimeBoardColumnSchema),
-	dependencies: z.array(runtimeBoardDependencySchema).default([]),
-});
+export const runtimeBoardDataSchema = z
+	.object({
+		columns: z.array(runtimeBoardColumnSchema),
+		dependencies: z.array(runtimeBoardDependencySchema).default([]),
+		tracks: z.array(runtimeTrackSchema).optional(),
+		milestones: z.array(runtimeMilestoneSchema).optional(),
+	})
+	.superRefine((board, ctx) => {
+		const tracks = board.tracks ?? [];
+		const milestones = board.milestones ?? [];
+		const trackIds = new Set<string>();
+		for (const [index, track] of tracks.entries()) {
+			if (trackIds.has(track.id)) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["tracks", index, "id"],
+					message: `Duplicate track id: ${track.id}`,
+				});
+			}
+			trackIds.add(track.id);
+		}
+		const milestonesById = new Map<string, RuntimeMilestone>();
+		const activeTrackIds = new Set<string>();
+		for (const [index, milestone] of milestones.entries()) {
+			if (!trackIds.has(milestone.trackId)) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["milestones", index, "trackId"],
+					message: `Milestone ${milestone.id} references unknown track ${milestone.trackId}`,
+				});
+			}
+			if (milestonesById.has(milestone.id)) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["milestones", index, "id"],
+					message: `Duplicate milestone id: ${milestone.id}`,
+				});
+			}
+			milestonesById.set(milestone.id, milestone);
+			if (milestone.state === "active") {
+				if (activeTrackIds.has(milestone.trackId)) {
+					ctx.addIssue({
+						code: "custom",
+						path: ["milestones", index, "state"],
+						message: `Track ${milestone.trackId} cannot have more than one active milestone`,
+					});
+				}
+				activeTrackIds.add(milestone.trackId);
+			}
+		}
+		for (const [columnIndex, column] of board.columns.entries()) {
+			for (const [cardIndex, card] of column.cards.entries()) {
+				if (!card.planning) continue;
+				const milestone = milestonesById.get(card.planning.milestoneId);
+				if (!trackIds.has(card.planning.trackId)) {
+					ctx.addIssue({
+						code: "custom",
+						path: ["columns", columnIndex, "cards", cardIndex, "planning", "trackId"],
+						message: `Task ${card.id} references unknown track ${card.planning.trackId}`,
+					});
+				}
+				if (!milestone || milestone.trackId !== card.planning.trackId) {
+					ctx.addIssue({
+						code: "custom",
+						path: ["columns", columnIndex, "cards", cardIndex, "planning", "milestoneId"],
+						message: `Task ${card.id} references a milestone outside its track`,
+					});
+				}
+			}
+		}
+	});
 export type RuntimeBoardData = z.infer<typeof runtimeBoardDataSchema>;
+
+export const runtimeTrackTaskStatusSchema = z.enum(["backlog", "in_progress", "review", "accepted"]);
+export type RuntimeTrackTaskStatus = z.infer<typeof runtimeTrackTaskStatusSchema>;
+
+export const runtimeTrackTaskCountsSchema = z.object({
+	backlog: z.number().int().nonnegative(),
+	inProgress: z.number().int().nonnegative(),
+	review: z.number().int().nonnegative(),
+	accepted: z.number().int().nonnegative(),
+});
+export type RuntimeTrackTaskCounts = z.infer<typeof runtimeTrackTaskCountsSchema>;
+
+export const runtimeTrackProgressSchema = z.object({
+	acceptedWeight: z.number().nonnegative(),
+	totalWeight: z.number().nonnegative(),
+	percent: z.number().min(0).max(100).nullable(),
+	basis: z.enum(["weighted", "count", "scope_unset"]),
+});
+export type RuntimeTrackProgress = z.infer<typeof runtimeTrackProgressSchema>;
+
+export const runtimeTrackTaskRefSchema = z.object({
+	taskId: z.string(),
+	title: z.string(),
+	status: runtimeTrackTaskStatusSchema,
+	weight: z.number().positive(),
+	blockedByCount: z.number().int().nonnegative(),
+});
+export type RuntimeTrackTaskRef = z.infer<typeof runtimeTrackTaskRefSchema>;
+
+export const runtimeMilestoneProjectionSchema = z.object({
+	milestoneId: runtimeMilestoneIdSchema,
+	title: z.string(),
+	definitionOfDone: z.string().optional(),
+	state: runtimeMilestoneStateSchema,
+	order: z.number().int().nonnegative(),
+	scopeRevision: z.number().int().nonnegative(),
+	counts: runtimeTrackTaskCountsSchema,
+	progress: runtimeTrackProgressSchema,
+	tasks: z.array(runtimeTrackTaskRefSchema),
+});
+export type RuntimeMilestoneProjection = z.infer<typeof runtimeMilestoneProjectionSchema>;
+
+export const runtimeTrackProjectionSchema = z.object({
+	trackId: runtimeTrackIdSchema,
+	name: z.string(),
+	description: z.string().optional(),
+	order: z.number().int().nonnegative(),
+	archived: z.boolean(),
+	activeMilestoneId: runtimeMilestoneIdSchema.nullable(),
+	counts: runtimeTrackTaskCountsSchema,
+	progress: runtimeTrackProgressSchema,
+	milestones: z.array(runtimeMilestoneProjectionSchema),
+});
+export type RuntimeTrackProjection = z.infer<typeof runtimeTrackProjectionSchema>;
+
+export const runtimeCrossTrackDependencySchema = z.object({
+	dependentTaskId: z.string(),
+	prerequisiteTaskId: z.string(),
+	dependentTrackId: runtimeTrackIdSchema,
+	prerequisiteTrackId: runtimeTrackIdSchema,
+});
+export type RuntimeCrossTrackDependency = z.infer<typeof runtimeCrossTrackDependencySchema>;
+
+export const runtimeUnassignedTrackProjectionSchema = z.object({
+	counts: runtimeTrackTaskCountsSchema,
+	tasks: z.array(runtimeTrackTaskRefSchema),
+});
+export type RuntimeUnassignedTrackProjection = z.infer<typeof runtimeUnassignedTrackProjectionSchema>;
+
+export const runtimeTracksProjectionSchema = z.object({
+	schema: z.literal("kanban-tracks-projection/v1"),
+	projectRef: z.string().trim().min(1),
+	revision: z.number().int().nonnegative(),
+	generatedAt: z.number().int().nonnegative(),
+	tracks: z.array(runtimeTrackProjectionSchema),
+	unassigned: runtimeUnassignedTrackProjectionSchema,
+	crossTrackDependencies: z.array(runtimeCrossTrackDependencySchema),
+});
+export type RuntimeTracksProjection = z.infer<typeof runtimeTracksProjectionSchema>;
 
 export const runtimeGitRepositoryInfoSchema = z.object({
 	currentBranch: z.string().nullable(),

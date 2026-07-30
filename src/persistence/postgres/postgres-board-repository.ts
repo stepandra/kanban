@@ -1,6 +1,6 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
-import { runtimeBoardCardSchema } from "../../core/api-contract";
+import { runtimeBoardCardSchema, runtimeMilestoneSchema, runtimeTrackSchema } from "../../core/api-contract";
 import type {
 	KanbanBoardRepository,
 	KanbanBoardWorkspace,
@@ -24,6 +24,7 @@ interface WorkspaceRow extends QueryResultRow {
 	repo_path: string;
 	revision: string | number;
 	updated_at_ms: string | number;
+	planning_json: unknown;
 }
 
 interface ColumnRow extends QueryResultRow {
@@ -147,6 +148,12 @@ export class PostgresKanbanBoardRepository implements KanbanBoardRepository {
 	}
 
 	async #loadBoardRecords(client: PoolClient, workspaceId: string): Promise<PostgresBoardRecords> {
+		const workspacePlanning = await client.query<Pick<WorkspaceRow, "planning_json">>(
+			`SELECT planning_json
+			 FROM kanban_workspaces
+			 WHERE workspace_id = $1`,
+			[workspaceId],
+		);
 		const columnRows = await client.query<ColumnRow>(
 			`SELECT workspace_id, column_id, title, position
 			 FROM kanban_columns
@@ -190,7 +197,22 @@ export class PostgresKanbanBoardRepository implements KanbanBoardRepository {
 			position: row.position,
 			createdAt: parseSafeNonNegativeInteger(row.created_at_ms, "created_at_ms"),
 		}));
-		return { columns, cards, dependencies };
+		const planning = workspacePlanning.rows[0]?.planning_json;
+		const planningRecord =
+			planning && typeof planning === "object" && !Array.isArray(planning)
+				? (planning as Record<string, unknown>)
+				: {};
+		return {
+			columns,
+			cards,
+			dependencies,
+			tracks: Array.isArray(planningRecord.tracks)
+				? planningRecord.tracks.map((track) => runtimeTrackSchema.parse(track))
+				: [],
+			milestones: Array.isArray(planningRecord.milestones)
+				? planningRecord.milestones.map((milestone) => runtimeMilestoneSchema.parse(milestone))
+				: [],
+		};
 	}
 
 	async #insertBoard(client: PoolClient, records: PostgresBoardRecords): Promise<void> {
@@ -234,7 +256,7 @@ export class PostgresKanbanBoardRepository implements KanbanBoardRepository {
 		const normalizedWorkspaceId = requireNonEmpty(workspaceId, "workspaceId");
 		return await this.#withTransaction(async (client) => {
 			const workspaceResult = await client.query<WorkspaceRow>(
-				`SELECT workspace_id, repo_path, revision, updated_at_ms
+				`SELECT workspace_id, repo_path, revision, updated_at_ms, planning_json
 				 FROM kanban_workspaces
 				 WHERE workspace_id = $1
 				 FOR SHARE`,
@@ -264,10 +286,15 @@ export class PostgresKanbanBoardRepository implements KanbanBoardRepository {
 		return await this.#withTransaction(async (client) => {
 			const updated = await client.query<WorkspaceRow>(
 				`UPDATE kanban_workspaces
-				 SET revision = revision + 1, updated_at_ms = $3
+				 SET revision = revision + 1, updated_at_ms = $3, planning_json = $4::jsonb
 				 WHERE workspace_id = $1 AND revision = $2
-				 RETURNING workspace_id, repo_path, revision, updated_at_ms`,
-				[workspaceId, expectedRevision, updatedAt],
+				 RETURNING workspace_id, repo_path, revision, updated_at_ms, planning_json`,
+				[
+					workspaceId,
+					expectedRevision,
+					updatedAt,
+					JSON.stringify({ tracks: boardRecords.tracks, milestones: boardRecords.milestones }),
+				],
 			);
 			const workspace = updated.rows[0];
 			if (!workspace) {
@@ -344,7 +371,7 @@ export class PostgresKanbanBoardRepository implements KanbanBoardRepository {
 			}
 
 			const workspaceResult = await client.query<WorkspaceRow>(
-				`SELECT workspace_id, repo_path, revision, updated_at_ms
+				`SELECT workspace_id, repo_path, revision, updated_at_ms, planning_json
 					 FROM kanban_workspaces
 					 WHERE workspace_id = $1
 					 FOR UPDATE`,
@@ -377,15 +404,32 @@ export class PostgresKanbanBoardRepository implements KanbanBoardRepository {
 				}
 				await client.query(
 					`UPDATE kanban_workspaces
-						 SET revision = $2, updated_at_ms = $3
+						 SET revision = $2, updated_at_ms = $3, planning_json = $4::jsonb
 						 WHERE workspace_id = $1`,
-					[workspaceId, workspaceRevision, updatedAt],
+					[
+						workspaceId,
+						workspaceRevision,
+						updatedAt,
+						JSON.stringify({ tracks: boardRecords.tracks, milestones: boardRecords.milestones }),
+					],
 				);
 			} else {
 				await client.query(
-					`INSERT INTO kanban_workspaces (workspace_id, repo_path, revision, updated_at_ms)
-						 VALUES ($1, $2, $3, $4)`,
-					[workspaceId, repoPath, workspaceRevision, updatedAt],
+					`INSERT INTO kanban_workspaces (
+							workspace_id,
+							repo_path,
+							revision,
+							updated_at_ms,
+							planning_json
+						)
+						 VALUES ($1, $2, $3, $4, $5::jsonb)`,
+					[
+						workspaceId,
+						repoPath,
+						workspaceRevision,
+						updatedAt,
+						JSON.stringify({ tracks: boardRecords.tracks, milestones: boardRecords.milestones }),
+					],
 				);
 			}
 

@@ -4,6 +4,8 @@ import {
 	type RuntimeBoardColumnId,
 	type RuntimeBoardData,
 	type RuntimeBoardDependency,
+	type RuntimeMilestone,
+	type RuntimeTrack,
 	runtimeBoardCardSchema,
 	runtimeBoardDataSchema,
 } from "../../core/api-contract";
@@ -38,6 +40,8 @@ export interface PostgresBoardRecords {
 	columns: PostgresColumnRecord[];
 	cards: PostgresCardRecord[];
 	dependencies: PostgresDependencyRecord[];
+	tracks: RuntimeTrack[];
+	milestones: RuntimeMilestone[];
 }
 
 function requireNonEmpty(value: string, field: string): string {
@@ -155,7 +159,13 @@ export function mapBoardToPostgresRecords(workspaceId: string, input: RuntimeBoa
 	});
 	assertDependencyDag(cardIds, board.dependencies);
 
-	return { columns, cards, dependencies };
+	return {
+		columns,
+		cards,
+		dependencies,
+		tracks: board.tracks ?? [],
+		milestones: board.milestones ?? [],
+	};
 }
 
 export function mapPostgresRecordsToBoard(records: PostgresBoardRecords): RuntimeBoardData {
@@ -184,7 +194,12 @@ export function mapPostgresRecordsToBoard(records: PostgresBoardRecords): Runtim
 			createdAt: dependency.createdAt,
 		}));
 
-	const board = runtimeBoardDataSchema.parse({ columns, dependencies });
+	const board = runtimeBoardDataSchema.parse({
+		columns,
+		dependencies,
+		...(records.tracks.length > 0 ? { tracks: records.tracks } : {}),
+		...(records.milestones.length > 0 ? { milestones: records.milestones } : {}),
+	});
 	mapBoardToPostgresRecords(records.columns[0]?.workspaceId ?? "loaded-workspace", board);
 	return board;
 }

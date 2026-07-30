@@ -39,19 +39,20 @@ import type {
 	RuntimeRunUpdateResponse,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
-	RuntimeTaskSessionInputRequest,
-	RuntimeTaskSessionInputResponse,
+	RuntimeSystemReadinessResponse,
 	RuntimeTaskExecutionEnqueueRequest,
 	RuntimeTaskExecutionEnqueueResponse,
 	RuntimeTaskExecutionProjectionRequest,
 	RuntimeTaskExecutionProjectionResponse,
-	RuntimeSystemReadinessResponse,
+	RuntimeTaskSessionInputRequest,
+	RuntimeTaskSessionInputResponse,
 	RuntimeTaskSessionStartRequest,
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionStopRequest,
 	RuntimeTaskSessionStopResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
+	RuntimeTracksProjection,
 	RuntimeUpdateStatusResponse,
 	RuntimeWorkspaceChangesRequest,
 	RuntimeWorkspaceChangesResponse,
@@ -99,19 +100,20 @@ import {
 	runtimeRunUpdateResponseSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
-	runtimeTaskSessionInputRequestSchema,
-	runtimeTaskSessionInputResponseSchema,
+	runtimeSystemReadinessResponseSchema,
 	runtimeTaskExecutionEnqueueRequestSchema,
 	runtimeTaskExecutionEnqueueResponseSchema,
 	runtimeTaskExecutionProjectionRequestSchema,
 	runtimeTaskExecutionProjectionResponseSchema,
-	runtimeSystemReadinessResponseSchema,
+	runtimeTaskSessionInputRequestSchema,
+	runtimeTaskSessionInputResponseSchema,
 	runtimeTaskSessionStartRequestSchema,
 	runtimeTaskSessionStartResponseSchema,
 	runtimeTaskSessionStopRequestSchema,
 	runtimeTaskSessionStopResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
+	runtimeTracksProjectionSchema,
 	runtimeUpdateStatusResponseSchema,
 	runtimeWorkspaceChangesRequestSchema,
 	runtimeWorkspaceChangesResponseSchema,
@@ -154,6 +156,7 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskExecutionProjectionRequest,
 		) => Promise<RuntimeTaskExecutionProjectionResponse>;
 		getSystemReadiness: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeSystemReadinessResponse>;
+		getTracksProjection: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeTracksProjection>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStopRequest,
@@ -338,11 +341,12 @@ export const runtimeAppRouter = t.router({
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getTaskExecutionProjections(ctx.workspaceScope, input);
 			}),
-		getSystemReadiness: workspaceProcedure
-			.output(runtimeSystemReadinessResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getSystemReadiness(ctx.workspaceScope);
-			}),
+		getSystemReadiness: workspaceProcedure.output(runtimeSystemReadinessResponseSchema).query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getSystemReadiness(ctx.workspaceScope);
+		}),
+		getTracksProjection: workspaceProcedure.output(runtimeTracksProjectionSchema).query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getTracksProjection(ctx.workspaceScope);
+		}),
 		startTaskSession: internalWorkspaceProcedure
 			.input(runtimeTaskSessionStartRequestSchema)
 			.output(runtimeTaskSessionStartResponseSchema)

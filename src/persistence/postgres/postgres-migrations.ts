@@ -88,6 +88,19 @@ export const KANBAN_POSTGRES_MIGRATIONS: readonly KanbanPostgresMigration[] = Ob
 			FOR EACH ROW EXECUTE FUNCTION kanban_reject_import_receipt_mutation();
 		`,
 	},
+	{
+		version: 2,
+		name: "track_planning_catalog",
+		sql: `
+			ALTER TABLE kanban_workspaces
+			ADD COLUMN planning_json jsonb NOT NULL DEFAULT '{"tracks":[],"milestones":[]}'::jsonb
+			CHECK (
+				jsonb_typeof(planning_json) = 'object'
+				AND jsonb_typeof(planning_json -> 'tracks') = 'array'
+				AND jsonb_typeof(planning_json -> 'milestones') = 'array'
+			);
+		`,
+	},
 ]);
 
 function quoteIdentifier(identifier: string): string {

@@ -64,6 +64,7 @@ export function KanbanBoard({
 	onRequestProgrammaticCardMoveReady,
 	workspacePath,
 	workspaceVcs,
+	onOpenTracksView,
 	onOpenRepositoryView,
 	onMoveTasksToColumn,
 	isInteractionActive = true,
@@ -95,6 +96,7 @@ export function KanbanBoard({
 	onRequestProgrammaticCardMoveReady?: (requestMove: RequestProgrammaticCardMove | null) => void;
 	workspacePath?: string | null;
 	workspaceVcs?: RuntimeVcsMode | null;
+	onOpenTracksView?: () => void;
 	onOpenRepositoryView?: () => void;
 	onMoveTasksToColumn?: (taskIds: string[], toColumnId: BoardColumnId) => void;
 	isInteractionActive?: boolean;
@@ -445,7 +447,9 @@ export function KanbanBoard({
 				if (!labelByAgentId.has(card.agentId)) {
 					labelByAgentId.set(
 						card.agentId,
-						card.agentId === "amp" ? "Amp Orb" : (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId),
+						card.agentId === "amp"
+							? "Amp Orb"
+							: (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId),
 					);
 				}
 			}
@@ -534,6 +538,7 @@ export function KanbanBoard({
 						taskSessions={taskSessions}
 						executionProjections={executionProjections}
 						workspaceVcs={workspaceVcs}
+						onOpenTracksView={onOpenTracksView}
 						onOpenRepositoryView={onOpenRepositoryView}
 						onShowReview={() => {
 							setReviewOnly((current) => !current);

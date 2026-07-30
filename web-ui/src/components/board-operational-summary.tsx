@@ -1,11 +1,7 @@
-import { AlertTriangle, CircleDot, Eye, Waypoints } from "lucide-react";
+import { AlertTriangle, CircleDot, Eye, Route, Waypoints } from "lucide-react";
 
 import { cn } from "@/components/ui/cn";
-import type {
-	RuntimeTaskExecutionProjection,
-	RuntimeTaskSessionSummary,
-	RuntimeVcsMode,
-} from "@/runtime/types";
+import type { RuntimeTaskExecutionProjection, RuntimeTaskSessionSummary, RuntimeVcsMode } from "@/runtime/types";
 import type { BoardData } from "@/types";
 
 interface BoardOperationalCounts {
@@ -58,6 +54,7 @@ export function BoardOperationalSummary({
 	taskSessions,
 	executionProjections = {},
 	workspaceVcs,
+	onOpenTracksView,
 	onOpenRepositoryView,
 	onShowReview,
 	onShowAttention,
@@ -67,6 +64,7 @@ export function BoardOperationalSummary({
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	executionProjections?: Record<string, RuntimeTaskExecutionProjection>;
 	workspaceVcs?: RuntimeVcsMode | null;
+	onOpenTracksView?: () => void;
 	onOpenRepositoryView?: () => void;
 	onShowReview?: () => void;
 	onShowAttention?: () => void;
@@ -79,6 +77,17 @@ export function BoardOperationalSummary({
 			aria-label="Board operational summary"
 			className="flex h-8 shrink-0 items-center overflow-hidden rounded-md border border-border bg-surface-1 text-xs text-text-secondary"
 		>
+			{onOpenTracksView ? (
+				<button
+					type="button"
+					className="flex h-full items-center gap-1.5 border-r border-border px-2 font-medium text-text-primary transition-colors hover:bg-surface-3 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-border-focus"
+					onClick={onOpenTracksView}
+					title="Open delivery tracks"
+				>
+					<Route size={13} className="text-status-blue" />
+					Tracks
+				</button>
+			) : null}
 			{workspaceVcs === "jj" && onOpenRepositoryView ? (
 				<button
 					type="button"

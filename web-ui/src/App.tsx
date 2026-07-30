@@ -20,6 +20,7 @@ import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog"
 import { TaskCreateDialog } from "@/components/task-create-dialog";
 import { TaskInlineCreateCard } from "@/components/task-inline-create-card";
 import { TopBar } from "@/components/top-bar";
+import { TracksView } from "@/components/tracks-view";
 import { Button } from "@/components/ui/button";
 import {
 	AlertDialog,
@@ -81,12 +82,16 @@ export default function App(): ReactElement {
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
+	const [isTracksOpen, setIsTracksOpen] = useState(false);
+	const [pendingJjTaskId, setPendingJjTaskId] = useState<string | null>(null);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
 	const taskEditorResetRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
+		setIsTracksOpen(false);
+		setPendingJjTaskId(null);
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
 	}, []);
@@ -524,14 +529,37 @@ export default function App(): ReactElement {
 		if (hasNoProjects) {
 			return;
 		}
+		setIsTracksOpen(false);
+		setPendingJjTaskId(null);
 		setIsGitHistoryOpen((current) => !current);
 	}, [hasNoProjects]);
 	const handleCloseGitHistory = useCallback(() => {
 		setIsGitHistoryOpen(false);
+		setPendingJjTaskId(null);
+	}, []);
+	const handleOpenTracks = useCallback(() => {
+		if (hasNoProjects) {
+			return;
+		}
+		setIsGitHistoryOpen(false);
+		setPendingJjTaskId(null);
+		setIsTracksOpen(true);
+	}, [hasNoProjects]);
+	const handleCloseTracks = useCallback(() => {
+		setIsTracksOpen(false);
 	}, []);
 	const jjTaskLinks = useMemo(
 		() => buildJjTaskLinks(board, workspaceMetadata?.taskWorkspaces ?? []),
 		[board, workspaceMetadata],
+	);
+	const handleOpenTaskChange = useCallback(
+		(taskId: string) => {
+			setIsTracksOpen(false);
+			setSelectedTaskId(null);
+			setPendingJjTaskId(taskId);
+			setIsGitHistoryOpen(true);
+		},
+		[setSelectedTaskId],
 	);
 
 	const {
@@ -837,7 +865,19 @@ export default function App(): ReactElement {
 							) : (
 								<div className="flex flex-1 flex-col min-h-0 min-w-0">
 									<div className="flex flex-1 min-h-0 min-w-0">
-										{gitFeaturesEnabled && isGitHistoryOpen ? (
+										{isTracksOpen ? (
+											<TracksView
+												workspaceId={currentProjectId}
+												workspaceRevision={workspaceRevision}
+												jjTaskLinks={jjTaskLinks}
+												onSelectTask={(taskId) => {
+													setIsTracksOpen(false);
+													handleCardSelect(taskId);
+												}}
+												onOpenTaskChange={handleOpenTaskChange}
+												onClose={handleCloseTracks}
+											/>
+										) : gitFeaturesEnabled && isGitHistoryOpen ? (
 											<GitHistoryView
 												workspaceId={currentProjectId}
 												gitHistory={gitHistory}
@@ -853,8 +893,10 @@ export default function App(): ReactElement {
 											<JjHistoryView
 												workspaceId={currentProjectId}
 												taskLinks={jjTaskLinks}
+												initialTaskId={pendingJjTaskId}
 												onSelectTask={(taskId) => {
 													setIsGitHistoryOpen(false);
+													setPendingJjTaskId(null);
 													handleCardSelect(taskId);
 												}}
 												onClose={handleCloseGitHistory}
@@ -866,6 +908,7 @@ export default function App(): ReactElement {
 												executionProjections={executionProjections}
 												workspacePath={workspacePath}
 												workspaceVcs={workspaceVcs}
+												onOpenTracksView={handleOpenTracks}
 												onOpenRepositoryView={workspaceVcs === "jj" ? handleToggleGitHistory : undefined}
 												onCardSelect={handleCardSelect}
 												onCreateTask={handleOpenCreateTask}
@@ -985,6 +1028,7 @@ export default function App(): ReactElement {
 									}}
 									onMoveToTrash={handleMoveToTrash}
 									isMoveToTrashLoading={moveToTrashLoadingById[selectedCard.card.id] ?? false}
+									onOpenJjChange={workspaceVcs === "jj" ? handleOpenTaskChange : undefined}
 									gitHistoryPanel={
 										gitFeaturesEnabled && isGitHistoryOpen ? (
 											<GitHistoryView workspaceId={currentProjectId} gitHistory={gitHistory} />

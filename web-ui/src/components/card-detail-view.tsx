@@ -18,8 +18,8 @@ import { useResizeDrag } from "@/resize/use-resize-drag";
 import type {
 	RuntimeAgentId,
 	RuntimeConfigResponse,
-	RuntimeTaskSessionSummary,
 	RuntimeTaskExecutionProjection,
+	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
@@ -342,6 +342,7 @@ export function CardDetailView({
 	onSendReviewComments,
 	onMoveToTrash,
 	isMoveToTrashLoading,
+	onOpenJjChange,
 	gitHistoryPanel,
 	onCloseGitHistory,
 	bottomTerminalOpen,
@@ -396,6 +397,7 @@ export function CardDetailView({
 	onSendReviewComments?: (taskId: string, text: string) => void;
 	onMoveToTrash: () => void;
 	isMoveToTrashLoading?: boolean;
+	onOpenJjChange?: (taskId: string) => void;
 	gitHistoryPanel?: ReactNode;
 	onCloseGitHistory?: () => void;
 	bottomTerminalOpen: boolean;
@@ -638,7 +640,12 @@ export function CardDetailView({
 	if (isMobile) {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0">
-				<TaskOperationalOverview selection={selection} execution={executionProjection} dependencies={dependencies} />
+				<TaskOperationalOverview
+					selection={selection}
+					execution={executionProjection}
+					dependencies={dependencies}
+					onOpenJjChange={onOpenJjChange}
+				/>
 				<MobileDetailTabBar activeTab={mobileTab} onTabChange={setMobileTab} />
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -767,7 +774,12 @@ export function CardDetailView({
 				style={{ width: isDiffExpanded ? "100%" : detailContentPanelPercent }}
 			>
 				{!isDiffExpanded ? (
-					<TaskOperationalOverview selection={selection} execution={executionProjection} dependencies={dependencies} />
+					<TaskOperationalOverview
+						selection={selection}
+						execution={executionProjection}
+						dependencies={dependencies}
+						onOpenJjChange={onOpenJjChange}
+					/>
 				) : null}
 				{gitHistoryPanel ? (
 					<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>

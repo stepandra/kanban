@@ -132,6 +132,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		generation?: unknown;
 		origin?: unknown;
 		execution?: unknown;
+		planning?: unknown;
 		createdAt?: unknown;
 		updatedAt?: unknown;
 	};
@@ -161,6 +162,22 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 					queuedAt: (card.execution as { queuedAt: number }).queuedAt,
 				}
 			: undefined;
+	const planning =
+		card.planning &&
+		typeof card.planning === "object" &&
+		typeof (card.planning as { trackId?: unknown }).trackId === "string" &&
+		typeof (card.planning as { milestoneId?: unknown }).milestoneId === "string" &&
+		((card.planning as { weight?: unknown }).weight === undefined ||
+			(typeof (card.planning as { weight?: unknown }).weight === "number" &&
+				(card.planning as { weight: number }).weight > 0))
+			? {
+					trackId: (card.planning as { trackId: string }).trackId,
+					milestoneId: (card.planning as { milestoneId: string }).milestoneId,
+					...((card.planning as { weight?: number }).weight !== undefined
+						? { weight: (card.planning as { weight: number }).weight }
+						: {}),
+				}
+			: undefined;
 
 	return {
 		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
@@ -183,6 +200,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 				: 1,
 		...(origin ? { origin } : {}),
 		...(execution ? { execution } : {}),
+		...(planning ? { planning } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
 		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
 	};
@@ -272,6 +290,8 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 
 	const candidateColumns = (rawBoard as { columns?: unknown }).columns;
 	const candidateDependencies = (rawBoard as { dependencies?: unknown }).dependencies;
+	const candidateTracks = (rawBoard as { tracks?: unknown }).tracks;
+	const candidateMilestones = (rawBoard as { milestones?: unknown }).milestones;
 	if (!Array.isArray(candidateColumns)) {
 		return null;
 	}
@@ -319,6 +339,8 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 	return runtimeTaskState.updateTaskDependencies({
 		columns: normalizedColumns,
 		dependencies: normalizedDependencies,
+		...(Array.isArray(candidateTracks) ? { tracks: candidateTracks as BoardData["tracks"] } : {}),
+		...(Array.isArray(candidateMilestones) ? { milestones: candidateMilestones as BoardData["milestones"] } : {}),
 	});
 }
 

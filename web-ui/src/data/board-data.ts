@@ -19,5 +19,7 @@ export function createInitialBoardData(): BoardData {
 	return {
 		columns: columnOrder.map((column) => createEmptyColumn(column.id, column.title)),
 		dependencies: [],
+		tracks: [],
+		milestones: [],
 	};
 }

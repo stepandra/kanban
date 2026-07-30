@@ -218,3 +218,45 @@ overrides stay separated from readiness facts.
 **Consequence:** Operators can distinguish “configured”, “installed”,
 “running”, and “unavailable” before pressing Queue, without turning Settings
 into another runtime controller.
+
+## D-014 — tldraw consumes Tracks as a one-way projection
+
+- **Status:** Accepted; Phase 1 implemented 2026-07-31
+- **Date:** 2026-07-31
+
+Kanban owns tracks, milestones, task scope, lifecycle, dependencies, and
+acceptance. It exposes a revisioned `kanban-tracks-projection/v1` read model
+through opaque project refs. tldraw Offline may materialize native lanes,
+milestones, pipeline summaries, and bound cross-track blockers, but has no
+Kanban mutation route.
+
+Refresh preserves canvas layout and marks removed references orphaned instead
+of deleting them. Canvas metadata contains only stable projection refs and
+revision data; it never contains Amp thread IDs, task prompts, repository
+paths, credentials, or scheduler state.
+
+**Consequence:** tldraw becomes the zoomed-out planning lens without becoming a
+second source of workflow truth. See
+`docs/decisions/2026-07-31-tldraw-tracks-projection.md`.
+
+## D-015 — Tracks is a read-only operational map
+
+- **Status:** Accepted; Phase 1 implemented 2026-07-31
+- **Date:** 2026-07-31
+
+Kanban exposes Tracks as a first-class zoomed-out screen. Each track shows its
+active milestone, weighted or count-based progress, lifecycle distribution,
+scoped tasks, and cross-track blockers. Unassigned work remains visible as
+explicit planning debt instead of disappearing from the overview.
+
+The screen offers navigation only: a task opens its Kanban detail and a linked
+workspace opens the corresponding change in the jj graph. Track and milestone
+authoring remains deferred until typed Amp Architect mutations exist. The
+Phase 1 projection treats the legacy `trash`/Done column as accepted work for
+progress compatibility; a future acceptance-receipt migration must replace
+that approximation without changing the projection contract.
+
+**Consequence:** Operators get a human-readable delivery map without creating
+another workflow authority or presenting speculative controls. Progress is
+useful now, while its legacy acceptance approximation remains explicit rather
+than being mistaken for proof of promotion.

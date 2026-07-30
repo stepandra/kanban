@@ -1,10 +1,13 @@
 import type {
 	RuntimeAgentId,
 	RuntimeBoardColumnId,
+	RuntimeMilestone,
 	RuntimeTaskAutoReviewMode,
+	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
-	RuntimeTaskExecutionAttemptReference,
+	RuntimeTaskPlanningContext,
+	RuntimeTrack,
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
@@ -50,6 +53,7 @@ export interface BoardCard {
 	generation?: number;
 	origin?: RuntimeTaskOrigin;
 	execution?: RuntimeTaskExecutionAttemptReference;
+	planning?: RuntimeTaskPlanningContext;
 	baseRef: string;
 	createdAt: number;
 	updatedAt: number;
@@ -71,6 +75,8 @@ export interface BoardDependency {
 export interface BoardData {
 	columns: BoardColumn[];
 	dependencies: BoardDependency[];
+	tracks?: RuntimeTrack[];
+	milestones?: RuntimeMilestone[];
 }
 
 export interface ReviewTaskWorkspaceSnapshot {

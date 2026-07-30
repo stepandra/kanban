@@ -85,7 +85,7 @@ function readWorkspaceIdFromRequest(request: IncomingMessage, requestUrl: URL): 
 			return normalized;
 		}
 	}
-	const queryWorkspaceId = requestUrl.searchParams.get("workspaceId");
+	const queryWorkspaceId = requestUrl.searchParams.get("workspaceId") ?? requestUrl.searchParams.get("projectRef");
 	if (typeof queryWorkspaceId === "string") {
 		const normalized = queryWorkspaceId.trim();
 		if (normalized) {
@@ -349,6 +349,52 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			}
 			// ── End passcode gate ──────────────────────────────────────────────
 
+			if (req.method === "GET" && pathname === "/api/tracks/projects") {
+				const context = await createTrpcContext(req);
+				const payload = await context.projectsApi.listProjects(context.requestedWorkspaceId);
+				res.writeHead(200, {
+					"Content-Type": "application/json; charset=utf-8",
+					"Cache-Control": "no-store",
+				});
+				res.end(
+					JSON.stringify({
+						schema: "kanban-track-projects/v1",
+						currentProjectRef: payload.currentProjectId,
+						projects: payload.projects.map((project) => ({
+							projectRef: project.id,
+							name: project.name,
+							taskCounts: project.taskCounts,
+						})),
+					}),
+				);
+				return;
+			}
+			if (req.method === "GET" && pathname === "/api/tracks/projection") {
+				const context = await createTrpcContext(req);
+				if (!context.requestedWorkspaceId) {
+					res.writeHead(400, {
+						"Content-Type": "application/json; charset=utf-8",
+						"Cache-Control": "no-store",
+					});
+					res.end(JSON.stringify({ error: "projectRef is required." }));
+					return;
+				}
+				if (!context.workspaceScope) {
+					res.writeHead(404, {
+						"Content-Type": "application/json; charset=utf-8",
+						"Cache-Control": "no-store",
+					});
+					res.end(JSON.stringify({ error: `Unknown projectRef: ${context.requestedWorkspaceId}` }));
+					return;
+				}
+				const projection = await context.runtimeApi.getTracksProjection(context.workspaceScope);
+				res.writeHead(200, {
+					"Content-Type": "application/json; charset=utf-8",
+					"Cache-Control": "no-store",
+				});
+				res.end(JSON.stringify(projection));
+				return;
+			}
 			if (pathname.startsWith("/api/trpc")) {
 				await trpcHttpHandler(req, res);
 				return;

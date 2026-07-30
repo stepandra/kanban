@@ -15,6 +15,7 @@ import type {
 	RuntimeRunUpdateResponse,
 	RuntimeSystemReadinessResponse,
 	RuntimeTaskExecutionProjectionResponse,
+	RuntimeTracksProjection,
 	RuntimeUpdateStatusResponse,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
@@ -27,6 +28,7 @@ import {
 	parseTaskSessionStopRequest,
 } from "../core/api-validation";
 import { formatTaskExecutionReference, resolveTaskGeneration } from "../core/task-execution-reference";
+import { buildTracksProjection } from "../core/tracks-projection";
 import { enqueueAbsurdTaskStart } from "../orchestration/absurd-task-start";
 import { getAbsurdTaskProjections, getSystemReadiness } from "../orchestration/absurd-task-status";
 import { openInBrowser } from "../server/browser";
@@ -140,7 +142,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				if (!taskId) {
 					throw new Error("Task execution taskId cannot be empty.");
 				}
-				const state = await deps.buildWorkspaceStateSnapshot(workspaceScope.workspaceId, workspaceScope.workspacePath);
+				const state = await deps.buildWorkspaceStateSnapshot(
+					workspaceScope.workspaceId,
+					workspaceScope.workspacePath,
+				);
 				const record = findBoardTask(state, taskId);
 				if (!record) {
 					throw new Error(`Task "${taskId}" was not found.`);
@@ -204,6 +209,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			generatedAt: Date.now(),
 			checks: await getSystemReadiness(workspaceScope.workspacePath),
 		}),
+		getTracksProjection: async (workspaceScope): Promise<RuntimeTracksProjection> => {
+			const state = await deps.buildWorkspaceStateSnapshot(workspaceScope.workspaceId, workspaceScope.workspacePath);
+			return buildTracksProjection({
+				projectRef: workspaceScope.workspaceId,
+				revision: state.revision,
+				board: state.board,
+			});
+		},
 		startTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStartRequest(input);

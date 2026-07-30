@@ -161,6 +161,8 @@ function createEmptyBoard(): RuntimeBoardData {
 			cards: [],
 		})),
 		dependencies: [],
+		tracks: [],
+		milestones: [],
 	};
 }
 

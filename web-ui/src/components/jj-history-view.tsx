@@ -1,5 +1,5 @@
 import { Bookmark, GitFork, LayoutDashboard, RefreshCw, SquareKanban, Waypoints, Workflow } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -166,16 +166,19 @@ function TopologyCanvas({
 export function JjHistoryView({
 	workspaceId,
 	taskLinks,
+	initialTaskId = null,
 	onSelectTask,
 	onClose,
 }: {
 	workspaceId: string | null;
 	taskLinks: JjTaskLink[];
+	initialTaskId?: string | null;
 	onSelectTask: (taskId: string) => void;
 	onClose: () => void;
 }): React.ReactElement {
 	const [viewMode, setViewMode] = useState<"operational" | "all">("operational");
 	const [selectedCommitId, setSelectedCommitId] = useState<string | null>(null);
+	const lastFocusedTaskIdRef = useRef<string | null>(null);
 	const queryFn = useCallback(async (): Promise<RuntimeJjGraphResponse> => {
 		if (!workspaceId) {
 			throw new Error("Missing workspace.");
@@ -198,6 +201,15 @@ export function JjHistoryView({
 	);
 	const topology = useMemo(() => buildTopology(visibleNodes), [visibleNodes]);
 	useEffect(() => {
+		if (initialTaskId && lastFocusedTaskIdRef.current !== initialTaskId) {
+			const taskLink = taskLinks.find((task) => task.taskId === initialTaskId);
+			const taskNode = taskLink ? visibleNodes.find((node) => node.changeId === taskLink.changeId) : null;
+			if (taskNode) {
+				lastFocusedTaskIdRef.current = initialTaskId;
+				setSelectedCommitId(taskNode.commitId);
+				return;
+			}
+		}
 		if (selectedCommitId && visibleNodes.some((node) => node.commitId === selectedCommitId)) {
 			return;
 		}
@@ -207,7 +219,7 @@ export function JjHistoryView({
 				visibleNodes[0]?.commitId ??
 				null,
 		);
-	}, [selectedCommitId, taskLinks, visibleNodes]);
+	}, [initialTaskId, selectedCommitId, taskLinks, visibleNodes]);
 	const selectedNode = visibleNodes.find((node) => node.commitId === selectedCommitId) ?? null;
 	const selectedTaskLinks = taskLinks.filter((task) => task.changeId === selectedNode?.changeId);
 	const errorMessage = graphQuery.error?.message ?? payload?.error ?? null;
@@ -258,7 +270,9 @@ export function JjHistoryView({
 				</div>
 			</header>
 			{graphQuery.isLoading && !payload ? (
-				<div className="flex flex-1 items-center justify-center"><Spinner size={24} /></div>
+				<div className="flex flex-1 items-center justify-center">
+					<Spinner size={24} />
+				</div>
 			) : errorMessage || payload?.ok === false ? (
 				<div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-text-secondary">
 					<Waypoints size={32} className="text-text-tertiary" />
@@ -268,7 +282,11 @@ export function JjHistoryView({
 				<div className="grid min-h-0 flex-1 grid-cols-[minmax(420px,1fr)_320px]">
 					<div className="min-h-0 overflow-auto border-r border-border">
 						<div className="flex min-w-[620px]">
-							<TopologyCanvas topology={topology} selectedCommitId={selectedCommitId} onSelect={setSelectedCommitId} />
+							<TopologyCanvas
+								topology={topology}
+								selectedCommitId={selectedCommitId}
+								onSelect={setSelectedCommitId}
+							/>
 							<div className="min-w-0 flex-1">
 								{topology.nodes.map(({ node }) => {
 									const links = taskLinks.filter((task) => task.changeId === node.changeId);
@@ -290,9 +308,13 @@ export function JjHistoryView({
 													{node.description || "(no description)"}
 												</div>
 												<div className="mt-1 flex items-center gap-1.5 text-[10px] text-text-tertiary">
-													{node.currentWorkingCopy ? <span className="text-status-purple">current</span> : null}
+													{node.currentWorkingCopy ? (
+														<span className="text-status-purple">current</span>
+													) : null}
 													{node.workspaces.length > 0 ? <span>{node.workspaces.join(", ")}</span> : null}
-													{links.length > 0 ? <span className="text-status-blue">{links.length} task</span> : null}
+													{links.length > 0 ? (
+														<span className="text-status-blue">{links.length} task</span>
+													) : null}
 													{node.conflict ? <span className="text-status-red">conflict</span> : null}
 												</div>
 											</div>
@@ -307,7 +329,9 @@ export function JjHistoryView({
 							<>
 								<div className="mb-4 flex items-center gap-2">
 									<GitFork size={16} className="text-status-purple" />
-									<span className="text-[11px] uppercase tracking-wide text-text-tertiary">Selected change</span>
+									<span className="text-[11px] uppercase tracking-wide text-text-tertiary">
+										Selected change
+									</span>
 								</div>
 								<h3 className="m-0 text-sm font-semibold leading-5 text-text-primary">
 									{selectedNode.description || "(no description)"}
@@ -325,7 +349,10 @@ export function JjHistoryView({
 								{selectedNode.bookmarks.length > 0 ? (
 									<div className="mt-4 flex flex-wrap gap-1">
 										{selectedNode.bookmarks.map((bookmark) => (
-											<span key={bookmark} className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs">
+											<span
+												key={bookmark}
+												className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs"
+											>
 												<Bookmark size={11} /> {bookmark}
 											</span>
 										))}
@@ -349,7 +376,9 @@ export function JjHistoryView({
 											))}
 										</div>
 									) : (
-										<p className="m-0 text-xs text-text-tertiary">No Kanban task is attached to this change.</p>
+										<p className="m-0 text-xs text-text-tertiary">
+											No Kanban task is attached to this change.
+										</p>
 									)}
 								</div>
 							</>
