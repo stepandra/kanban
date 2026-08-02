@@ -61,6 +61,7 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					handleOpenWorkerCommandLog={() => {}}
 					handleOpenSettings={handleOpenSettings}
 					handleToggleGitHistory={handleToggleGitHistory}
 					handleCloseGitHistory={() => {}}
@@ -90,6 +91,45 @@ describe("useAppHotkeys", () => {
 		expect(handleOpenSettings).toHaveBeenCalledTimes(1);
 	});
 
+	it("opens worker commands on Mod+Shift+L", async () => {
+		const handleOpenWorkerCommandLog = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					selectedCard={null}
+					isDetailTerminalOpen={false}
+					isHomeTerminalOpen={false}
+					isHomeGitHistoryOpen={false}
+					canUseCreateTaskShortcut
+					handleToggleDetailTerminal={() => {}}
+					handleToggleHomeTerminal={() => {}}
+					handleToggleExpandDetailTerminal={() => {}}
+					handleToggleExpandHomeTerminal={() => {}}
+					handleOpenCreateTask={() => {}}
+					handleOpenWorkerCommandLog={handleOpenWorkerCommandLog}
+					handleOpenSettings={() => {}}
+					handleToggleGitHistory={() => {}}
+					handleCloseGitHistory={() => {}}
+					handleBackToBoard={() => {}}
+					onStartAllTasks={() => {}}
+				/>,
+			);
+		});
+
+		const commandLogCall = mockUseHotkeys.mock.calls.find(([shortcut]) => shortcut === "mod+shift+l");
+		if (!commandLogCall || typeof commandLogCall[1] !== "function") {
+			throw new Error("Expected worker command shortcut to be registered.");
+		}
+
+		act(() => {
+			const commandLogHandler = commandLogCall[1] as () => void;
+			commandLogHandler();
+		});
+
+		expect(handleOpenWorkerCommandLog).toHaveBeenCalledTimes(1);
+	});
+
 	it("closes home git history on Escape", async () => {
 		const handleCloseGitHistory = vi.fn();
 
@@ -106,6 +146,7 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					handleOpenWorkerCommandLog={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={handleCloseGitHistory}
@@ -144,6 +185,7 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					handleOpenWorkerCommandLog={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
@@ -182,6 +224,7 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={handleOpenCreateTask}
+					handleOpenWorkerCommandLog={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={() => {}}
@@ -234,6 +277,7 @@ describe("useAppHotkeys", () => {
 					handleToggleExpandDetailTerminal={() => {}}
 					handleToggleExpandHomeTerminal={() => {}}
 					handleOpenCreateTask={() => {}}
+					handleOpenWorkerCommandLog={() => {}}
 					handleOpenSettings={() => {}}
 					handleToggleGitHistory={() => {}}
 					handleCloseGitHistory={handleCloseGitHistory}

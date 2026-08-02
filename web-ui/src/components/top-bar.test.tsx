@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TopBar } from "@/components/top-bar";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement | null {
 	return (Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === text) ??
@@ -130,5 +131,44 @@ describe("TopBar script shortcut onboarding", () => {
 		});
 
 		expect(onOpenSettings).toHaveBeenCalledTimes(1);
+	});
+
+	it("places worker commands between terminal and settings", async () => {
+		const onOpenWorkerCommandLog = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<TopBar
+						openTargetOptions={[]}
+						selectedOpenTargetId="vscode"
+						onSelectOpenTarget={() => {}}
+						onOpenWorkspace={() => {}}
+						canOpenWorkspace={false}
+						isOpeningWorkspace={false}
+						onToggleTerminal={() => {}}
+						onOpenWorkerCommandLog={onOpenWorkerCommandLog}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const labelledButtons = Array.from(container.querySelectorAll<HTMLButtonElement>("button[aria-label]"));
+		const terminalIndex = labelledButtons.findIndex(
+			(button) => button.getAttribute("aria-label") === "Open terminal",
+		);
+		const commandLogIndex = labelledButtons.findIndex(
+			(button) => button.getAttribute("aria-label") === "Worker commands",
+		);
+		const settingsIndex = labelledButtons.findIndex((button) => button.getAttribute("aria-label") === "Settings");
+
+		expect(terminalIndex).toBeGreaterThanOrEqual(0);
+		expect(commandLogIndex).toBeGreaterThan(terminalIndex);
+		expect(settingsIndex).toBeGreaterThan(commandLogIndex);
+
+		await act(async () => {
+			labelledButtons[commandLogIndex]?.click();
+		});
+		expect(onOpenWorkerCommandLog).toHaveBeenCalledOnce();
 	});
 });

@@ -40,40 +40,92 @@ host can no longer be started accidentally, e.g. on trash-restore probes), and
 the removal of an entire settings/OAuth/MCP stack and an unused worker
 integration.
 
-## System Diagram
+## High-level dependency map
 
-```text
-+----------------------------------------------------------------------------------+
-| Browser UI                                                                       |
-| web-ui/src                                                                       |
-|                                                                                  |
-| App.tsx, hooks/, components/, runtime/, terminal/                               |
-+---------------------------------------+------------------------------------------+
-                                        |
-                                        | TRPC requests and websocket updates
-                                        v
-+----------------------------------------------------------------------------------+
-| Local Runtime                                                                    |
-| src/                                                                             |
-|                                                                                  |
-| trpc/app-router.ts, trpc/runtime-api.ts, server/runtime-state-hub.ts             |
-+---------------------------------------+------------------------------------------+
-                                        |
-                                        v
-+---------------------------------------+------------------------------------------+
-| PTY Runtime                                                                    |
-| src/terminal/                                                                  |
-|                                                                                  |
-| agent-registry.ts, agent-session-adapters.ts, session-manager.ts, pty-session.ts|
-+---------------------------------------+------------------------------------------+
-                                        |
-                                        v
-+---------------------------------------+------------------------------------------+
-| Worktrees and shell processes                                                    |
-| per-task cwd, CLI agents (Claude Code, Codex, Grok, Kimi, Droid, Kiro),          |
-| workspace shell                                                                  |
-+----------------------------------------------------------------------------------+
+This diagram shows the runtime dependencies and authority boundaries around
+Kanban. Solid arrows are commands or authoritative writes. Dashed arrows are
+read-only projections, telemetry, or navigation.
+
+```mermaid
+flowchart LR
+    operator["Operator"]
+    architect["Amp Architect"]
+    browser["Kanban browser UI"]
+    ampPlugin["Amp plugin<br/>amp/kanban.ts"]
+
+    subgraph kanban["Kanban — task and workflow authority"]
+        trpc["TRPC + WebSocket API"]
+        runtime["Local runtime"]
+        state[("Board, generations,<br/>review and acceptance")]
+        workspace["jj-native task workspaces"]
+        terminal["PTY session manager"]
+        hooks["Worker hooks"]
+        reviewQueue["Per-task review Fixer queue"]
+    end
+
+    subgraph orchestration["zj-agent harness — execution orchestration"]
+        zjAgent["zj-agent CLI"]
+        absurd[("Absurd + Postgres<br/>attempts, admission, retries")]
+        absurdWorker["zj-agent Absurd worker"]
+        zellij["Zellij cockpit"]
+    end
+
+    subgraph execution["Execution surfaces"]
+        zmx["zmx durable sessions"]
+        cliWorkers["Claude / Codex / Grok / Kimi"]
+        ampTaskOrb["Amp task Orb"]
+        ampFixer["Amp Fixer / Integrator"]
+    end
+
+    operator --> browser
+    architect --> ampPlugin
+    browser --> trpc
+    ampPlugin -->|"kanban_tasks / CLI"| runtime
+    trpc --> runtime
+    runtime --> state
+    runtime --> workspace
+
+    runtime -->|"enqueue generation"| zjAgent
+    zjAgent --> absurd
+    absurd --> absurdWorker
+    absurdWorker -->|"internal direct-start"| runtime
+    runtime --> terminal
+    terminal --> zmx
+    zmx --> cliWorkers
+    cliWorkers --> hooks
+    hooks -->|"submit to Review"| runtime
+
+    ampPlugin -->|"agentId=amp"| ampTaskOrb
+    ampTaskOrb -->|"submit via plugin"| runtime
+    runtime --> reviewQueue
+    reviewQueue --> ampFixer
+    ampFixer -->|"verified accept"| runtime
+
+    zellij -.->|"board projection"| runtime
+    zellij -.->|"attach / focus"| zmx
+    absurd -.->|"attempt projection"| runtime
+    state -.->|"streamed projection"| trpc
+    trpc -.-> browser
+
+    classDef human fill:#3e2d16,stroke:#d4a72c,color:#e6edf3
+    classDef kanbanNode fill:#063e34,stroke:#3fb950,color:#e6edf3
+    classDef scheduler fill:#382462,stroke:#a371f7,color:#e6edf3
+    classDef executionNode fill:#083344,stroke:#4c9aff,color:#e6edf3
+    classDef data fill:#4c1d55,stroke:#d8b4fe,color:#e6edf3
+
+    class operator,architect human
+    class browser,ampPlugin,trpc,runtime,workspace,terminal,hooks,reviewQueue kanbanNode
+    class zjAgent,absurdWorker,zellij scheduler
+    class state,absurd data
+    class zmx,cliWorkers,ampTaskOrb,ampFixer executionNode
 ```
+
+The most important non-obvious split is that `zj-agent` is the adapter into
+Absurd, while Absurd owns durable execution attempts. `zmx` keeps an admitted
+worker process alive, and Zellij only observes or focuses it. The Amp plugin is
+the Architect/task-tool boundary and owns the special Amp Orb path; it does not
+replace Kanban task truth. A worker report, terminal process, pane, Orb thread,
+or Absurd attempt can therefore never accept a card by itself.
 
 ## Request and Stream Diagram
 

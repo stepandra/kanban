@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { UpdateNotificationController } from "@/components/update-notification-controller";
+import { WorkerCommandLogDialog } from "@/components/worker-command-log-dialog";
 import { createInitialBoardData } from "@/data/board-data";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
@@ -79,6 +80,7 @@ export default function App(): ReactElement {
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+	const [isWorkerCommandLogOpen, setIsWorkerCommandLogOpen] = useState(false);
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
@@ -91,6 +93,7 @@ export default function App(): ReactElement {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
 		setIsTracksOpen(false);
+		setIsWorkerCommandLogOpen(false);
 		setPendingJjTaskId(null);
 		setPendingTaskStartAfterEditId(null);
 		taskEditorResetRef.current();
@@ -525,6 +528,9 @@ export default function App(): ReactElement {
 		setSettingsInitialSection(section ?? null);
 		setIsSettingsOpen(true);
 	}, []);
+	const handleOpenWorkerCommandLog = useCallback(() => {
+		setIsWorkerCommandLogOpen(true);
+	}, []);
 	const handleToggleGitHistory = useCallback(() => {
 		if (hasNoProjects) {
 			return;
@@ -630,6 +636,7 @@ export default function App(): ReactElement {
 		handleToggleExpandDetailTerminal,
 		handleToggleExpandHomeTerminal: handleToggleExpandHomeTerminal,
 		handleOpenCreateTask,
+		handleOpenWorkerCommandLog,
 		handleOpenSettings,
 		handleToggleGitHistory,
 		handleCloseGitHistory,
@@ -815,6 +822,7 @@ export default function App(): ReactElement {
 						}
 						isTerminalOpen={selectedCard ? isDetailTerminalOpen : showHomeBottomTerminal}
 						isTerminalLoading={selectedCard ? isDetailTerminalStarting : isHomeTerminalStarting}
+						onOpenWorkerCommandLog={handleOpenWorkerCommandLog}
 						onOpenSettings={handleOpenSettings}
 						showDebugButton={debugModeEnabled}
 						onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
@@ -1069,6 +1077,13 @@ export default function App(): ReactElement {
 						refreshRuntimeProjectConfig();
 						refreshSettingsRuntimeProjectConfig();
 					}}
+				/>
+				<WorkerCommandLogDialog
+					open={isWorkerCommandLogOpen}
+					onOpenChange={setIsWorkerCommandLogOpen}
+					workspaceId={currentProjectId}
+					board={board}
+					onSelectTask={handleCardSelect}
 				/>
 				<DebugDialog
 					open={isDebugDialogOpen}

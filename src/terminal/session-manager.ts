@@ -8,6 +8,7 @@ import type {
 	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskTurnCheckpoint,
+	RuntimeWorkerCommandLogEntry,
 } from "../core/api-contract";
 import {
 	type AgentAdapterLaunchInput,
@@ -34,6 +35,7 @@ import {
 } from "./terminal-protocol-filter";
 import type { TerminalSessionListener, TerminalSessionService } from "./terminal-session-service";
 import { TerminalStateMirror } from "./terminal-state-mirror";
+import { type WorkerCommandAttempt, WorkerCommandLog } from "./worker-command-log";
 import {
 	buildZmxWorkspaceSessionPrefix,
 	createZmxSessionControl,
@@ -223,6 +225,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly entries = new Map<string, SessionEntry>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
 	private readonly durableTaskIds = new Set<string>();
+	private readonly workerCommandLog = new WorkerCommandLog();
 	private readonly zmxControl: ZmxSessionControl;
 	private readonly workspaceSessionPrefix: string | null;
 	private readonly warn: (message: string) => void;
@@ -312,6 +315,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return Array.from(this.entries.values()).map((entry) => cloneSummary(entry.summary));
+	}
+
+	listWorkerCommandLog(): RuntimeWorkerCommandLogEntry[] {
+		return this.workerCommandLog.list();
 	}
 
 	isDurableTaskSession(taskId: string): boolean {
@@ -527,6 +534,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const spawnBinary = zmxLaunch?.binary ?? commandBinary;
 		const spawnArgs = zmxLaunch?.args ?? commandArgs;
+		const commandAttempt: WorkerCommandAttempt = {
+			taskId: request.taskId,
+			agentId: request.agentId,
+			cwd: request.cwd,
+			binary: spawnBinary,
+			args: spawnArgs,
+			prompt: request.prompt,
+			startedAt: now(),
+		};
 		const hasCodexLaunchSignature = [commandBinary, ...commandArgs].some((part) =>
 			part.toLowerCase().includes("codex"),
 		);
@@ -677,6 +693,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				},
 			});
 		} catch (error) {
+			this.workerCommandLog.record(commandAttempt, {
+				status: "failed",
+				error: error instanceof Error ? error.message : String(error),
+			});
 			if (launch.cleanup) {
 				void launch.cleanup().catch(() => {
 					// Best effort: cleanup failure is non-critical.
@@ -731,6 +751,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		entry.active = active;
 		entry.terminalStateMirror = terminalStateMirror;
+		this.workerCommandLog.record(commandAttempt, { status: "started", pid: session.pid });
 
 		const startedAt = now();
 		updateSummary(entry, {

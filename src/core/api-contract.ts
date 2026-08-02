@@ -484,6 +484,25 @@ export const runtimeTaskSessionSummarySchema = z.object({
 });
 export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummarySchema>;
 
+export const runtimeWorkerCommandLogEntrySchema = z.object({
+	id: z.string(),
+	taskId: z.string(),
+	agentId: runtimeAgentIdSchema,
+	cwd: z.string(),
+	command: z.array(z.string()),
+	status: z.enum(["started", "failed"]),
+	pid: z.number().nullable(),
+	startedAt: z.number(),
+	error: z.string().nullable(),
+});
+export type RuntimeWorkerCommandLogEntry = z.infer<typeof runtimeWorkerCommandLogEntrySchema>;
+
+export const runtimeWorkerCommandLogResponseSchema = z.object({
+	generatedAt: z.number(),
+	entries: z.array(runtimeWorkerCommandLogEntrySchema).max(200),
+});
+export type RuntimeWorkerCommandLogResponse = z.infer<typeof runtimeWorkerCommandLogResponseSchema>;
+
 export const runtimeWorkspaceStateResponseSchema = z.object({
 	repoPath: z.string(),
 	statePath: z.string(),

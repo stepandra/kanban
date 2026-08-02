@@ -54,6 +54,7 @@ import type {
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeTracksProjection,
 	RuntimeUpdateStatusResponse,
+	RuntimeWorkerCommandLogResponse,
 	RuntimeWorkspaceChangesRequest,
 	RuntimeWorkspaceChangesResponse,
 	RuntimeWorkspaceFileSearchRequest,
@@ -115,6 +116,7 @@ import {
 	runtimeTaskWorkspaceInfoResponseSchema,
 	runtimeTracksProjectionSchema,
 	runtimeUpdateStatusResponseSchema,
+	runtimeWorkerCommandLogResponseSchema,
 	runtimeWorkspaceChangesRequestSchema,
 	runtimeWorkspaceChangesResponseSchema,
 	runtimeWorkspaceFileSearchRequestSchema,
@@ -156,6 +158,7 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskExecutionProjectionRequest,
 		) => Promise<RuntimeTaskExecutionProjectionResponse>;
 		getSystemReadiness: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeSystemReadinessResponse>;
+		getWorkerCommandLog: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeWorkerCommandLogResponse>;
 		getTracksProjection: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeTracksProjection>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -344,6 +347,9 @@ export const runtimeAppRouter = t.router({
 		getSystemReadiness: workspaceProcedure.output(runtimeSystemReadinessResponseSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.getSystemReadiness(ctx.workspaceScope);
 		}),
+		getWorkerCommandLog: workspaceProcedure
+			.output(runtimeWorkerCommandLogResponseSchema)
+			.query(async ({ ctx }) => await ctx.runtimeApi.getWorkerCommandLog(ctx.workspaceScope)),
 		getTracksProjection: workspaceProcedure.output(runtimeTracksProjectionSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.getTracksProjection(ctx.workspaceScope);
 		}),

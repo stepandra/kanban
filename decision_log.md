@@ -290,3 +290,23 @@ revision” rather than claiming a complete promotion receipt.
 reviewer assertion cannot silently become acceptance. Existing review
 publication continues to work, while the remaining receipt migration stays
 explicit instead of being approximated in the data model.
+
+## D-017 — Worker command history is bounded runtime telemetry
+
+- **Status:** Accepted; implemented 2026-08-02
+- **Date:** 2026-08-02
+
+Kanban exposes the actual PTY command attempted for each local task-worker
+launch in a runtime-local journal. The journal is scoped to the workspace
+terminal manager, keeps at most 200 newest attempts, and disappears when that
+runtime restarts. It records launch time, task, worker, cwd, outcome, pid, and
+sanitized argv. It never records the launch environment, and it redacts task
+prompts and token, secret, password, or API-key option values before storage.
+
+The browser exposes this journal as an operator inspector between Terminal and
+Settings and refreshes it while open. It does not persist entries into board
+state or infer task, Absurd-attempt, or review status from process launch.
+
+**Consequence:** Operators can answer “what did Kanban actually execute?”
+without turning debug history into workflow truth or creating an unbounded
+secret-bearing log.

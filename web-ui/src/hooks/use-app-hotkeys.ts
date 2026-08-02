@@ -18,6 +18,7 @@ interface UseAppHotkeysInput {
 	handleToggleExpandDetailTerminal: () => void;
 	handleToggleExpandHomeTerminal: () => void;
 	handleOpenCreateTask: () => void;
+	handleOpenWorkerCommandLog: () => void;
 	handleOpenSettings: () => void;
 	handleToggleGitHistory: () => void;
 	handleCloseGitHistory: () => void;
@@ -36,6 +37,7 @@ export function useAppHotkeys({
 	handleToggleExpandDetailTerminal,
 	handleToggleExpandHomeTerminal,
 	handleOpenCreateTask,
+	handleOpenWorkerCommandLog,
 	handleOpenSettings,
 	handleToggleGitHistory,
 	handleCloseGitHistory,
@@ -120,6 +122,19 @@ export function useAppHotkeys({
 			preventDefault: true,
 		},
 		[handleToggleGitHistory],
+	);
+
+	useHotkeys(
+		"mod+shift+l",
+		() => {
+			handleOpenWorkerCommandLog();
+		},
+		{
+			enableOnFormTags: true,
+			enableOnContentEditable: true,
+			preventDefault: true,
+		},
+		[handleOpenWorkerCommandLog],
 	);
 
 	useHotkeys(

@@ -17,6 +17,7 @@ import type {
 	RuntimeTaskExecutionProjectionResponse,
 	RuntimeTracksProjection,
 	RuntimeUpdateStatusResponse,
+	RuntimeWorkerCommandLogResponse,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
@@ -209,6 +210,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			generatedAt: Date.now(),
 			checks: await getSystemReadiness(workspaceScope.workspacePath),
 		}),
+		getWorkerCommandLog: async (workspaceScope): Promise<RuntimeWorkerCommandLogResponse> => {
+			const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+			return {
+				generatedAt: Date.now(),
+				entries: terminalManager.listWorkerCommandLog(),
+			};
+		},
 		getTracksProjection: async (workspaceScope): Promise<RuntimeTracksProjection> => {
 			const state = await deps.buildWorkspaceStateSnapshot(workspaceScope.workspaceId, workspaceScope.workspacePath);
 			return buildTracksProjection({

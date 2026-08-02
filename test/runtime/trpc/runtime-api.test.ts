@@ -52,9 +52,7 @@ import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../sr
 
 function createTestRuntimeApi(
 	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot"> &
-		Partial<
-			Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot">
-		>,
+		Partial<Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot">>,
 ): RuntimeTrpcContext["runtimeApi"] {
 	return createRuntimeApi({
 		...deps,
@@ -602,5 +600,41 @@ describe("createRuntimeApi update handlers", () => {
 			projectPath: "/tmp/repo",
 			agentId: "claude",
 		});
+	});
+
+	it("returns the scoped terminal manager command journal without persisting it", async () => {
+		const entries = [
+			{
+				id: "1000-1",
+				taskId: "task-1",
+				agentId: "codex" as const,
+				cwd: "/tmp/task-1",
+				command: ["zmx", "attach", "session", "codex", "<task-prompt>"],
+				status: "started" as const,
+				pid: 1234,
+				startedAt: 1_000,
+				error: null,
+			},
+		];
+		const listWorkerCommandLog = vi.fn(() => entries);
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({ listWorkerCommandLog }) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.getWorkerCommandLog({
+			workspaceId: "workspace-1",
+			workspacePath: "/tmp/repo",
+		});
+
+		expect(response).toEqual({
+			generatedAt: expect.any(Number),
+			entries,
+		});
+		expect(listWorkerCommandLog).toHaveBeenCalledOnce();
 	});
 });

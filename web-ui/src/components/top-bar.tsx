@@ -12,6 +12,7 @@ import {
 	Menu,
 	Play,
 	Plus,
+	ScrollText,
 	Settings,
 	Terminal,
 } from "lucide-react";
@@ -295,6 +296,7 @@ export function TopBar({
 	onToggleTerminal,
 	isTerminalOpen,
 	isTerminalLoading,
+	onOpenWorkerCommandLog,
 	onToggleGitHistory,
 	isGitHistoryOpen,
 	onOpenSettings,
@@ -330,6 +332,7 @@ export function TopBar({
 	onToggleTerminal?: () => void;
 	isTerminalOpen?: boolean;
 	isTerminalLoading?: boolean;
+	onOpenWorkerCommandLog?: () => void;
 	onToggleGitHistory?: () => void;
 	isGitHistoryOpen?: boolean;
 	onOpenSettings?: (section?: SettingsSection) => void;
@@ -671,6 +674,28 @@ export function TopBar({
 								/>
 							) : null}
 						</>
+					) : null}
+
+					{onOpenWorkerCommandLog ? (
+						<Tooltip
+							side="bottom"
+							content={
+								<span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+									<span>Worker commands</span>
+									<span className="text-text-tertiary">({isMacPlatform ? "⌘" : "Ctrl"} + Shift + L)</span>
+								</span>
+							}
+						>
+							<Button
+								variant="ghost"
+								size="sm"
+								icon={<ScrollText size={16} />}
+								onClick={onOpenWorkerCommandLog}
+								aria-label="Worker commands"
+								data-testid="open-worker-command-log-button"
+								className={cn("ml-0.5", isMobile && MOBILE_TOUCH_TARGET)}
+							/>
+						</Tooltip>
 					) : null}
 
 					{/* Settings: always visible */}
