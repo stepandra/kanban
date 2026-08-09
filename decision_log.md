@@ -310,3 +310,56 @@ state or infer task, Absurd-attempt, or review status from process launch.
 **Consequence:** Operators can answer “what did Kanban actually execute?”
 without turning debug history into workflow truth or creating an unbounded
 secret-bearing log.
+
+## D-018 — jj repository health inspection is read-only and fails visibly when incomplete
+
+- **Status:** Accepted; implemented 2026-08-09
+- **Date:** 2026-08-09
+
+Kanban exposes `kanban jj doctor` as a standalone JSON inventory of registered
+jj workspaces, visible heads, task ownership, expected workspace paths,
+conflicts, divergence, and stale empty task workspaces. Repository-state reads
+always use `--ignore-working-copy`; repeated inspection must leave the jj
+operation head and operation count unchanged. The command may read an
+unregistered repository, but it must not register the project or repair any
+state.
+
+`ok` reports whether an inventory could be produced, while `healthy` reports
+the inventory's findings. Ordinary diagnostic limits, such as unavailable
+Kanban board reconciliation or repository-level inability to prove workspace
+staleness, are recorded as gaps without making the inventory unhealthy.
+Incomplete workspace or head parsing does make it unhealthy so a partial read
+cannot appear clean. Process failure remains reserved for `ok: false`.
+
+**Consequence:** Operators and cleanup tooling can inspect jj topology without
+creating the very repository operations they are trying to diagnose, and an
+incomplete inventory fails visibly instead of manufacturing a clean result.
+
+## D-019 — Superseded campaign workspaces are retired after preserving unique work
+
+- **Status:** Accepted; cleanup executed 2026-08-09
+- **Date:** 2026-08-09
+
+The 2026-07 Wave A workspace stack, its two anonymous integration snapshots,
+the empty post-task workspace commits, and the pre-main integration bookmark
+are historical cleanup inputs rather than unmerged product work. A semantic
+comparison against current `main` found the Wave A runtime behavior and tests
+already integrated and subsequently evolved. The two anonymous snapshots add
+no implementation beyond that history; their extra SDD reports are stale
+execution artifacts rather than canonical documentation.
+
+The detached `07aeb` Git worktree was the only exception: it contained a unique
+jj health diagnostic. That feature is preserved on current `main` as
+`kanban jj doctor`, with current CLI wiring, stable documentation, complete
+integration coverage, and an explicit no-new-jj-operation regression test. Its
+generated Husky symlink and obsolete whole-file CLI patch are discarded.
+
+After publication of the preserved feature, inactive local workspaces may be
+forgotten and removed, obsolete anonymous heads may be abandoned, and the
+unpublished `wip/pre-main-integration-20260731` bookmark may be deleted. Existing
+published remote feature branches remain historical Git refs; they are not
+dirty workspace state and are not deleted as part of this cleanup.
+
+**Consequence:** `main` remains the sole implementation authority, unique work
+is not lost during cleanup, and old jj workspace protection no longer keeps
+superseded local heads alive indefinitely.
