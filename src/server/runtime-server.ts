@@ -31,7 +31,7 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
-import { loadWorkspaceContextById } from "../state/workspace-state";
+import { loadWorkspaceContextById, mutateWorkspaceState } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -152,6 +152,21 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		deps.workspaceRegistry.clearActiveWorkspace();
 	};
+	const runtimeApi = createRuntimeApi({
+		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+		getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
+		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
+		setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
+		getScopedTerminalManager,
+		resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
+		runCommand: deps.runCommand,
+		prepareForStateReset,
+		getUpdateStatus: deps.getUpdateStatus,
+		runUpdateNow: deps.runUpdateNow,
+		buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
+		mutateWorkspaceState,
+		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+	});
 
 	const createTrpcContext = async (req: IncomingMessage): Promise<RuntimeTrpcContext> => {
 		const requestUrl = new URL(req.url ?? "/", "http://localhost");
@@ -161,19 +176,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			requestedWorkspaceId: scope.requestedWorkspaceId,
 			workspaceScope: scope.workspaceScope,
 			isInternalRequest: bearerToken !== null && validateInternalToken(bearerToken),
-			runtimeApi: createRuntimeApi({
-				getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
-				getActiveRuntimeConfig: deps.workspaceRegistry.getActiveRuntimeConfig,
-				loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-				setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
-				getScopedTerminalManager,
-				resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
-				runCommand: deps.runCommand,
-				prepareForStateReset,
-				getUpdateStatus: deps.getUpdateStatus,
-				runUpdateNow: deps.runUpdateNow,
-				buildWorkspaceStateSnapshot: deps.workspaceRegistry.buildWorkspaceStateSnapshot,
-			}),
+			runtimeApi,
 			workspaceApi: createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
 				broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,

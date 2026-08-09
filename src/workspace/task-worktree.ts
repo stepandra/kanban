@@ -699,46 +699,52 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 export async function deleteTaskWorktree(options: {
 	repoPath: string;
 	taskId: string;
+	canDelete?: () => Promise<boolean>;
 }): Promise<RuntimeWorktreeDeleteResponse> {
 	try {
-		if (detectRepositoryKind(options.repoPath) === "jj") {
-			// ponytail: preserve jj workspaces until Kanban has an explicit, user-confirmed cleanup flow.
-			return {
-				ok: true,
-				removed: false,
-			};
-		}
-		const taskId = normalizeTaskIdForWorktreePath(options.taskId);
-		const worktreePath =
-			(await resolveExistingTaskWorktreePath(options.repoPath, taskId)) ??
-			getTaskWorktreePath(options.repoPath, taskId);
-		const rootPath = dirname(dirname(worktreePath));
-		if (!(await pathExists(worktreePath))) {
-			await deleteTaskPatchFiles(taskId);
+		return await withTaskWorktreeSetupLock(options.repoPath, async () => {
+			if (options.canDelete && !(await options.canDelete())) {
+				return { ok: true, removed: false };
+			}
+			if (detectRepositoryKind(options.repoPath) === "jj") {
+				// ponytail: preserve jj workspaces until Kanban has an explicit, user-confirmed cleanup flow.
+				return {
+					ok: true,
+					removed: false,
+				};
+			}
+			const taskId = normalizeTaskIdForWorktreePath(options.taskId);
+			const worktreePath =
+				(await resolveExistingTaskWorktreePath(options.repoPath, taskId)) ??
+				getTaskWorktreePath(options.repoPath, taskId);
+			const rootPath = dirname(dirname(worktreePath));
+			if (!(await pathExists(worktreePath))) {
+				await deleteTaskPatchFiles(taskId);
+				await pruneEmptyParents(rootPath, dirname(worktreePath));
+				return {
+					ok: true,
+					removed: false,
+				};
+			}
+
+			try {
+				await captureTaskPatch({
+					repoPath: options.repoPath,
+					taskId,
+					worktreePath,
+				});
+			} catch {
+				// Patch capture is best-effort. A corrupted or partially-created
+				// worktree (e.g. plain directory, no git init) should still be removed.
+			}
+			const removed = await removeTaskWorktreeInternal(options.repoPath, worktreePath);
 			await pruneEmptyParents(rootPath, dirname(worktreePath));
+
 			return {
 				ok: true,
-				removed: false,
+				removed,
 			};
-		}
-
-		try {
-			await captureTaskPatch({
-				repoPath: options.repoPath,
-				taskId,
-				worktreePath,
-			});
-		} catch {
-			// Patch capture is best-effort. A corrupted or partially-created
-			// worktree (e.g. plain directory, no git init) should still be removed.
-		}
-		const removed = await removeTaskWorktreeInternal(options.repoPath, worktreePath);
-		await pruneEmptyParents(rootPath, dirname(worktreePath));
-
-		return {
-			ok: true,
-			removed,
-		};
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {

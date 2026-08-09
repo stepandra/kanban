@@ -10,7 +10,9 @@ import {
 	getTaskColumnId,
 	moveTaskToColumn,
 	normalizeBoardData,
+	type TaskDraft,
 	trashTaskAndGetReadyLinkedTaskIds,
+	updateTask,
 	updateTaskTitle,
 } from "@/state/board-state";
 import type { ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
@@ -43,6 +45,30 @@ function requireTaskId(taskId: string | undefined, taskPrompt: string): string {
 		throw new Error(`Missing task id for ${taskPrompt}`);
 	}
 	return taskId;
+}
+
+function createBoardWithExecutionReceipt(): { board: BoardData; taskId: string } {
+	let board = addTaskToColumn(createInitialBoardData(), "backlog", {
+		title: "Original title",
+		prompt: "Original prompt",
+		startInPlanMode: false,
+		agentId: "codex",
+		baseRef: "main",
+	});
+	const taskId = board.columns.find((column) => column.id === "backlog")?.cards[0]?.id;
+	if (!taskId) {
+		throw new Error("Expected backlog task to exist");
+	}
+	board = {
+		...board,
+		columns: board.columns.map((column) => ({
+			...column,
+			cards: column.cards.map((card) =>
+				card.id === taskId ? { ...card, execution: { attemptId: "attempt-1", generation: 1, queuedAt: 10 } } : card,
+			),
+		})),
+	};
+	return { board, taskId };
 }
 
 function attachAcceptanceEvidence(board: BoardData, taskId: string): BoardData {
@@ -167,9 +193,9 @@ describe("board dependency state", () => {
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
 		const taskC = requireTaskId(fixture.taskIdByPrompt["Task C"], "Task C");
-		const movedA = moveTaskToColumn(fixture.board, taskA, "review");
+		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
 		expect(movedA.moved).toBe(true);
-		const movedB = moveTaskToColumn(movedA.board, taskB, "review");
+		const movedB = moveTaskToColumn(movedA.board, taskB, "in_progress");
 		expect(movedB.moved).toBe(true);
 
 		const dependencyA = addTaskDependency(movedB.board, taskC, taskA);
@@ -177,12 +203,12 @@ describe("board dependency state", () => {
 		const dependencyB = addTaskDependency(dependencyA.board, taskC, taskB);
 		expect(dependencyB.added).toBe(true);
 
-		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(dependencyB.board, taskA), taskA);
+		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskA);
 		expect(moveATrash.moved).toBe(true);
 		expect(moveATrash.board.dependencies).toHaveLength(1);
 		expect(moveATrash.readyTaskIds).toEqual([]);
 
-		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(moveATrash.board, taskB), taskB);
+		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(moveATrash.board, taskB);
 		expect(moveBTrash.moved).toBe(true);
 		expect(moveBTrash.readyTaskIds).toEqual([taskC]);
 	});
@@ -241,14 +267,14 @@ describe("board dependency state", () => {
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
 		const taskC = requireTaskId(fixture.taskIdByPrompt["Task C"], "Task C");
 		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
-		const movedB = moveTaskToColumn(movedA.board, taskB, "review");
+		const movedB = moveTaskToColumn(movedA.board, taskB, "in_progress");
 		const firstLink = addTaskDependency(movedB.board, taskC, taskA);
 		const secondLink = addTaskDependency(firstLink.board, taskC, taskB);
 
 		const trashA = trashTaskAndGetReadyLinkedTaskIds(secondLink.board, taskA);
 		expect(trashA.readyTaskIds).toEqual([]);
 
-		const trashB = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(trashA.board, taskB), taskB);
+		const trashB = trashTaskAndGetReadyLinkedTaskIds(trashA.board, taskB);
 		expect(trashB.readyTaskIds).toEqual([taskC]);
 
 		const autoStarted = moveTaskToColumn(trashB.board, taskC, "in_progress");
@@ -453,8 +479,9 @@ describe("board dependency state", () => {
 		expect(movedAToTrash.moved).toBe(true);
 		const movedBToReview = moveTaskToColumn(movedAToTrash.board, taskB, "review");
 		expect(movedBToReview.moved).toBe(true);
+		const boardWithHistoricalAcceptance = attachAcceptanceEvidence(movedBToReview.board, taskA);
 
-		const movedToReview = applyDragResult(movedBToReview.board, {
+		const movedToReview = applyDragResult(boardWithHistoricalAcceptance, {
 			draggableId: taskA,
 			type: "CARD",
 			source: { droppableId: "trash", index: 0 },
@@ -471,6 +498,7 @@ describe("board dependency state", () => {
 		expect(getTaskColumnId(movedToReview.board, taskA)).toBe("review");
 		const reviewColumn = movedToReview.board.columns.find((column) => column.id === "review");
 		expect(reviewColumn?.cards.map((card) => card.id)).toEqual([taskB, taskA]);
+		expect(reviewColumn?.cards.find((card) => card.id === taskA)?.acceptanceEvidence).toBeUndefined();
 	});
 
 	it("rejects programmatic Review to Done drags without acceptance evidence", () => {
@@ -607,6 +635,129 @@ describe("board dependency state", () => {
 		expect(legacyTask?.removedAgentId).toBe("cline");
 		expect(legacyTask?.generation).toBe(1);
 	});
+
+	it("preserves valid execution and acceptance receipts", () => {
+		const normalized = normalizeBoardData({
+			columns: [
+				{ id: "backlog", cards: [] },
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{
+					id: "trash",
+					cards: [
+						{
+							id: "accepted",
+							prompt: "Accepted task",
+							startInPlanMode: false,
+							baseRef: "main",
+							generation: 3,
+							execution: { attemptId: "attempt-3", generation: 3, queuedAt: 40 },
+							acceptanceEvidence: {
+								kind: "verified_remote_revision",
+								acceptedRevision: {
+									sha: "0123456789abcdef0123456789abcdef01234567",
+									remoteRef: "refs/heads/kanban/accepted-review",
+								},
+								verifiedAt: 42,
+							},
+						},
+					],
+				},
+			],
+			dependencies: [],
+		});
+		const acceptedTask = normalized?.columns.find((column) => column.id === "trash")?.cards[0];
+
+		expect(acceptedTask?.execution).toEqual({ attemptId: "attempt-3", generation: 3, queuedAt: 40 });
+		expect(acceptedTask?.acceptanceEvidence).toEqual({
+			kind: "verified_remote_revision",
+			acceptedRevision: {
+				sha: "0123456789abcdef0123456789abcdef01234567",
+				remoteRef: "refs/heads/kanban/accepted-review",
+			},
+			verifiedAt: 42,
+		});
+	});
+
+	it("discards execution receipts that do not match the current generation", () => {
+		const normalized = normalizeBoardData({
+			columns: [
+				{
+					id: "backlog",
+					cards: [
+						{
+							id: "stale-receipt",
+							prompt: "Changed task",
+							startInPlanMode: false,
+							baseRef: "main",
+							generation: 2,
+							execution: { attemptId: "attempt-1", generation: 1, queuedAt: 40 },
+						},
+					],
+				},
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "trash", cards: [] },
+			],
+			dependencies: [],
+		});
+		const task = normalized?.columns.find((column) => column.id === "backlog")?.cards[0];
+
+		expect(task?.generation).toBe(2);
+		expect(task?.execution).toBeUndefined();
+	});
+
+	it("clears the admitted execution receipt when a task moves to Done", () => {
+		const { board, taskId } = createBoardWithExecutionReceipt();
+		const inProgress = moveTaskToColumn(board, taskId, "in_progress");
+		const trashed = trashTaskAndGetReadyLinkedTaskIds(inProgress.board, taskId);
+
+		expect(trashed.moved).toBe(true);
+		expect(trashed.board.columns.find((column) => column.id === "trash")?.cards[0]?.execution).toBeUndefined();
+	});
+
+	it("retains the execution receipt for metadata-only task edits", () => {
+		const { board, taskId } = createBoardWithExecutionReceipt();
+		const updated = updateTask(board, taskId, {
+			title: "Renamed task",
+			prompt: "Original prompt",
+			startInPlanMode: false,
+			agentId: "codex",
+			baseRef: "main",
+		});
+		const task = updated.board.columns.find((column) => column.id === "backlog")?.cards[0];
+
+		expect(task?.generation).toBe(1);
+		expect(task?.execution).toEqual({ attemptId: "attempt-1", generation: 1, queuedAt: 10 });
+	});
+
+	it.each([
+		{ field: "prompt", draft: { prompt: "Changed prompt" } },
+		{ field: "plan mode", draft: { startInPlanMode: true } },
+		{
+			field: "images",
+			draft: { images: [{ id: "image-1", data: "data", mimeType: "image/png", name: "proof.png" }] },
+		},
+		{ field: "agent", draft: { agentId: "claude" } },
+		{ field: "base ref", draft: { baseRef: "develop" } },
+	] satisfies Array<{ field: string; draft: Partial<TaskDraft> }>)(
+		"increments generation and clears the execution receipt when $field changes",
+		({ draft }) => {
+			const { board, taskId } = createBoardWithExecutionReceipt();
+			const updated = updateTask(board, taskId, {
+				title: "Original title",
+				prompt: "Original prompt",
+				startInPlanMode: false,
+				agentId: "codex",
+				baseRef: "main",
+				...draft,
+			});
+			const task = updated.board.columns.find((column) => column.id === "backlog")?.cards[0];
+
+			expect(task?.generation).toBe(2);
+			expect(task?.execution).toBeUndefined();
+		},
+	);
 
 	it("preserves valid Amp Architect provenance and discards malformed origin metadata", () => {
 		const normalized = normalizeBoardData({

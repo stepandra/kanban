@@ -141,8 +141,13 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 	if (!taskId) {
 		throw new Error("Invalid worktree delete payload.");
 	}
+	const expectedExecutionAttemptId = parsed.expectedExecutionAttemptId?.trim() ?? parsed.expectedExecutionAttemptId;
+	if (expectedExecutionAttemptId === "") {
+		throw new Error("Invalid expected task execution attempt ID.");
+	}
 	return {
 		taskId,
+		...(expectedExecutionAttemptId !== undefined ? { expectedExecutionAttemptId } : {}),
 	};
 }
 
@@ -213,8 +218,13 @@ export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionS
 	if (!taskId) {
 		throw new Error("Invalid task session stop payload.");
 	}
+	const executionAttemptId = parsed.executionAttemptId?.trim() ?? parsed.executionAttemptId;
+	if (executionAttemptId === "") {
+		throw new Error("Invalid task session execution attempt ID.");
+	}
 	return {
 		taskId,
+		...(executionAttemptId !== undefined ? { executionAttemptId } : {}),
 	};
 }
 

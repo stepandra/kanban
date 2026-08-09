@@ -85,19 +85,21 @@ flowchart LR
     runtime --> state
     runtime --> workspace
 
-    runtime -->|"enqueue generation"| zjAgent
+    runtime -->|"enqueue generation + unique queue fence"| zjAgent
     zjAgent --> absurd
+    zjAgent -->|"attempt receipt"| runtime
     absurd --> absurdWorker
     absurdWorker -->|"internal direct-start"| runtime
     runtime --> terminal
     terminal --> zmx
     zmx --> cliWorkers
-    cliWorkers --> hooks
-    hooks -->|"submit to Review"| runtime
+    cliWorkers -.->|"session telemetry / checkpoints"| hooks
+    hooks -.-> runtime
+    cliWorkers -->|"explicit task submit"| runtime
 
-    ampPlugin -->|"agentId=amp"| ampTaskOrb
+    ampPlugin -->|"allocate idle Orb,<br/>prepare / claim, then start turn"| ampTaskOrb
     ampTaskOrb -->|"submit via plugin"| runtime
-    runtime --> reviewQueue
+    runtime -->|"post-Review handoff<br/>(not atomic with board write)"| reviewQueue
     reviewQueue --> ampFixer
     ampFixer -->|"verified accept"| runtime
 
@@ -292,19 +294,23 @@ separate execution context. The board renders a compact human label and the
 detail view exposes the supported `amp threads continue <thread-id>` command;
 neither surface can update task lifecycle from Amp thread state.
 
-Task completion has two deliberately separate operations. `submit` moves in-progress work to review without cleanup or dependency unblocking; executors and runtime hooks use it when implementation is ready for inspection. `done` is the acceptance operation: it stops the session, removes the task workspace where appropriate, and unblocks linked work. An executor must not collapse those gates by calling `done` itself.
+Task completion has two deliberately separate operations. `submit` moves in-progress work to Review and hands the task to the Fixer without accepting it. Only the reviewer-only `accept` operation can move Review to Done, and it requires verified task-specific remote revision evidence. `done`/`trash` can retire non-Review work but cannot bypass acceptance. Moving a task to Done invalidates its execution receipt; delayed stop and workspace cleanup remain fenced to the retired attempt so a concurrent restore cannot be killed.
 
 ## Main Flows
 
 ### Starting a task session
 
 The authoritative CLI/Amp start path enqueues a generation-fenced execution
-reference through Absurd. After admission, the bounded Absurd worker invokes
-the hidden direct-start entrypoint; Kanban revalidates the generation, resolves
-the task workspace and effective worker, and attaches the deterministic zmx
-session. As the process runs, the terminal runtime emits attachment summaries
-and terminal output. The runtime state hub streams those projections back to
-the browser.
+reference through Absurd. Each enqueue also carries a monotonic queue fence, so
+restarting an unchanged task generation creates a distinct Absurd job instead
+of returning a completed idempotency record. After admission, the bounded
+Absurd worker invokes the hidden direct-start entrypoint with its Absurd attempt
+ID. If that worker wins the race with receipt persistence, direct-start waits
+boundedly for its exact queue fence while still rejecting source-column,
+generation, and newer-attempt changes immediately. Only then does Kanban
+resolve the task workspace, effective worker, and deterministic zmx session. As
+the process runs, the terminal runtime emits attachment summaries and terminal
+output. The runtime state hub streams those projections back to the browser.
 
 The browser Start action uses the same enqueue boundary and receives a queued
 receipt rather than manufacturing a running session summary. Its compact

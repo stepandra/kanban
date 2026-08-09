@@ -16,14 +16,12 @@ import {
 	findCardSelection,
 	getTaskColumnId,
 	moveTaskToColumn,
-	recordTaskExecutionAttempt,
 	updateTask,
 } from "@/state/board-state";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 import { resolveTaskAutoReviewMode } from "@/types";
-import { getNextDetailTaskIdAfterTrashMove } from "@/utils/detail-view-task-order";
 import {
 	getBrowserNotificationPermission,
 	hasPromptedForBrowserNotificationPermission,
@@ -65,8 +63,8 @@ interface UseBoardInteractionsInput {
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
-	stopTaskSession: (taskId: string) => Promise<void>;
-	cleanupTaskWorkspace: (taskId: string) => Promise<unknown>;
+	stopTaskSession: UseTaskSessionsResult["stopTaskSession"];
+	cleanupTaskWorkspace: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
@@ -106,7 +104,6 @@ export interface UseBoardInteractionsResult {
 export function useBoardInteractions({
 	board,
 	setBoard,
-	sessions,
 	setSessions,
 	selectedCard,
 	selectedTaskId,
@@ -124,9 +121,9 @@ export function useBoardInteractions({
 	taskGitActionLoadingByTaskId,
 	runAutoReviewGitAction,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
-	const previousSessionsRef = useRef<Record<string, RuntimeTaskSessionSummary>>({});
 	const notificationPermissionPromptInFlightRef = useRef(false);
 	const moveToTrashLoadingByIdRef = useRef<Record<string, true>>({});
+	const resumeTaskFromTrashInFlightRef = useRef(new Set<string>());
 	const pendingProgrammaticStartMoveCompletionByTaskIdRef = useRef<
 		Record<string, PendingProgrammaticStartMoveCompletion>
 	>({});
@@ -140,7 +137,6 @@ export function useBoardInteractions({
 		waitForProgrammaticCardMoveAvailability,
 		resetProgrammaticCardMoves,
 		requestMoveTaskToTrashWithAnimation,
-		programmaticCardMoveCycle,
 	} = useProgrammaticCardMoves();
 
 	const resolvePendingProgrammaticStartMove = useCallback((taskId: string, started: boolean) => {
@@ -355,9 +351,6 @@ export function useBoardInteractions({
 				}
 				return false;
 			}
-			if (started.attempt) {
-				setBoard((currentBoard) => recordTaskExecutionAttempt(currentBoard, taskId, started.attempt!));
-			}
 			if (!optimisticMove) {
 				setBoard((currentBoard) => {
 					const currentColumnId = getTaskColumnId(currentBoard, taskId);
@@ -442,83 +435,6 @@ export function useBoardInteractions({
 		],
 	);
 
-	useEffect(() => {
-		setBoard((currentBoard) => {
-			let nextBoard = currentBoard;
-			const previousSessions = previousSessionsRef.current;
-			const blockedInterruptedTaskIds = new Set<string>();
-			for (const summary of Object.values(sessions)) {
-				const previous = previousSessions[summary.taskId];
-				if (previous && previous.updatedAt > summary.updatedAt) {
-					continue;
-				}
-				const columnId = getTaskColumnId(nextBoard, summary.taskId);
-				if (summary.state === "awaiting_review" && columnId === "in_progress") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
-					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-						continue;
-					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
-					if (moved.moved) {
-						nextBoard = moved.board;
-					}
-					continue;
-				}
-				if (summary.state === "running" && columnId === "review") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
-						skipKickoff: true,
-					});
-					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-						continue;
-					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
-					if (moved.moved) {
-						nextBoard = moved.board;
-					}
-					continue;
-				}
-				if (
-					summary.state === "interrupted" &&
-					previous?.state !== "interrupted" &&
-					columnId &&
-					columnId !== "trash"
-				) {
-					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, summary.taskId);
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "trash", {
-						skipTrashWorkflow: true,
-					});
-					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-						if (programmaticMoveAttempt === "blocked") {
-							blockedInterruptedTaskIds.add(summary.taskId);
-						}
-						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
-						);
-						continue;
-					}
-					const moved = moveTaskToColumn(nextBoard, summary.taskId, "trash", { insertAtTop: true });
-					if (moved.moved) {
-						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === summary.taskId ? nextTaskId : currentSelectedTaskId,
-						);
-						nextBoard = moved.board;
-					}
-				}
-			}
-			const nextPreviousSessions = { ...sessions };
-			for (const taskId of blockedInterruptedTaskIds) {
-				const previousSession = previousSessions[taskId];
-				if (previousSession) {
-					nextPreviousSessions[taskId] = previousSession;
-					continue;
-				}
-				delete nextPreviousSessions[taskId];
-			}
-			previousSessionsRef.current = nextPreviousSessions;
-			return nextBoard;
-		});
-	}, [programmaticCardMoveCycle, sessions, setBoard, setSelectedTaskId, tryProgrammaticCardMove]);
-
 	const { confirmMoveTaskToTrash, handleCreateDependency, handleDeleteDependency, requestMoveTaskToTrash } =
 		useLinkedBacklogTaskActions({
 			board,
@@ -544,57 +460,51 @@ export function useBoardInteractions({
 	});
 
 	const resumeTaskFromTrash = useCallback(
-		async (task: BoardCard, taskId: string, options?: { optimisticMoveApplied?: boolean }): Promise<void> => {
-			const ensured = await ensureTaskWorkspace(task);
-			if (!ensured.ok) {
-				notifyError(ensured.message ?? "Could not set up task workspace.");
-				if (!options?.optimisticMoveApplied) {
+		async (task: BoardCard, taskId: string): Promise<void> => {
+			if (resumeTaskFromTrashInFlightRef.current.has(taskId)) {
+				return;
+			}
+			resumeTaskFromTrashInFlightRef.current.add(taskId);
+			try {
+				const ensured = await ensureTaskWorkspace(task);
+				if (!ensured.ok) {
+					notifyError(ensured.message ?? "Could not set up task workspace.");
 					return;
 				}
+				if (ensured.response?.warning) {
+					showAppToast({
+						intent: "warning",
+						icon: "warning-sign",
+						message: ensured.response.warning,
+						timeout: 7000,
+					});
+				}
+				const resumed = await startTaskSession(task, { resumeFromTrash: true });
+				if (!resumed.ok) {
+					notifyError(resumed.message ?? "Could not resume task session.");
+					return;
+				}
+
 				setBoard((currentBoard) => {
 					const currentColumnId = getTaskColumnId(currentBoard, taskId);
-					if (currentColumnId !== "review") {
+					let resumedBoard = currentBoard;
+					if (currentColumnId === "trash") {
+						const moved = moveTaskToColumn(currentBoard, taskId, "review", {
+							insertAtTop: true,
+						});
+						if (!moved.moved) {
+							return currentBoard;
+						}
+						resumedBoard = moved.board;
+					} else if (currentColumnId !== "review") {
 						return currentBoard;
 					}
-					const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
-						insertAtTop: true,
-					});
-					return reverted.moved ? reverted.board : currentBoard;
+					const disabledAutoReview = disableTaskAutoReview(resumedBoard, taskId);
+					return disabledAutoReview.updated ? disabledAutoReview.board : resumedBoard;
 				});
-				return;
+			} finally {
+				resumeTaskFromTrashInFlightRef.current.delete(taskId);
 			}
-			if (ensured.response?.warning) {
-				showAppToast({
-					intent: "warning",
-					icon: "warning-sign",
-					message: ensured.response.warning,
-					timeout: 7000,
-				});
-			}
-			const resumed = await startTaskSession(task, { resumeFromTrash: true });
-			if (resumed.ok) {
-				setBoard((currentBoard) => {
-					const disabledAutoReview = disableTaskAutoReview(currentBoard, taskId);
-					const nextBoard = disabledAutoReview.updated ? disabledAutoReview.board : currentBoard;
-					return resumed.attempt ? recordTaskExecutionAttempt(nextBoard, taskId, resumed.attempt) : nextBoard;
-				});
-				return;
-			}
-
-			notifyError(resumed.message ?? "Could not resume task session.");
-			if (!options?.optimisticMoveApplied) {
-				return;
-			}
-			setBoard((currentBoard) => {
-				const currentColumnId = getTaskColumnId(currentBoard, taskId);
-				if (currentColumnId !== "review") {
-					return currentBoard;
-				}
-				const reverted = moveTaskToColumn(currentBoard, taskId, "trash", {
-					insertAtTop: true,
-				});
-				return reverted.moved ? reverted.board : currentBoard;
-			});
 		},
 		[ensureTaskWorkspace, setBoard, startTaskSession],
 	);
@@ -634,12 +544,11 @@ export function useBoardInteractions({
 			}
 
 			if (moveEvent.fromColumnId === "trash" && moveEvent.toColumnId === "review") {
-				setBoard(applied.board);
-				const movedSelection = findCardSelection(applied.board, moveEvent.taskId);
-				if (!movedSelection) {
+				const sourceSelection = findCardSelection(board, moveEvent.taskId);
+				if (!sourceSelection || sourceSelection.column.id !== "trash") {
 					return;
 				}
-				void resumeTaskFromTrash(movedSelection.card, moveEvent.taskId, { optimisticMoveApplied: true });
+				void resumeTaskFromTrash(sourceSelection.card, moveEvent.taskId);
 				return;
 			}
 
@@ -786,6 +695,9 @@ export function useBoardInteractions({
 
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
+			if (resumeTaskFromTrashInFlightRef.current.has(taskId)) {
+				return;
+			}
 			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
 			if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 				return;
@@ -796,18 +708,9 @@ export function useBoardInteractions({
 				return;
 			}
 
-			const moved = moveTaskToColumn(board, taskId, "review", { insertAtTop: true });
-			if (!moved.moved) {
-				return;
-			}
-			setBoard(moved.board);
-			const movedSelection = findCardSelection(moved.board, taskId);
-			if (!movedSelection) {
-				return;
-			}
-			void resumeTaskFromTrash(movedSelection.card, taskId, { optimisticMoveApplied: true });
+			void resumeTaskFromTrash(selection.card, taskId);
 		},
-		[board, resumeTaskFromTrash, setBoard, tryProgrammaticCardMove],
+		[board, resumeTaskFromTrash, tryProgrammaticCardMove],
 	);
 
 	const handleCancelAutomaticTaskAction = useCallback(
@@ -872,7 +775,14 @@ export function useBoardInteractions({
 	}, [setIsClearTrashDialogOpen, trashTaskCount]);
 
 	const handleConfirmClearTrash = useCallback(() => {
-		const taskIds = [...trashTaskIds];
+		const cleanupTargets =
+			board.columns
+				.find((column) => column.id === "trash")
+				?.cards.map((task) => ({
+					taskId: task.id,
+					executionAttemptId: task.execution?.attemptId ?? null,
+				})) ?? [];
+		const taskIds = cleanupTargets.map((target) => target.taskId);
 		setIsClearTrashDialogOpen(false);
 		if (taskIds.length === 0) {
 			return;
@@ -894,28 +804,28 @@ export function useBoardInteractions({
 		const limitCleanup = pLimit(CLEAR_TRASH_CLEANUP_CONCURRENCY);
 		void (async () => {
 			await Promise.all(
-				taskIds.map((taskId) =>
+				cleanupTargets.map(({ taskId, executionAttemptId }) =>
 					limitCleanup(async () => {
-						await stopTaskSession(taskId);
-						await cleanupTaskWorkspace(taskId);
+						await stopTaskSession(taskId, executionAttemptId);
+						await cleanupTaskWorkspace(taskId, null);
 					}),
 				),
 			);
 		})();
 	}, [
 		cleanupTaskWorkspace,
+		board.columns,
 		selectedTaskId,
 		setBoard,
 		setIsClearTrashDialogOpen,
 		setSelectedTaskId,
 		setSessions,
 		stopTaskSession,
-		trashTaskIds,
 	]);
 
 	const resetBoardInteractionsState = useCallback(() => {
-		previousSessionsRef.current = {};
 		moveToTrashLoadingByIdRef.current = {};
+		resumeTaskFromTrashInFlightRef.current.clear();
 		setMoveToTrashLoadingById({});
 		for (const taskId of Object.keys(pendingProgrammaticStartMoveCompletionByTaskIdRef.current)) {
 			resolvePendingProgrammaticStartMove(taskId, false);

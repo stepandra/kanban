@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { type RuntimeBoardData, runtimeBoardCardSchema } from "../../src/core/api-contract";
 import {
+	type RuntimeBoardData,
+	type RuntimeTaskAcceptanceEvidence,
+	runtimeBoardCardSchema,
+} from "../../src/core/api-contract";
+import {
+	acceptTaskWithEvidence,
 	addTaskDependency,
 	addTaskToColumn,
 	canAddTaskDependency,
 	deleteTasksFromBoard,
 	moveTaskToColumn,
+	recordTaskExecutionAttempt,
 	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../../src/core/task-board-mutations";
@@ -23,27 +29,14 @@ function createBoard(): RuntimeBoardData {
 	};
 }
 
-function attachAcceptanceEvidence(board: RuntimeBoardData, taskId: string): RuntimeBoardData {
+function createAcceptanceEvidence(taskId: string): RuntimeTaskAcceptanceEvidence {
 	return {
-		...board,
-		columns: board.columns.map((column) => ({
-			...column,
-			cards: column.cards.map((card) =>
-				card.id === taskId
-					? {
-							...card,
-							acceptanceEvidence: {
-								kind: "verified_remote_revision",
-								acceptedRevision: {
-									sha: "0123456789abcdef0123456789abcdef01234567",
-									remoteRef: `refs/heads/kanban/${taskId}-review`,
-								},
-								verifiedAt: 2,
-							},
-						}
-					: card,
-			),
-		})),
+		kind: "verified_remote_revision",
+		acceptedRevision: {
+			sha: "0123456789abcdef0123456789abcdef01234567",
+			remoteRef: `refs/heads/kanban/${taskId}-review`,
+		},
+		verifiedAt: 2,
 	};
 }
 
@@ -76,11 +69,11 @@ describe("dependency readiness", () => {
 			throw new Error("Expected second dependency to be created.");
 		}
 
-		const firstDone = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(secondLink.board, "bbbbb"), "bbbbb");
+		const firstDone = acceptTaskWithEvidence(secondLink.board, "bbbbb", createAcceptanceEvidence("bbbbb"));
 		expect(firstDone.readyTaskIds).toEqual([]);
 		expect(firstDone.board.dependencies).toHaveLength(1);
 
-		const allDone = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(firstDone.board, "ccccc"), "ccccc");
+		const allDone = acceptTaskWithEvidence(firstDone.board, "ccccc", createAcceptanceEvidence("ccccc"));
 		expect(allDone.readyTaskIds).toEqual(["aaaaa"]);
 		expect(allDone.board.dependencies).toEqual([]);
 	});
@@ -102,10 +95,16 @@ describe("dependency readiness", () => {
 		if (!linked.added) {
 			throw new Error("Expected dependency to be created.");
 		}
+		const admitted = recordTaskExecutionAttempt(linked.board, "bbbbb", {
+			attemptId: "attempt-1",
+			generation: 1,
+			queuedAt: 10,
+		});
 
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, "bbbbb");
+		const trashed = trashTaskAndGetReadyLinkedTaskIds(admitted.board, "bbbbb");
 		expect(trashed.readyTaskIds).toEqual(["aaaaa"]);
 		expect(trashed.board.dependencies).toEqual([]);
+		expect(trashed.task?.execution).toBeUndefined();
 	});
 
 	it("unblocks a dependent when its prerequisite is trashed from the backlog column", () => {
@@ -148,7 +147,7 @@ describe("dependency readiness", () => {
 		if (!linked.added) {
 			throw new Error("Expected dependency to be created.");
 		}
-		const firstTrash = trashTaskAndGetReadyLinkedTaskIds(attachAcceptanceEvidence(linked.board, "bbbbb"), "bbbbb");
+		const firstTrash = acceptTaskWithEvidence(linked.board, "bbbbb", createAcceptanceEvidence("bbbbb"));
 		expect(firstTrash.readyTaskIds).toEqual(["aaaaa"]);
 
 		const secondTrash = trashTaskAndGetReadyLinkedTaskIds(firstTrash.board, "bbbbb");
@@ -459,6 +458,86 @@ describe("task execution generation", () => {
 
 		expect(metadataOnly.task?.generation).toBe(1);
 		expect(changedPrompt.task?.generation).toBe(2);
+	});
+
+	it("records attempt receipts only for the current generation", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", agentId: "codex" },
+			() => "aaaaa111",
+		);
+		const recorded = recordTaskExecutionAttempt(
+			created.board,
+			created.task.id,
+			{ attemptId: "attempt-1", generation: 1, queuedAt: 10 },
+			11,
+		);
+		const stale = recordTaskExecutionAttempt(
+			recorded.board,
+			created.task.id,
+			{ attemptId: "attempt-stale", generation: 2, queuedAt: 12 },
+			13,
+		);
+
+		expect(recorded).toMatchObject({ recorded: true, updated: true });
+		expect(recorded.task?.execution).toEqual({ attemptId: "attempt-1", generation: 1, queuedAt: 10 });
+		expect(recorded.task?.updatedAt).toBe(11);
+		expect(stale).toMatchObject({ recorded: false, updated: false, reason: "generation_mismatch" });
+		expect(stale.board).toBe(recorded.board);
+	});
+
+	it("does not let a delayed enqueue response overwrite a newer attempt receipt", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", agentId: "codex" },
+			() => "aaaaa111",
+		);
+		const newer = recordTaskExecutionAttempt(created.board, created.task.id, {
+			attemptId: "attempt-newer",
+			generation: 1,
+			queuedAt: 20,
+		});
+		const delayed = recordTaskExecutionAttempt(newer.board, created.task.id, {
+			attemptId: "attempt-older",
+			generation: 1,
+			queuedAt: 10,
+		});
+
+		expect(delayed).toMatchObject({ recorded: true, updated: false });
+		expect(delayed.board).toBe(newer.board);
+		expect(delayed.task?.execution).toEqual({ attemptId: "attempt-newer", generation: 1, queuedAt: 20 });
+	});
+
+	it("clears the previous attempt receipt when the execution contract changes", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Task", baseRef: "main", agentId: "codex" },
+			() => "aaaaa111",
+		);
+		const recorded = recordTaskExecutionAttempt(created.board, created.task.id, {
+			attemptId: "attempt-1",
+			generation: 1,
+			queuedAt: 10,
+		});
+		const metadataOnly = updateTask(recorded.board, created.task.id, {
+			title: "Renamed task",
+			prompt: "Task",
+			baseRef: "main",
+			agentId: "codex",
+		});
+		const changedPrompt = updateTask(metadataOnly.board, created.task.id, {
+			title: "Renamed task",
+			prompt: "Changed task",
+			baseRef: "main",
+			agentId: "codex",
+		});
+
+		expect(metadataOnly.task?.execution).toEqual({ attemptId: "attempt-1", generation: 1, queuedAt: 10 });
+		expect(changedPrompt.task?.generation).toBe(2);
+		expect(changedPrompt.task?.execution).toBeUndefined();
 	});
 
 	it("preserves Amp Architect provenance without treating it as execution state", () => {

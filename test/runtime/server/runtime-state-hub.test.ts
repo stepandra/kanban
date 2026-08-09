@@ -4,10 +4,9 @@
  * BA-14: swallowed stream failures (websocket writes, projects payload builds,
  * workspace-state rebuilds) must emit rate-limited warn-level logs with context.
  *
- * PF-19: plain session ticks must not re-read boards or rebuild workspace
- * snapshots; project-count broadcasts are debounced and only happen when a
- * count-relevant session state actually changed, and turn-checkpoint changes
- * stream deltas instead of full workspace snapshots.
+ * PF-19: session telemetry must not re-read boards, rebuild workspace
+ * snapshots, or project session state onto authoritative task counts. Turn
+ * checkpoint changes stream deltas instead of full workspace snapshots.
  */
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
@@ -271,23 +270,18 @@ describe("runtime state hub", () => {
 
 		const fakeManager = createFakeTerminalSessionManager();
 		context.hub.trackTerminalManager(TEST_WORKSPACE_ID, fakeManager.manager);
-		fakeManager.emitSummary(createSessionSummary({ taskId: "task-1", state: "running" }));
-
-		// Let the initial batched flush and the debounced projects broadcast settle.
-		await waitForCondition(() => context.workspaceRegistry.buildProjectsPayload.mock.calls.length >= 2);
-		const projectsBuildsAfterSettle = context.workspaceRegistry.buildProjectsPayload.mock.calls.length;
-		const snapshotBuildsAfterSettle = context.workspaceRegistry.buildWorkspaceStateSnapshot.mock.calls.length;
+		const projectsBuildsBeforeTicks = context.workspaceRegistry.buildProjectsPayload.mock.calls.length;
+		const snapshotBuildsBeforeTicks = context.workspaceRegistry.buildWorkspaceStateSnapshot.mock.calls.length;
 		messages.length = 0;
 
-		// Plain ticks: same count-relevant state, fresh timestamps.
 		for (let index = 0; index < 3; index += 1) {
 			fakeManager.emitSummary(createSessionSummary({ taskId: "task-1", state: "running" }));
 			await delay(60);
 		}
-		await delay(900);
+		await waitForCondition(() => messages.some((message) => message.type === "task_sessions_updated"));
 
-		expect(context.workspaceRegistry.buildProjectsPayload.mock.calls).toHaveLength(projectsBuildsAfterSettle);
-		expect(context.workspaceRegistry.buildWorkspaceStateSnapshot.mock.calls).toHaveLength(snapshotBuildsAfterSettle);
+		expect(context.workspaceRegistry.buildProjectsPayload.mock.calls).toHaveLength(projectsBuildsBeforeTicks);
+		expect(context.workspaceRegistry.buildWorkspaceStateSnapshot.mock.calls).toHaveLength(snapshotBuildsBeforeTicks);
 		// Session deltas still stream to clients even though nothing is rebuilt.
 		expect(messages.some((message) => message.type === "task_sessions_updated")).toBe(true);
 	});
@@ -327,25 +321,25 @@ describe("runtime state hub", () => {
 		});
 	});
 
-	it("debounces project-count broadcasts when count-relevant session states change", async () => {
+	it("does not project session state changes onto authoritative project counts", async () => {
 		const context = await startHub();
 		contexts.push(context);
-		const { socket } = await connectClient(context.port);
+		const { socket, messages } = await connectClient(context.port);
 		sockets.push(socket);
 
 		const fakeManager = createFakeTerminalSessionManager();
 		context.hub.trackTerminalManager(TEST_WORKSPACE_ID, fakeManager.manager);
-		fakeManager.emitSummary(createSessionSummary({ taskId: "task-1", state: "running" }));
-		await waitForCondition(() => context.workspaceRegistry.buildProjectsPayload.mock.calls.length >= 2);
-		const projectsBuildsAfterSettle = context.workspaceRegistry.buildProjectsPayload.mock.calls.length;
+		const projectsBuildsBeforeChanges = context.workspaceRegistry.buildProjectsPayload.mock.calls.length;
+		messages.length = 0;
 
-		// Two count-relevant changes inside one debounce window coalesce into one broadcast.
 		fakeManager.emitSummary(createSessionSummary({ taskId: "task-1", state: "awaiting_review" }));
 		await delay(250);
-		fakeManager.emitSummary(createSessionSummary({ taskId: "task-1", state: "running" }));
-		await delay(900);
+		fakeManager.emitSummary(createSessionSummary({ taskId: "task-1", state: "interrupted" }));
+		await waitForCondition(
+			() => messages.filter((message) => message.type === "task_sessions_updated").length >= 2,
+		);
 
-		expect(context.workspaceRegistry.buildProjectsPayload.mock.calls).toHaveLength(projectsBuildsAfterSettle + 1);
+		expect(context.workspaceRegistry.buildProjectsPayload.mock.calls).toHaveLength(projectsBuildsBeforeChanges);
 	});
 
 	it("streams checkpoint changes as deltas without rebuilding the workspace snapshot", async () => {

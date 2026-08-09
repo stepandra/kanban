@@ -14,6 +14,7 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeSystemReadinessResponse,
+	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskExecutionProjectionResponse,
 	RuntimeTracksProjection,
 	RuntimeUpdateStatusResponse,
@@ -28,11 +29,16 @@ import {
 	parseTaskSessionStartRequest,
 	parseTaskSessionStopRequest,
 } from "../core/api-validation";
+import { recordTaskExecutionAttempt } from "../core/task-board-mutations";
 import { formatTaskExecutionReference, resolveTaskGeneration } from "../core/task-execution-reference";
 import { buildTracksProjection } from "../core/tracks-projection";
 import { enqueueAbsurdTaskStart } from "../orchestration/absurd-task-start";
 import { getAbsurdTaskProjections, getSystemReadiness } from "../orchestration/absurd-task-status";
 import { openInBrowser } from "../server/browser";
+import type {
+	RuntimeWorkspaceAtomicMutationResponse,
+	RuntimeWorkspaceAtomicMutationResult,
+} from "../state/workspace-state";
 import { getLegacyTaskWorktreesHomePath, getTaskWorkspacesHomePath } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -52,6 +58,11 @@ export interface CreateRuntimeApiDependencies {
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
 	buildWorkspaceStateSnapshot: (workspaceId: string, workspacePath: string) => Promise<RuntimeWorkspaceStateResponse>;
+	mutateWorkspaceState: <T>(
+		workspacePath: string,
+		mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceAtomicMutationResult<T>,
+	) => Promise<RuntimeWorkspaceAtomicMutationResponse<T>>;
+	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
 }
 
 const ABSURD_WORKER_AGENT_IDS = new Set(["claude", "codex", "grok", "kimi"]);
@@ -92,6 +103,7 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 }
 
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
+	const lastAllocatedAttemptQueuedAtByTask = new Map<string, number>();
 	const debugResetTargetPaths = [
 		join(homedir(), ".cline", "kanban"),
 		getTaskWorkspacesHomePath(),
@@ -172,13 +184,47 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					);
 				}
 				const generation = resolveTaskGeneration(record.card.generation);
+				const allocationKey = `${workspaceScope.workspaceId}\u0000${taskId}\u0000${generation}`;
+				const queuedAt = Math.max(
+					Date.now(),
+					record.card.execution?.generation === generation ? record.card.execution.queuedAt + 1 : 0,
+					(lastAllocatedAttemptQueuedAtByTask.get(allocationKey) ?? 0) + 1,
+				);
+				lastAllocatedAttemptQueuedAtByTask.set(allocationKey, queuedAt);
 				const receipt = await enqueueAbsurdTaskStart({
 					taskExecutionReference: formatTaskExecutionReference(record.card.id, generation, {
+						queuedAt,
 						resumeFromTrash: input.resumeFromTrash,
 					}),
 					projectPath: workspaceScope.workspacePath,
 					agentId,
 				});
+				const attempt: RuntimeTaskExecutionAttemptReference = {
+					attemptId: receipt.attemptId,
+					generation,
+					queuedAt,
+				};
+				const persistedAttempt = await deps.mutateWorkspaceState(workspaceScope.workspacePath, (latestState) => {
+					const latestRecord = findBoardTask(latestState, taskId);
+					if (!latestRecord) {
+						throw new Error(`Task "${taskId}" changed while its execution attempt was being queued.`);
+					}
+					const recorded = recordTaskExecutionAttempt(latestState.board, taskId, attempt);
+					if (!recorded.recorded) {
+						throw new Error(`Task "${taskId}" changed while its execution attempt was being queued.`);
+					}
+					return {
+						board: recorded.board,
+						value: recorded.task,
+						save: recorded.updated,
+					};
+				});
+				if (persistedAttempt.saved) {
+					await deps.broadcastRuntimeWorkspaceStateUpdated(
+						workspaceScope.workspaceId,
+						workspaceScope.workspacePath,
+					);
+				}
 				return {
 					ok: true,
 					state: "queued",
@@ -186,11 +232,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						id: record.card.id,
 						generation,
 					},
-					attempt: {
-						attemptId: receipt.attemptId,
-						generation,
-						queuedAt: Date.now(),
-					},
+					attempt,
 				};
 			} catch (error) {
 				return {
@@ -276,6 +318,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					rows: body.rows,
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
+					executionAttempt: body.executionAttempt,
 				});
 
 				let nextSummary = summary;
@@ -306,7 +349,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				const body = parseTaskSessionStopRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const summary = await terminalManager.stopTaskSession(body.taskId);
+				const summary = await terminalManager.stopTaskSession(body.taskId, body.executionAttemptId);
 				return {
 					ok: Boolean(summary),
 					summary,

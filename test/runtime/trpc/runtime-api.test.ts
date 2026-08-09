@@ -3,7 +3,11 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type {
+	RuntimeBoardColumnId,
+	RuntimeTaskSessionSummary,
+	RuntimeWorkspaceStateResponse,
+} from "../../../src/core/api-contract";
 
 const agentRegistryMocks = vi.hoisted(() => ({
 	resolveAgentCommand: vi.fn(),
@@ -47,20 +51,59 @@ vi.mock("../../../src/orchestration/absurd-task-start.js", () => ({
 	enqueueAbsurdTaskStart: absurdTaskStartMocks.enqueueAbsurdTaskStart,
 }));
 
+import { moveTaskToColumn } from "../../../src/core/task-board-mutations";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
 import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../../src/trpc/runtime-api";
 
 function createTestRuntimeApi(
-	deps: Omit<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot"> &
-		Partial<Pick<CreateRuntimeApiDependencies, "getUpdateStatus" | "runUpdateNow" | "buildWorkspaceStateSnapshot">>,
+	deps: Omit<
+		CreateRuntimeApiDependencies,
+		| "getUpdateStatus"
+		| "runUpdateNow"
+		| "buildWorkspaceStateSnapshot"
+		| "mutateWorkspaceState"
+		| "broadcastRuntimeWorkspaceStateUpdated"
+	> &
+		Partial<
+			Pick<
+				CreateRuntimeApiDependencies,
+				| "getUpdateStatus"
+				| "runUpdateNow"
+				| "buildWorkspaceStateSnapshot"
+				| "mutateWorkspaceState"
+				| "broadcastRuntimeWorkspaceStateUpdated"
+			>
+		>,
 ): RuntimeTrpcContext["runtimeApi"] {
+	const buildWorkspaceStateSnapshot =
+		deps.buildWorkspaceStateSnapshot ??
+		vi.fn(async () => {
+			throw new Error("Unexpected workspace state snapshot request.");
+		});
+	const mutateWorkspaceState: CreateRuntimeApiDependencies["mutateWorkspaceState"] =
+		deps.mutateWorkspaceState ??
+		(async (_workspacePath, mutate) => {
+			const state = await buildWorkspaceStateSnapshot("workspace-1", _workspacePath);
+			const mutation = mutate(state);
+			const saved = mutation.save !== false;
+			return {
+				value: mutation.value,
+				state: saved
+					? {
+							...state,
+							board: mutation.board,
+							sessions: mutation.sessions ?? state.sessions,
+							revision: state.revision + 1,
+						}
+					: state,
+				saved,
+			};
+		});
 	return createRuntimeApi({
 		...deps,
-		buildWorkspaceStateSnapshot:
-			deps.buildWorkspaceStateSnapshot ??
-			vi.fn(async () => {
-				throw new Error("Unexpected workspace state snapshot request.");
-			}),
+		buildWorkspaceStateSnapshot,
+		mutateWorkspaceState,
+		broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated ?? vi.fn(),
 		getUpdateStatus:
 			deps.getUpdateStatus ??
 			vi.fn(() => ({
@@ -118,6 +161,44 @@ function createRuntimeConfigState(): RuntimeConfigState {
 	};
 }
 
+function createWorkspaceStateWithTask(input: {
+	columnId: RuntimeBoardColumnId;
+	generation?: number;
+}): RuntimeWorkspaceStateResponse {
+	const task = {
+		id: "task-1",
+		title: "Task",
+		prompt: "Continue",
+		baseRef: "main",
+		generation: input.generation ?? 1,
+		createdAt: 1,
+		updatedAt: 1,
+		startInPlanMode: false,
+		autoReviewEnabled: false,
+		autoReviewMode: "commit" as const,
+	};
+	return {
+		repoPath: "/tmp/repo",
+		statePath: "/tmp/state.json",
+		vcs: "jj",
+		git: {
+			currentBranch: null,
+			defaultBranch: "main",
+			branches: ["main"],
+		},
+		board: {
+			columns: (["backlog", "in_progress", "review", "trash"] as const).map((columnId) => ({
+				id: columnId,
+				title: columnId === "trash" ? "Done" : columnId,
+				cards: columnId === input.columnId ? [task] : [],
+			})),
+			dependencies: [],
+		},
+		sessions: {},
+		revision: 1,
+	};
+}
+
 describe("createRuntimeApi startTaskSession", () => {
 	beforeEach(() => {
 		agentRegistryMocks.resolveAgentCommand.mockReset();
@@ -171,6 +252,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				taskId: "task-1",
 				baseRef: "main",
 				prompt: "Investigate startup freeze",
+				executionAttempt: { attemptId: "attempt-1", generation: 2, queuedAt: 10 },
 			},
 		);
 
@@ -186,6 +268,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect.objectContaining({
 				cwd: "/tmp/existing-worktree",
 				projectPath: "/tmp/repo",
+				executionAttempt: { attemptId: "attempt-1", generation: 2, queuedAt: 10 },
 			}),
 		);
 	});
@@ -478,6 +561,14 @@ describe("createRuntimeApi startTaskSession", () => {
 });
 
 describe("createRuntimeApi update handlers", () => {
+	beforeEach(() => {
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockReset();
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockResolvedValue({
+			attemptId: "absurd-task-1",
+			raw: { task_id: "absurd-task-1" },
+		});
+	});
+
 	it("delegates update status to the required dependency", async () => {
 		const getUpdateStatus = vi.fn(() => ({
 			currentVersion: "0.1.0",
@@ -533,6 +624,23 @@ describe("createRuntimeApi update handlers", () => {
 	});
 
 	it("enqueues browser starts through Absurd with generation and resume intent", async () => {
+		let persistedState = createWorkspaceStateWithTask({ columnId: "trash", generation: 4 });
+		const mutateWorkspaceState: CreateRuntimeApiDependencies["mutateWorkspaceState"] = async (
+			_workspacePath,
+			mutate,
+		) => {
+			const mutation = mutate(persistedState);
+			const saved = mutation.save !== false;
+			if (saved) {
+				persistedState = {
+					...persistedState,
+					board: mutation.board,
+					revision: persistedState.revision + 1,
+				};
+			}
+			return { value: mutation.value, state: persistedState, saved };
+		};
+		const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
@@ -540,44 +648,9 @@ describe("createRuntimeApi update handlers", () => {
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
-			buildWorkspaceStateSnapshot: vi.fn(async () => ({
-				repoPath: "/tmp/repo",
-				statePath: "/tmp/state.json",
-				vcs: "jj" as const,
-				git: {
-					currentBranch: null,
-					defaultBranch: "main",
-					branches: ["main"],
-				},
-				board: {
-					columns: [
-						{ id: "backlog" as const, title: "Backlog", cards: [] },
-						{ id: "in_progress" as const, title: "In Progress", cards: [] },
-						{ id: "review" as const, title: "Review", cards: [] },
-						{
-							id: "trash" as const,
-							title: "Done",
-							cards: [
-								{
-									id: "task-1",
-									title: "Resume me",
-									prompt: "Continue",
-									baseRef: "main",
-									generation: 4,
-									createdAt: 1,
-									updatedAt: 1,
-									startInPlanMode: false,
-									autoReviewEnabled: false,
-									autoReviewMode: "commit" as const,
-								},
-							],
-						},
-					],
-					dependencies: [],
-				},
-				sessions: {},
-				revision: 1,
-			})),
+			buildWorkspaceStateSnapshot: vi.fn(async () => persistedState),
+			mutateWorkspaceState,
+			broadcastRuntimeWorkspaceStateUpdated,
 		});
 
 		await expect(
@@ -596,10 +669,125 @@ describe("createRuntimeApi update handlers", () => {
 			},
 		});
 		expect(absurdTaskStartMocks.enqueueAbsurdTaskStart).toHaveBeenCalledWith({
-			taskExecutionReference: "task-1~g4~resume",
+			taskExecutionReference: expect.stringMatching(/^task-1~g4~q[1-9]\d*~resume$/u),
 			projectPath: "/tmp/repo",
 			agentId: "claude",
 		});
+		expect(persistedState.board.columns[3]?.cards[0]?.execution).toEqual({
+			attemptId: "absurd-task-1",
+			generation: 4,
+			queuedAt: expect.any(Number),
+		});
+		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith("workspace-1", "/tmp/repo");
+	});
+
+	it("persists an admitted attempt after the task reaches review", async () => {
+		let persistedState = createWorkspaceStateWithTask({ columnId: "backlog", generation: 2 });
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockImplementationOnce(async () => {
+			const moved = moveTaskToColumn(persistedState.board, "task-1", "review");
+			persistedState = { ...persistedState, board: moved.board, revision: persistedState.revision + 1 };
+			return { attemptId: "attempt-1", raw: { task_id: "attempt-1" } };
+		});
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			buildWorkspaceStateSnapshot: vi.fn(async () => persistedState),
+			mutateWorkspaceState: async (_workspacePath, mutate) => {
+				const mutation = mutate(persistedState);
+				const saved = mutation.save !== false;
+				if (saved) {
+					persistedState = {
+						...persistedState,
+						board: mutation.board,
+						revision: persistedState.revision + 1,
+					};
+				}
+				return { value: mutation.value, state: persistedState, saved };
+			},
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		});
+
+		const response = await api.enqueueTaskExecution(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1" },
+		);
+
+		expect(response.ok).toBe(true);
+		expect(persistedState.board.columns.find((column) => column.id === "review")?.cards[0]?.execution).toEqual({
+			attemptId: "attempt-1",
+			generation: 2,
+			queuedAt: expect.any(Number),
+		});
+	});
+
+	it("orders concurrent attempt receipts even when the clock does not advance", async () => {
+		let persistedState = createWorkspaceStateWithTask({ columnId: "backlog" });
+		const receiptResolvers: Array<(receipt: { attemptId: string; raw: unknown }) => void> = [];
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockImplementation(
+			async () => await new Promise((resolve) => receiptResolvers.push(resolve)),
+		);
+		const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			buildWorkspaceStateSnapshot: vi.fn(async () => persistedState),
+			mutateWorkspaceState: async (_workspacePath, mutate) => {
+				const mutation = mutate(persistedState);
+				const saved = mutation.save !== false;
+				if (saved) {
+					persistedState = {
+						...persistedState,
+						board: mutation.board,
+						revision: persistedState.revision + 1,
+					};
+				}
+				return { value: mutation.value, state: persistedState, saved };
+			},
+			broadcastRuntimeWorkspaceStateUpdated,
+		});
+		const now = vi.spyOn(Date, "now").mockReturnValue(100);
+		try {
+			const first = api.enqueueTaskExecution(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1" },
+			);
+			await vi.waitFor(() => expect(receiptResolvers).toHaveLength(1));
+			const second = api.enqueueTaskExecution(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1" },
+			);
+			await vi.waitFor(() => expect(receiptResolvers).toHaveLength(2));
+
+			receiptResolvers[1]?.({ attemptId: "attempt-newer", raw: {} });
+			await second;
+			receiptResolvers[0]?.({ attemptId: "attempt-older", raw: {} });
+			await first;
+		} finally {
+			now.mockRestore();
+		}
+
+		expect(persistedState.board.columns[0]?.cards[0]?.execution).toEqual({
+			attemptId: "attempt-newer",
+			generation: 1,
+			queuedAt: 101,
+		});
+		expect(absurdTaskStartMocks.enqueueAbsurdTaskStart).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ taskExecutionReference: "task-1~g1~q100" }),
+		);
+		expect(absurdTaskStartMocks.enqueueAbsurdTaskStart).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({ taskExecutionReference: "task-1~g1~q101" }),
+		);
+		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledTimes(1);
 	});
 
 	it("returns the scoped terminal manager command journal without persisting it", async () => {

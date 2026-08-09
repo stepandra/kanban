@@ -26,12 +26,12 @@ import {
 	updateTask,
 } from "../core/task-board-mutations";
 import {
+	assertCurrentTaskExecutionAttempt,
 	assertCurrentTaskExecutionReference,
-	formatTaskExecutionReference,
 	parseTaskExecutionReference,
 	resolveTaskGeneration,
+	waitForCurrentTaskExecutionAttempt,
 } from "../core/task-execution-reference";
-import { enqueueAbsurdTaskStart } from "../orchestration/absurd-task-start";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { detectRepositoryKind, loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
@@ -370,8 +370,9 @@ async function listTasks(input: { cwd: string; projectPath?: string; column?: Li
 async function stopTaskRuntimeSession(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
 	taskId: string,
+	executionAttemptId?: string | null,
 ): Promise<void> {
-	const stopped = await runtimeClient.runtime.stopTaskSession.mutate({ taskId });
+	const stopped = await runtimeClient.runtime.stopTaskSession.mutate({ taskId, executionAttemptId });
 	if (!stopped.ok && stopped.error) {
 		throw new Error(`Could not stop task session "${taskId}": ${stopped.error}`);
 	}
@@ -380,10 +381,12 @@ async function stopTaskRuntimeSession(
 async function deleteTaskWorkspace(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
 	taskId: string,
+	expectedExecutionAttemptId?: string | null,
 ): Promise<{ removed: boolean; error?: string }> {
 	try {
 		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({
 			taskId,
+			...(expectedExecutionAttemptId !== undefined ? { expectedExecutionAttemptId } : {}),
 		});
 		return {
 			removed: deleted.removed,
@@ -603,59 +606,76 @@ async function enqueueTaskStart(input: { cwd: string; taskId: string; projectPat
 		);
 	}
 
-	const orchestration = await enqueueAbsurdTaskStart({
-		taskExecutionReference: formatTaskExecutionReference(record.task.id, record.task.generation),
-		projectPath: workspaceRepoPath,
-		agentId: record.task.agentId ?? "codex",
+	const enqueued = await runtimeClient.runtime.enqueueTaskExecution.mutate({
+		taskId: record.task.id,
 	});
+	if (!enqueued.ok || !enqueued.task || !enqueued.attempt) {
+		throw new Error(enqueued.error ?? `Task "${record.task.id}" could not be queued.`);
+	}
 	return {
 		ok: true,
-		state: "queued",
+		state: enqueued.state,
 		task: {
 			id: record.task.id,
 			column: record.columnId,
 			agentId: record.task.agentId,
-			generation: resolveTaskGeneration(record.task.generation),
+			generation: enqueued.task.generation,
 			workspacePath: workspaceRepoPath,
 		},
-		orchestration,
+		attempt: enqueued.attempt,
+		orchestration: {
+			attemptId: enqueued.attempt.attemptId,
+		},
 	};
 }
 
-async function startTaskDirect(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+function canStartTaskExecutionFromColumn(columnId: RuntimeBoardColumnId, resumeFromTrash: boolean): boolean {
+	return (
+		columnId === "backlog" ||
+		columnId === "in_progress" ||
+		(resumeFromTrash && (columnId === "trash" || columnId === "review"))
+	);
+}
+
+async function startTaskDirect(input: {
+	cwd: string;
+	taskId: string;
+	attemptId: string;
+	projectPath?: string;
+}): Promise<JsonRecord> {
 	const executionReference = parseTaskExecutionReference(input.taskId);
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const runtimeState = await runtimeClient.workspace.getState.query();
-	const fromColumnId = getTaskColumnId(runtimeState.board, executionReference.taskId);
-	if (!fromColumnId) {
-		throw new Error(`Task "${executionReference.taskId}" was not found in workspace ${workspaceRepoPath}.`);
-	}
-
-	const canStartFromCurrentColumn =
-		fromColumnId === "backlog" ||
-		fromColumnId === "in_progress" ||
-		(executionReference.resumeFromTrash && (fromColumnId === "trash" || fromColumnId === "review"));
-	if (!canStartFromCurrentColumn) {
-		throw new Error(
-			`Task "${executionReference.taskId}" is in "${fromColumnId}" and cannot be ${
-				executionReference.resumeFromTrash ? "resumed" : "started"
-			}.`,
-		);
-	}
-
-	const currentRecord = findTaskRecord(runtimeState, executionReference.taskId);
-	const task = currentRecord?.task;
-	if (!task) {
-		throw new Error(`Task "${executionReference.taskId}" could not be resolved.`);
-	}
-	if (task.removedAgentId === "cline") {
-		throw new Error(
-			`Task "${task.id}" still references the removed Cline worker. Assign a supported worker before starting it.`,
-		);
-	}
-	assertCurrentTaskExecutionReference(executionReference, task.id, task.generation);
+	const loadStartCandidate = async () => {
+		const runtimeState = await runtimeClient.workspace.getState.query();
+		const currentRecord = findTaskRecord(runtimeState, executionReference.taskId);
+		if (!currentRecord) {
+			throw new Error(`Task "${executionReference.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+		}
+		if (!canStartTaskExecutionFromColumn(currentRecord.columnId, executionReference.resumeFromTrash)) {
+			throw new Error(
+				`Task "${executionReference.taskId}" is in "${currentRecord.columnId}" and cannot be ${
+					executionReference.resumeFromTrash ? "resumed" : "started"
+				}.`,
+			);
+		}
+		if (currentRecord.task.removedAgentId === "cline") {
+			throw new Error(
+				`Task "${currentRecord.task.id}" still references the removed Cline worker. Assign a supported worker before starting it.`,
+			);
+		}
+		assertCurrentTaskExecutionReference(executionReference, currentRecord.task.id, currentRecord.task.generation);
+		return currentRecord;
+	};
+	await waitForCurrentTaskExecutionAttempt(
+		executionReference,
+		input.attemptId,
+		async () => (await loadStartCandidate()).task.execution,
+	);
+	const currentRecord = await loadStartCandidate();
+	const task = currentRecord.task;
+	assertCurrentTaskExecutionAttempt(executionReference, task.execution, input.attemptId);
 
 	// startTaskSession is idempotent for a live manager and reattaches a durable
 	// zmx-backed session after a runtime restart. Do not trust a persisted
@@ -678,6 +698,7 @@ async function startTaskDirect(input: { cwd: string; taskId: string; projectPath
 			resumeFromTrash: executionReference.resumeFromTrash || undefined,
 			baseRef: task.baseRef,
 			agentId: task.agentId,
+			executionAttempt: task.execution,
 		});
 		if (!started.ok || !started.summary) {
 			throw new Error(started.error ?? "Could not start task session.");
@@ -692,6 +713,10 @@ async function startTaskDirect(input: { cwd: string; taskId: string; projectPath
 				throw new Error(`Task "${executionReference.taskId}" could not be resolved.`);
 			}
 			assertCurrentTaskExecutionReference(executionReference, latestRecord.task.id, latestRecord.task.generation);
+			assertCurrentTaskExecutionAttempt(executionReference, latestRecord.task.execution, input.attemptId);
+			if (!canStartTaskExecutionFromColumn(latestRecord.columnId, executionReference.resumeFromTrash)) {
+				throw new Error(`Task "${executionReference.taskId}" changed while its worker session was starting.`);
+			}
 			const targetColumnId = executionReference.resumeFromTrash ? "review" : "in_progress";
 			const movement = moveTaskToColumn(latestState.board, executionReference.taskId, targetColumnId);
 			if (!movement.task) {
@@ -709,7 +734,7 @@ async function startTaskDirect(input: { cwd: string; taskId: string; projectPath
 			};
 		});
 	} catch (error) {
-		await stopTaskRuntimeSession(runtimeClient, task.id).catch(() => undefined);
+		await stopTaskRuntimeSession(runtimeClient, task.id, input.attemptId).catch(() => undefined);
 		throw error;
 	}
 
@@ -849,8 +874,8 @@ async function transitionExternalTask(input: {
 		taskWorkspacePath: taskWorkspace.path,
 	};
 
-	// Review handoff is owned by submit so a bare CLI transition cannot orphan a card.
-	// Fail-closed: column is already Review; surface handoff failure without rolling back.
+	// Review handoff is owned by submit, but it is not atomic with the board write:
+	// the card remains in Review when dispatch fails so a later submit can retry it.
 	if (input.action === "submit") {
 		result.reviewHandoff = {
 			...(await dispatchReviewFixer({
@@ -880,6 +905,7 @@ interface TrashTaskMutationValue {
 	task: JsonRecord;
 	previousColumnId: ListTaskColumn;
 	readyTaskIds: string[];
+	executionAttemptId: string | null;
 	alreadyInTrash: boolean;
 }
 
@@ -992,6 +1018,7 @@ async function trashTaskById(input: {
 					task: formatTaskRecord(latestState, latestRecord.task, latestRecord.columnId),
 					previousColumnId: latestRecord.columnId,
 					readyTaskIds: [] as string[],
+					executionAttemptId: latestRecord.task.execution?.attemptId ?? null,
 					alreadyInTrash: true,
 				},
 				save: false,
@@ -1020,6 +1047,7 @@ async function trashTaskById(input: {
 				task: formatTaskRecord(nextState, trashed.task, "trash"),
 				previousColumnId: latestRecord.columnId,
 				readyTaskIds: trashed.readyTaskIds,
+				executionAttemptId: latestRecord.task.execution?.attemptId ?? null,
 				alreadyInTrash: false,
 			},
 		};
@@ -1042,7 +1070,7 @@ async function trashTaskById(input: {
 	}
 
 	if (columnCanHaveLiveTaskSession(mutation.value.previousColumnId)) {
-		await stopTaskRuntimeSession(input.runtimeClient, input.taskId);
+		await stopTaskRuntimeSession(input.runtimeClient, input.taskId, mutation.value.executionAttemptId);
 	}
 
 	const autoStartedTasks: JsonRecord[] = [];
@@ -1055,7 +1083,7 @@ async function trashTaskById(input: {
 		autoStartedTasks.push(started);
 	}
 
-	const deletedWorkspace = await deleteTaskWorkspace(input.runtimeClient, input.taskId);
+	const deletedWorkspace = await deleteTaskWorkspace(input.runtimeClient, input.taskId, null);
 
 	return {
 		task: mutation.value.task,
@@ -1641,12 +1669,14 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.action(async (options: { taskId: string; projectPath?: string }) => {
 			await runTaskCommand(async () => {
-				if (!process.env.KANBAN_ABSURD_TASK_ID) {
+				const attemptId = process.env.KANBAN_ABSURD_TASK_ID?.trim();
+				if (!attemptId) {
 					throw new Error("start-direct requires KANBAN_ABSURD_TASK_ID.");
 				}
 				return await startTaskDirect({
 					cwd: process.cwd(),
 					taskId: options.taskId,
+					attemptId,
 					projectPath: options.projectPath,
 				});
 			});

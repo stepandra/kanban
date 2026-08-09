@@ -63,6 +63,29 @@ describe("TerminalSessionManager durable sessions", () => {
 
 			expect(manager.isDurableTaskSession("task-1")).toBe(false);
 		});
+
+		it("restores persisted attempt ownership for fenced durable cleanup", async () => {
+			const killSession = vi.fn(async (_sessionName: string) => {});
+			const manager = new TerminalSessionManager({ zmxControl: createZmxControlStub({ killSession }) });
+			manager.hydrateFromRecord(
+				{
+					"task-1": createSummary({ durableSessionName: DURABLE_SESSION_NAME }),
+				},
+				{
+					"task-1": { attemptId: "attempt-2", generation: 1, queuedAt: 20 },
+				},
+			);
+
+			await expect(manager.stopTaskSession("task-1", null)).resolves.toBeNull();
+			await expect(manager.stopTaskSession("task-1", "attempt-1")).resolves.toBeNull();
+			expect(killSession).not.toHaveBeenCalled();
+
+			await expect(manager.stopTaskSession("task-1", "attempt-2")).resolves.toMatchObject({
+				durableSessionName: null,
+			});
+			expect(killSession).toHaveBeenCalledOnce();
+			expect(killSession).toHaveBeenCalledWith(DURABLE_SESSION_NAME);
+		});
 	});
 
 	describe("recoverStaleSession", () => {
@@ -226,6 +249,7 @@ describe("TerminalSessionManager durable sessions", () => {
 					onSessionCleanup: null,
 					workspaceTrustConfirmTimer: null,
 				},
+				listeners: new Map(),
 				suppressAutoRestartOnExit: false,
 			};
 			seedActiveDurableEntry(manager, entry);

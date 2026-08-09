@@ -1,12 +1,13 @@
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
-	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeTaskExecutionAttemptReference,
 	RuntimeVcsMode,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
+import { resolveTaskGeneration } from "../core/task-execution-reference";
 import {
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
@@ -136,38 +137,6 @@ export function collectProjectWorktreeTaskIdsForRemoval(board: RuntimeBoardData)
 	return taskIds;
 }
 
-function applyLiveSessionStateToProjectTaskCounts(
-	counts: RuntimeProjectTaskCounts,
-	board: RuntimeBoardData,
-	sessionSummaries: RuntimeWorkspaceStateResponse["sessions"],
-): RuntimeProjectTaskCounts {
-	const taskColumnById = new Map<string, RuntimeBoardColumnId>();
-	for (const column of board.columns) {
-		for (const card of column.cards) {
-			taskColumnById.set(card.id, column.id);
-		}
-	}
-	const next = {
-		...counts,
-	};
-	for (const summary of Object.values(sessionSummaries)) {
-		const columnId = taskColumnById.get(summary.taskId);
-		if (!columnId) {
-			continue;
-		}
-		if (summary.state === "awaiting_review" && columnId === "in_progress") {
-			next.in_progress = Math.max(0, next.in_progress - 1);
-			next.review += 1;
-			continue;
-		}
-		if (summary.state === "interrupted" && columnId !== "trash") {
-			next[columnId] = Math.max(0, next[columnId] - 1);
-			next.trash += 1;
-		}
-	}
-	return next;
-}
-
 function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
@@ -238,7 +207,15 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			const manager = new TerminalSessionManager({ workspaceId });
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath);
-				manager.hydrateFromRecord(existingWorkspace.sessions);
+				const executionAttemptsByTaskId: Record<string, RuntimeTaskExecutionAttemptReference | undefined> = {};
+				for (const column of existingWorkspace.board.columns) {
+					for (const task of column.cards) {
+						if (task.execution?.generation === resolveTaskGeneration(task.generation)) {
+							executionAttemptsByTaskId[task.id] = task.execution;
+						}
+					}
+				}
+				manager.hydrateFromRecord(existingWorkspace.sessions, executionAttemptsByTaskId);
 			} catch {
 				// Workspace state will be created on demand.
 			}
@@ -295,17 +272,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	): Promise<RuntimeProjectTaskCounts> => {
 		try {
 			const board = await loadWorkspaceBoardById(workspaceId);
-			const persistedCounts = countTasksByColumn(board);
-			const terminalManager = getTerminalManagerForWorkspace(workspaceId);
-			if (!terminalManager) {
-				projectTaskCountsByWorkspaceId.set(workspaceId, persistedCounts);
-				return persistedCounts;
-			}
-			const liveSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] = {};
-			for (const summary of terminalManager.listSummaries()) {
-				liveSessionsByTaskId[summary.taskId] = summary;
-			}
-			const nextCounts = applyLiveSessionStateToProjectTaskCounts(persistedCounts, board, liveSessionsByTaskId);
+			const nextCounts = countTasksByColumn(board);
 			projectTaskCountsByWorkspaceId.set(workspaceId, nextCounts);
 			return nextCounts;
 		} catch {

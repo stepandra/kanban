@@ -6,6 +6,7 @@ import type {
 	RuntimeBoardDependency,
 	RuntimeTaskAcceptanceEvidence,
 	RuntimeTaskAutoReviewMode,
+	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
 } from "./api-contract";
@@ -112,6 +113,11 @@ export interface RuntimeUpdateTaskResult {
 	board: RuntimeBoardData;
 	task: RuntimeBoardCard | null;
 	updated: boolean;
+}
+
+export interface RuntimeRecordTaskExecutionAttemptResult extends RuntimeUpdateTaskResult {
+	recorded: boolean;
+	reason?: "missing_task" | "generation_mismatch";
 }
 
 export interface RuntimeAddTaskDependencyResult {
@@ -429,6 +435,61 @@ export function getTaskColumnId(board: RuntimeBoardData, taskId: string): Runtim
 	return found ? found.columnId : null;
 }
 
+export function recordTaskExecutionAttempt(
+	board: RuntimeBoardData,
+	taskId: string,
+	execution: RuntimeTaskExecutionAttemptReference,
+	now: number = Date.now(),
+): RuntimeRecordTaskExecutionAttemptResult {
+	const normalizedTaskId = taskId.trim();
+	const location = normalizedTaskId ? findTaskLocation(board, normalizedTaskId) : null;
+	if (!location) {
+		return { board, task: null, recorded: false, updated: false, reason: "missing_task" };
+	}
+	if (resolveTaskGeneration(location.task.generation) !== execution.generation) {
+		return {
+			board,
+			task: location.task,
+			recorded: false,
+			updated: false,
+			reason: "generation_mismatch",
+		};
+	}
+	if (
+		location.task.execution?.attemptId === execution.attemptId &&
+		location.task.execution.generation === execution.generation &&
+		location.task.execution.queuedAt === execution.queuedAt
+	) {
+		return { board, task: location.task, recorded: true, updated: false };
+	}
+	if (
+		location.task.execution?.generation === execution.generation &&
+		location.task.execution.queuedAt > execution.queuedAt
+	) {
+		return { board, task: location.task, recorded: true, updated: false };
+	}
+
+	const task: RuntimeBoardCard = {
+		...location.task,
+		execution: { ...execution },
+		updatedAt: now,
+	};
+	const columns = board.columns.map((column, columnIndex) =>
+		columnIndex === location.columnIndex
+			? {
+					...column,
+					cards: column.cards.map((card, taskIndex) => (taskIndex === location.taskIndex ? task : card)),
+				}
+			: column,
+	);
+	return {
+		board: { ...board, columns },
+		task,
+		recorded: true,
+		updated: true,
+	};
+}
+
 export function addTaskDependency(
 	board: RuntimeBoardData,
 	firstTaskId: string,
@@ -507,9 +568,18 @@ export function trashTaskAndGetReadyLinkedTaskIds(
 	taskId: string,
 	now: number = Date.now(),
 ): RuntimeTrashTaskResult {
+	return trashTaskAndGetReadyLinkedTaskIdsInternal(board, taskId, now, false);
+}
+
+function trashTaskAndGetReadyLinkedTaskIdsInternal(
+	board: RuntimeBoardData,
+	taskId: string,
+	now: number,
+	allowReviewToTrash: boolean,
+): RuntimeTrashTaskResult {
 	const fromColumnId = getTaskColumnId(board, taskId);
 	const readyTaskIds = getLinkedBacklogTaskIdsReadyAfterTaskTrashed(board, taskId, fromColumnId);
-	const movedToTrash = moveTaskToColumn(board, taskId, "trash", now);
+	const movedToTrash = moveTaskToColumnInternal(board, taskId, "trash", now, allowReviewToTrash);
 	return {
 		...movedToTrash,
 		readyTaskIds: movedToTrash.moved ? readyTaskIds : [],
@@ -570,6 +640,16 @@ export function moveTaskToColumn(
 	targetColumnId: RuntimeBoardColumnId,
 	now: number = Date.now(),
 ): RuntimeMoveTaskResult {
+	return moveTaskToColumnInternal(board, taskId, targetColumnId, now, false);
+}
+
+function moveTaskToColumnInternal(
+	board: RuntimeBoardData,
+	taskId: string,
+	targetColumnId: RuntimeBoardColumnId,
+	now: number,
+	allowReviewToTrash: boolean,
+): RuntimeMoveTaskResult {
 	const normalizedTaskId = taskId.trim();
 	if (!normalizedTaskId) {
 		return {
@@ -597,7 +677,7 @@ export function moveTaskToColumn(
 			fromColumnId: found.columnId,
 		};
 	}
-	if (found.columnId === "review" && targetColumnId === "trash" && !found.task.acceptanceEvidence) {
+	if (found.columnId === "review" && targetColumnId === "trash" && !allowReviewToTrash) {
 		return {
 			moved: false,
 			board,
@@ -640,6 +720,12 @@ export function moveTaskToColumn(
 		...task,
 		updatedAt: now,
 	};
+	if (targetColumnId === "trash") {
+		delete movedTask.execution;
+	}
+	if (found.columnId === "trash" && targetColumnId === "review") {
+		delete movedTask.acceptanceEvidence;
+	}
 	const targetCards =
 		targetColumnId === "trash" ? [movedTask, ...targetColumn.cards] : [...targetColumn.cards, movedTask];
 
@@ -703,12 +789,14 @@ export function acceptTaskWithEvidence(
 			),
 		};
 	});
-	const moved = trashTaskAndGetReadyLinkedTaskIds(
+	const moved = trashTaskAndGetReadyLinkedTaskIdsInternal(
 		{
 			...board,
 			columns: columnsWithEvidence,
 		},
 		taskId,
+		Date.now(),
+		true,
 	);
 	return {
 		...moved,
@@ -760,6 +848,14 @@ export function updateTask(
 			const agentId = input.agentId === undefined ? card.agentId : (input.agentId ?? undefined);
 			const removedAgentId = input.agentId === undefined ? card.removedAgentId : undefined;
 			const startInPlanMode = Boolean(input.startInPlanMode);
+			const generation = resolveUpdatedTaskGeneration(card, {
+				prompt,
+				startInPlanMode,
+				images,
+				agentId,
+				removedAgentId,
+				baseRef,
+			});
 			columnUpdated = true;
 			updatedTask = {
 				...card,
@@ -772,14 +868,8 @@ export function updateTask(
 				agentId,
 				removedAgentId,
 				priority: input.priority === undefined ? card.priority : (input.priority ?? undefined),
-				generation: resolveUpdatedTaskGeneration(card, {
-					prompt,
-					startInPlanMode,
-					images,
-					agentId,
-					removedAgentId,
-					baseRef,
-				}),
+				generation,
+				execution: generation === resolveTaskGeneration(card.generation) ? card.execution : undefined,
 				baseRef,
 				updatedAt: now,
 			};

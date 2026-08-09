@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeTaskSessionSummary, RuntimeWorkspaceChangesResponse } from "../../../src/core/api-contract";
+import type {
+	RuntimeTaskSessionSummary,
+	RuntimeWorkspaceChangesResponse,
+	RuntimeWorkspaceStateResponse,
+} from "../../../src/core/api-contract";
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
+	deleteTaskWorktree: vi.fn(),
 	resolveTaskCwd: vi.fn(),
 }));
 
@@ -14,7 +19,7 @@ const workspaceChangesMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/workspace/task-worktree.js", () => ({
-	deleteTaskWorktree: vi.fn(),
+	deleteTaskWorktree: workspaceTaskWorktreeMocks.deleteTaskWorktree,
 	ensureTaskWorktreeIfDoesntExist: vi.fn(),
 	getTaskWorkspaceInfo: vi.fn(),
 	resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
@@ -54,6 +59,44 @@ function createChangesResponse(): RuntimeWorkspaceChangesResponse {
 		repoRoot: "/tmp/worktree",
 		generatedAt: Date.now(),
 		files: [],
+	};
+}
+
+function createWorkspaceState(executionAttemptId?: string): RuntimeWorkspaceStateResponse {
+	return {
+		repoPath: "/tmp/repo",
+		statePath: "/tmp/state.json",
+		vcs: "git",
+		git: { currentBranch: "main", defaultBranch: "main", branches: ["main"] },
+		board: {
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{
+					id: "trash",
+					title: "Done",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task",
+							prompt: "Task",
+							startInPlanMode: false,
+							baseRef: "main",
+							generation: 1,
+							...(executionAttemptId
+								? { execution: { attemptId: executionAttemptId, generation: 1, queuedAt: 10 } }
+								: {}),
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+			],
+			dependencies: [],
+		},
+		sessions: {},
+		revision: 1,
 	};
 }
 
@@ -197,5 +240,35 @@ describe("createWorkspaceApi loadChanges", () => {
 		expect(response).toBe(emptyResponse);
 		expect(workspaceChangesMocks.createEmptyWorkspaceChangesResponse).toHaveBeenCalledWith("/tmp/repo");
 		expect(workspaceChangesMocks.getWorkspaceChanges).not.toHaveBeenCalled();
+	});
+});
+
+describe("createWorkspaceApi deleteWorktree", () => {
+	it("checks the terminal execution fence while holding the worktree operation lock", async () => {
+		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockReset();
+		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockImplementation(
+			async (options: { canDelete?: () => Promise<boolean> }) => ({
+				ok: true,
+				removed: options.canDelete ? await options.canDelete() : true,
+			}),
+		);
+		const buildWorkspaceStateSnapshot = vi
+			.fn()
+			.mockResolvedValueOnce(createWorkspaceState("attempt-newer"))
+			.mockResolvedValueOnce(createWorkspaceState());
+		const api = createWorkspaceApi({
+			ensureTerminalManagerForWorkspace: vi.fn(),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastRuntimeProjectsUpdated: vi.fn(),
+			buildWorkspaceStateSnapshot,
+		});
+		const workspaceScope = { workspaceId: "workspace-1", workspacePath: "/tmp/repo" };
+
+		await expect(
+			api.deleteWorktree(workspaceScope, { taskId: "task-1", expectedExecutionAttemptId: null }),
+		).resolves.toEqual({ ok: true, removed: false });
+		await expect(
+			api.deleteWorktree(workspaceScope, { taskId: "task-1", expectedExecutionAttemptId: null }),
+		).resolves.toEqual({ ok: true, removed: true });
 	});
 });

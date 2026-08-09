@@ -147,9 +147,9 @@ export default function (amp: PluginAPI): void {
 						parentThreadID: ctx.thread.id,
 						executor: "orb",
 					});
-					// Amp work still needs a concrete task workspace so submit can hand
-					// the exact path to its isolated Fixer. `prepare` is idempotent for
-					// backlog/in-progress/review cards and also performs the claim.
+					// Thread creation does not start the agent turn. Prepare the task
+					// before appending work so a provisioning failure cannot leave the
+					// authoritative card in progress without an executor.
 					await runKanbanChecked(["task", "prepare", "--task-id", taskId, "--project-path", workspacePath], workspacePath);
 					await thread.appendUserMessage({
 						type: "user-message",
@@ -177,7 +177,7 @@ export default function (amp: PluginAPI): void {
 			if (action === "submit" || action === "accept" || action === "done" || action === "delete") {
 				await endAmpTaskWatches(amp, watches, action, input, workspacePath);
 			}
-			// `kanban task submit` owns the isolated per-task review handoff (fail-closed in CLI).
+			// `kanban task submit` owns the isolated per-task review handoff.
 			// Surface a failed handoff from the CLI JSON when present; do not double-nudge.
 			if (action === "submit") {
 				const handoffStatus = parseReviewHandoffStatus(result.stdout);

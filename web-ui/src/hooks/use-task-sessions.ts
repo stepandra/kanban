@@ -9,7 +9,6 @@ import { selectNewestTaskSessionSummary } from "@/hooks/task-session-summary";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeTaskSessionSummary,
-	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeWorktreeDeleteResponse,
 	RuntimeWorktreeEnsureResponse,
@@ -38,7 +37,6 @@ interface SendTaskSessionInputResult {
 interface StartTaskSessionResult {
 	ok: boolean;
 	message?: string;
-	attempt?: RuntimeTaskExecutionAttemptReference;
 }
 
 interface StartTaskSessionOptions {
@@ -49,13 +47,16 @@ export interface UseTaskSessionsResult {
 	upsertSession: (summary: RuntimeTaskSessionSummary) => void;
 	ensureTaskWorkspace: (task: BoardCard) => Promise<EnsureTaskWorkspaceResult>;
 	startTaskSession: (task: BoardCard, options?: StartTaskSessionOptions) => Promise<StartTaskSessionResult>;
-	stopTaskSession: (taskId: string) => Promise<void>;
+	stopTaskSession: (taskId: string, executionAttemptId?: string | null) => Promise<void>;
 	sendTaskSessionInput: (
 		taskId: string,
 		text: string,
 		options?: SendTerminalInputOptions,
 	) => Promise<SendTaskSessionInputResult>;
-	cleanupTaskWorkspace: (taskId: string) => Promise<RuntimeWorktreeDeleteResponse | null>;
+	cleanupTaskWorkspace: (
+		taskId: string,
+		expectedExecutionAttemptId?: string | null,
+	) => Promise<RuntimeWorktreeDeleteResponse | null>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 }
 
@@ -149,7 +150,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				if (options?.resumeFromTrash) {
 					trackTaskResumedFromTrash();
 				}
-				return { ok: true, ...(payload.attempt ? { attempt: payload.attempt } : {}) };
+				return { ok: true };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { ok: false, message };
@@ -159,13 +160,16 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 	);
 
 	const stopTaskSession = useCallback(
-		async (taskId: string): Promise<void> => {
+		async (taskId: string, executionAttemptId?: string | null): Promise<void> => {
 			if (!currentProjectId) {
 				return;
 			}
 			try {
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				await trpcClient.runtime.stopTaskSession.mutate({ taskId });
+				await trpcClient.runtime.stopTaskSession.mutate({
+					taskId,
+					...(executionAttemptId !== undefined ? { executionAttemptId } : {}),
+				});
 			} catch {
 				// Ignore stop errors during cleanup.
 			}
@@ -213,13 +217,19 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 	);
 
 	const cleanupTaskWorkspace = useCallback(
-		async (taskId: string): Promise<RuntimeWorktreeDeleteResponse | null> => {
+		async (
+			taskId: string,
+			expectedExecutionAttemptId?: string | null,
+		): Promise<RuntimeWorktreeDeleteResponse | null> => {
 			if (!currentProjectId) {
 				return null;
 			}
 			try {
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				const payload = await trpcClient.workspace.deleteWorktree.mutate({ taskId });
+				const payload = await trpcClient.workspace.deleteWorktree.mutate({
+					taskId,
+					...(expectedExecutionAttemptId !== undefined ? { expectedExecutionAttemptId } : {}),
+				});
 				if (!payload.ok) {
 					const message = payload.error ?? "Could not clean up task workspace.";
 					console.error(`[cleanupTaskWorkspace] ${message}`);

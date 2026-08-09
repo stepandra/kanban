@@ -40,22 +40,14 @@ describe("enqueueAbsurdTaskStart", () => {
 
 		await expect(
 			enqueueAbsurdTaskStart({
-				taskExecutionReference: "task-1~g4~resume",
+				taskExecutionReference: "task-1~g4~q123~resume",
 				projectPath: "/tmp/repo",
 				agentId: "codex",
 			}),
 		).resolves.toEqual({ attemptId: "absurd-1", raw: { task_id: "absurd-1" } });
 		expect(childProcessMocks.execFilePromise).toHaveBeenCalledWith(
 			"/tmp/zj-agent",
-			[
-				"kanban-enqueue",
-				"--task-id",
-				"task-1~g4~resume",
-				"--project-path",
-				"/tmp/repo",
-				"--agent",
-				"codex",
-			],
+			["kanban-enqueue", "--task-id", "task-1~g4~q123~resume", "--project-path", "/tmp/repo", "--agent", "codex"],
 			{ encoding: "utf8", timeout: 10_000 },
 		);
 	});

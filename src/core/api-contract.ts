@@ -727,6 +727,7 @@ export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsure
 
 export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
+	expectedExecutionAttemptId: z.string().nullable().optional(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
 
@@ -882,6 +883,7 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
+	executionAttempt: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
 
@@ -961,6 +963,7 @@ export type RuntimeSystemReadinessResponse = z.infer<typeof runtimeSystemReadine
 
 export const runtimeTaskSessionStopRequestSchema = z.object({
 	taskId: z.string(),
+	executionAttemptId: z.string().nullable().optional(),
 });
 export type RuntimeTaskSessionStopRequest = z.infer<typeof runtimeTaskSessionStopRequestSchema>;
 

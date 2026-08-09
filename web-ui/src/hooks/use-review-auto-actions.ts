@@ -222,9 +222,9 @@ export function useReviewAutoActions({
 							: false;
 
 				// Commit/PR automation mental model:
-				// - A task is only "armed" for auto-done after we actually see working changes in review and trigger commit/pr.
+				// - A task is only armed for artifact automation after we see working changes in review and trigger commit/pr.
 				// - Review entries with zero changes (common during start-in-plan-mode planning loops) are intentionally ignored.
-				// - Once armed, a later review state with zero changes is treated as commit/pr success, then we auto-move to done.
+				// - Once armed, a later clean review state ends artifact automation; reviewer acceptance remains separate.
 				const changedFiles = getTaskWorkspaceSnapshot(reviewTask.id)?.changedFiles;
 				const taskState = getTaskState(reviewTask.id);
 				const awaitingAction = taskState.kind === "awaiting-clean" ? taskState.action : null;

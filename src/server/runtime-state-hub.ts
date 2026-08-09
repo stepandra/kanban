@@ -4,7 +4,6 @@
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import type {
-	RuntimeBoardData,
 	RuntimeStateStreamErrorMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamProjectsMessage,
@@ -13,7 +12,6 @@ import type {
 	RuntimeStateStreamTaskSessionsMessage,
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
-	RuntimeTaskSessionState,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import type { TerminalSessionManager } from "../terminal/session-manager";
@@ -21,7 +19,6 @@ import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
 
 const TASK_SESSION_STREAM_BATCH_MS = 150;
-const PROJECTS_UPDATED_BROADCAST_DEBOUNCE_MS = 500;
 const STREAM_FAILURE_WARN_INTERVAL_MS = 60_000;
 
 export interface DisposeRuntimeStateWorkspaceOptions {
@@ -63,12 +60,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
 	const runtimeStateWorkspaceIdByClient = new Map<WebSocket, string>();
-	const lastKnownBoardByWorkspaceId = new Map<string, RuntimeBoardData>();
-	const lastCountRelevantSessionStateByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionState>>();
 	const lastStreamFailureWarnAtByArea = new Map<string, number>();
 	const suppressedStreamFailureCountByArea = new Map<string, number>();
-	let pendingProjectsUpdatedPreferredId: { value: string | null } | null = null;
-	let projectsUpdatedDebounceTimer: NodeJS.Timeout | null = null;
 	const runtimeStateWebSocketServer = new WebSocketServer({ noServer: true });
 	const workspaceMetadataMonitor = createWorkspaceMetadataMonitor({
 		onMetadataUpdated: (workspaceId, workspaceMetadata) => {
@@ -143,29 +136,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
-	/*
-		Session-summary flushes can arrive several times per second per workspace, and
-		each projects_updated broadcast rebuilds every project's task counts from disk.
-		Coalesce them into a single trailing-edge broadcast so a burst of session ticks
-		costs at most one payload rebuild.
-	*/
-	const scheduleProjectsUpdatedBroadcast = (preferredCurrentProjectId: string | null) => {
-		pendingProjectsUpdatedPreferredId = { value: preferredCurrentProjectId };
-		if (projectsUpdatedDebounceTimer) {
-			return;
-		}
-		projectsUpdatedDebounceTimer = setTimeout(() => {
-			projectsUpdatedDebounceTimer = null;
-			const pending = pendingProjectsUpdatedPreferredId;
-			pendingProjectsUpdatedPreferredId = null;
-			if (!pending) {
-				return;
-			}
-			void broadcastRuntimeProjectsUpdated(pending.value);
-		}, PROJECTS_UPDATED_BROADCAST_DEBOUNCE_MS);
-		projectsUpdatedDebounceTimer.unref();
-	};
-
 	const flushTaskSessionSummaries = (workspaceId: string) => {
 		const pending = pendingTaskSessionSummariesByWorkspaceId.get(workspaceId);
 		if (!pending || pending.size === 0) {
@@ -183,27 +153,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			for (const client of runtimeClients) {
 				sendRuntimeStateMessage(client, payload);
 			}
-		}
-		/*
-			Project task counts only move when a session's count-relevant state
-			changes (e.g. running -> awaiting_review shifts in_progress to review).
-			Plain ticks that keep the same states cannot change the counts, so skip
-			the broadcast entirely instead of re-reading every board from disk.
-		*/
-		let countRelevantStates = lastCountRelevantSessionStateByWorkspaceId.get(workspaceId);
-		if (!countRelevantStates) {
-			countRelevantStates = new Map<string, RuntimeTaskSessionState>();
-			lastCountRelevantSessionStateByWorkspaceId.set(workspaceId, countRelevantStates);
-		}
-		let didCountRelevantStateChange = false;
-		for (const summary of summaries) {
-			if (countRelevantStates.get(summary.taskId) !== summary.state) {
-				didCountRelevantStateChange = true;
-			}
-			countRelevantStates.set(summary.taskId, summary.state);
-		}
-		if (didCountRelevantStateChange) {
-			scheduleProjectsUpdatedBroadcast(workspaceId);
 		}
 	};
 
@@ -248,7 +197,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		taskSessionBroadcastTimersByWorkspaceId.delete(workspaceId);
 		pendingTaskSessionSummariesByWorkspaceId.delete(workspaceId);
-		lastCountRelevantSessionStateByWorkspaceId.delete(workspaceId);
 	};
 
 	const cleanupRuntimeStateClient = (client: WebSocket) => {
@@ -278,7 +226,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		terminalSummaryUnsubscribeByWorkspaceId.delete(workspaceId);
 		disposeTaskSessionSummaryBroadcast(workspaceId);
-		lastKnownBoardByWorkspaceId.delete(workspaceId);
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 
 		if (!options?.disconnectClients) {
@@ -315,7 +262,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 		try {
 			const workspaceState = await deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspaceId, workspacePath);
-			lastKnownBoardByWorkspaceId.set(workspaceId, workspaceState.board);
 			const payload: RuntimeStateStreamWorkspaceStateMessage = {
 				type: "workspace_state_updated",
 				workspaceId,
@@ -332,36 +278,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		} catch (error) {
 			// Transient state read failures resync on the next update; surface them instead.
 			reportStreamFailure("workspace_state_broadcast", error, `workspaceId=${workspaceId}`);
-		}
-	};
-
-	/*
-		Turn-checkpoint changes only affect session summaries and VCS metadata, never
-		the persisted board. Streaming a full workspace snapshot per checkpoint is
-		O(board read + full payload) on the session hot path, so instead the checkpoint
-		delta flows through task_sessions_updated and we nudge the metadata monitor with
-		the last known board; its poller emits workspace_metadata_updated deltas.
-	*/
-	const refreshWorkspaceMetadataAfterCheckpoint = async (
-		workspaceId: string,
-		workspacePath: string,
-	): Promise<void> => {
-		const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
-		if (!clients || clients.size === 0) {
-			return;
-		}
-		const board = lastKnownBoardByWorkspaceId.get(workspaceId);
-		if (!board) {
-			return;
-		}
-		try {
-			await workspaceMetadataMonitor.updateWorkspaceState({
-				workspaceId,
-				workspacePath,
-				board,
-			});
-		} catch (error) {
-			reportStreamFailure("workspace_metadata_refresh", error, `workspaceId=${workspaceId}`);
 		}
 	};
 
@@ -456,7 +372,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 						deps.workspaceRegistry.buildProjectsPayload(workspace.workspaceId),
 						deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspace.workspaceId, workspace.workspacePath),
 					]);
-					lastKnownBoardByWorkspaceId.set(workspace.workspaceId, workspaceState.board);
 					workspaceMetadata = await workspaceMetadataMonitor.connectWorkspace({
 						workspaceId: workspace.workspaceId,
 						workspacePath: workspace.workspacePath,
@@ -551,13 +466,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 			taskSessionBroadcastTimersByWorkspaceId.clear();
 			pendingTaskSessionSummariesByWorkspaceId.clear();
-			lastCountRelevantSessionStateByWorkspaceId.clear();
-			if (projectsUpdatedDebounceTimer) {
-				clearTimeout(projectsUpdatedDebounceTimer);
-				projectsUpdatedDebounceTimer = null;
-			}
-			pendingProjectsUpdatedPreferredId = null;
-			lastKnownBoardByWorkspaceId.clear();
 			lastStreamFailureWarnAtByArea.clear();
 			suppressedStreamFailureCountByArea.clear();
 			for (const unsubscribe of terminalSummaryUnsubscribeByWorkspaceId.values()) {

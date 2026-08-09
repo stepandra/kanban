@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -76,6 +77,8 @@ interface ActiveProcessState {
 interface SessionEntry {
 	summary: RuntimeTaskSessionSummary;
 	active: ActiveProcessState | null;
+	executionAttempt: RuntimeTaskExecutionAttemptReference | null;
+	latestExecutionAttempt: RuntimeTaskExecutionAttemptReference | null;
 	terminalStateMirror: TerminalStateMirror | null;
 	listenerIdCounter: number;
 	listeners: Map<number, TerminalSessionListener>;
@@ -83,6 +86,7 @@ interface SessionEntry {
 	suppressAutoRestartOnExit: boolean;
 	autoRestartTimestamps: number[];
 	pendingAutoRestart: Promise<void> | null;
+	pendingOperation: Promise<void>;
 }
 
 export interface StartTaskSessionRequest {
@@ -101,6 +105,7 @@ export interface StartTaskSessionRequest {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	projectPath?: string;
+	executionAttempt?: RuntimeTaskExecutionAttemptReference;
 }
 
 export interface StartShellSessionRequest {
@@ -162,6 +167,7 @@ function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTa
 		args: [...request.args],
 		images: request.images ? request.images.map((image) => ({ ...image })) : undefined,
 		env: request.env ? { ...request.env } : undefined,
+		executionAttempt: request.executionAttempt ? { ...request.executionAttempt } : undefined,
 	};
 }
 
@@ -171,6 +177,16 @@ function cloneStartShellSessionRequest(request: StartShellSessionRequest): Start
 		args: request.args ? [...request.args] : undefined,
 		env: request.env ? { ...request.env } : undefined,
 	};
+}
+
+function compareExecutionAttempts(
+	candidate: RuntimeTaskExecutionAttemptReference,
+	current: RuntimeTaskExecutionAttemptReference,
+): number {
+	if (candidate.generation !== current.generation) {
+		return candidate.generation - current.generation;
+	}
+	return candidate.queuedAt - current.queuedAt;
 }
 
 function formatSpawnFailure(binary: string, error: unknown): string {
@@ -278,11 +294,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 	}
 
-	hydrateFromRecord(record: Record<string, RuntimeTaskSessionSummary>): void {
+	hydrateFromRecord(
+		record: Record<string, RuntimeTaskSessionSummary>,
+		executionAttemptsByTaskId: Record<string, RuntimeTaskExecutionAttemptReference | undefined> = {},
+	): void {
 		for (const [taskId, summary] of Object.entries(record)) {
+			const executionAttempt = executionAttemptsByTaskId[taskId] ?? null;
 			this.entries.set(taskId, {
 				summary: cloneSummary(summary),
 				active: null,
+				executionAttempt: executionAttempt ? { ...executionAttempt } : null,
+				latestExecutionAttempt: executionAttempt ? { ...executionAttempt } : null,
 				terminalStateMirror: null,
 				listenerIdCounter: 1,
 				listeners: new Map(),
@@ -290,6 +312,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				suppressAutoRestartOnExit: false,
 				autoRestartTimestamps: [],
 				pendingAutoRestart: null,
+				pendingOperation: Promise.resolve(),
 			});
 			// Repopulate durable-session tracking from the persisted record so a
 			// restarted runtime still knows this task is backed by a live zmx
@@ -462,13 +485,41 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	async startTaskSession(request: StartTaskSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.ensureEntry(request.taskId);
+		return await this.runEntryOperation(entry, async () => await this.startTaskSessionForEntry(entry, request));
+	}
+
+	private async startTaskSessionForEntry(
+		entry: SessionEntry,
+		request: StartTaskSessionRequest,
+	): Promise<RuntimeTaskSessionSummary> {
+		const requestedAttempt = request.executionAttempt;
+		const latestAttempt = entry.latestExecutionAttempt;
+		if (requestedAttempt && latestAttempt) {
+			const order = compareExecutionAttempts(requestedAttempt, latestAttempt);
+			if (order < 0 || (order === 0 && requestedAttempt.attemptId !== latestAttempt.attemptId)) {
+				throw new Error(
+					`Execution attempt "${requestedAttempt.attemptId}" cannot take ownership of task "${request.taskId}" from newer attempt "${latestAttempt.attemptId}".`,
+				);
+			}
+		}
+		if (requestedAttempt) {
+			entry.latestExecutionAttempt = { ...requestedAttempt };
+		}
+		if (entry.active && isActiveState(entry.summary.state)) {
+			if (requestedAttempt) {
+				entry.executionAttempt = { ...requestedAttempt };
+			}
+			entry.restartRequest = {
+				kind: "task",
+				request: cloneStartTaskSessionRequest(request),
+			};
+			return cloneSummary(entry.summary);
+		}
+
 		entry.restartRequest = {
 			kind: "task",
 			request: cloneStartTaskSessionRequest(request),
 		};
-		if (entry.active && isActiveState(entry.summary.state)) {
-			return cloneSummary(entry.summary);
-		}
 
 		if (entry.active) {
 			stopWorkspaceTrustTimers(entry.active);
@@ -556,7 +607,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				cols,
 				rows,
 				onData: (chunk) => {
-					if (!entry.active) {
+					if (!entry.active || entry.active.session !== session) {
 						return;
 					}
 
@@ -651,7 +702,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					const currentActive = currentEntry.active;
-					if (!currentActive) {
+					if (!currentActive || currentActive.session !== session) {
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
@@ -718,6 +769,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				previousTurnCheckpoint: null,
 			});
 			this.emitSummary(summary);
+			entry.executionAttempt = null;
 			throw new Error(formatSpawnFailure(spawnBinary, error));
 		}
 
@@ -750,6 +802,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.durableTaskIds.delete(request.taskId);
 		}
 		entry.active = active;
+		entry.executionAttempt = request.executionAttempt ? { ...request.executionAttempt } : null;
 		entry.terminalStateMirror = terminalStateMirror;
 		this.workerCommandLog.record(commandAttempt, { status: "started", pid: session.pid });
 
@@ -1156,9 +1209,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	async stopTaskSession(taskId: string): Promise<RuntimeTaskSessionSummary | null> {
+	async stopTaskSession(
+		taskId: string,
+		executionAttemptId?: string | null,
+	): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
+			return null;
+		}
+		return await this.runEntryOperation(
+			entry,
+			async () => await this.stopTaskSessionForEntry(entry, taskId, executionAttemptId),
+		);
+	}
+
+	private async stopTaskSessionForEntry(
+		entry: SessionEntry,
+		taskId: string,
+		executionAttemptId?: string | null,
+	): Promise<RuntimeTaskSessionSummary | null> {
+		if (executionAttemptId !== undefined && (entry.executionAttempt?.attemptId ?? null) !== executionAttemptId) {
 			return null;
 		}
 		const active = entry.active;
@@ -1185,16 +1255,29 @@ export class TerminalSessionManager implements TerminalSessionService {
 			updateSummary(entry, { durableSessionName: null });
 		}
 		this.durableTaskIds.delete(taskId);
+		entry.executionAttempt = null;
+		let summary = entry.summary;
 		if (active) {
+			entry.active = null;
 			active.session.stop();
+			summary = this.applySessionEvent(entry, {
+				type: "process.exit",
+				exitCode: 0,
+				interrupted: false,
+			});
+			for (const listener of entry.listeners.values()) {
+				listener.onState?.(cloneSummary(summary));
+				listener.onExit?.(0);
+			}
 		}
+		entry.suppressAutoRestartOnExit = previousSuppressAutoRestart;
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
 				// Best effort: cleanup failure is non-critical.
 			});
 		}
-		this.emitSummary(entry.summary);
-		return cloneSummary(entry.summary);
+		this.emitSummary(summary);
+		return cloneSummary(summary);
 	}
 
 	markInterruptedAndStopAll(): RuntimeTaskSessionSummary[] {
@@ -1239,6 +1322,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const created: SessionEntry = {
 			summary: createDefaultSummary(taskId),
 			active: null,
+			executionAttempt: null,
+			latestExecutionAttempt: null,
 			terminalStateMirror: null,
 			listenerIdCounter: 1,
 			listeners: new Map(),
@@ -1246,9 +1331,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 			suppressAutoRestartOnExit: false,
 			autoRestartTimestamps: [],
 			pendingAutoRestart: null,
+			pendingOperation: Promise.resolve(),
 		};
 		this.entries.set(taskId, created);
 		return created;
+	}
+
+	private async runEntryOperation<T>(entry: SessionEntry, operation: () => Promise<T>): Promise<T> {
+		const queued = (entry.pendingOperation ?? Promise.resolve()).then(operation, operation);
+		entry.pendingOperation = queued.then(
+			() => undefined,
+			() => undefined,
+		);
+		return await queued;
 	}
 
 	private shouldAutoRestart(entry: SessionEntry): boolean {
