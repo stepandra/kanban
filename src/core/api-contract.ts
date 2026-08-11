@@ -76,18 +76,8 @@ const runtimeRemovedAgentIdSchema = z.literal("cline");
 const runtimePersistedBoardAgentIdSchema = z.union([runtimeAgentIdSchema, runtimeRemovedAgentIdSchema]);
 
 const runtimeBoardColumnIdEnum = z.enum(["backlog", "in_progress", "review", "trash"]);
-export const runtimeBoardColumnIdSchema = z.preprocess(
-	(val) => (val === "done" ? "trash" : val),
-	runtimeBoardColumnIdEnum,
-);
+export const runtimeBoardColumnIdSchema = runtimeBoardColumnIdEnum;
 export type RuntimeBoardColumnId = z.infer<typeof runtimeBoardColumnIdEnum>;
-
-const runtimeTaskAutoReviewModeEnum = z.enum(["commit", "pr"]);
-export const runtimeTaskAutoReviewModeSchema = z.preprocess(
-	(val) => (val === "move_to_trash" || val === "move_to_done" ? "commit" : val),
-	runtimeTaskAutoReviewModeEnum,
-);
-export type RuntimeTaskAutoReviewMode = z.infer<typeof runtimeTaskAutoReviewModeEnum>;
 
 export const runtimeTaskImageSchema = z.object({
 	id: z.string(),
@@ -159,6 +149,9 @@ export type RuntimeTaskPlanningContext = z.infer<typeof runtimeTaskPlanningConte
 
 export const runtimeTaskAcceptanceEvidenceSchema = z.object({
 	kind: z.literal("verified_remote_revision"),
+	taskId: z.string().trim().min(1),
+	generation: z.number().int().positive(),
+	executionAttemptId: z.string().trim().min(1).optional(),
 	acceptedRevision: z.object({
 		sha: z.string().regex(/^[0-9a-f]{40,64}$/u),
 		remoteRef: z.string().regex(/^refs\/heads\/kanban\/[A-Za-z0-9._/-]+$/u),
@@ -167,14 +160,17 @@ export const runtimeTaskAcceptanceEvidenceSchema = z.object({
 });
 export type RuntimeTaskAcceptanceEvidence = z.infer<typeof runtimeTaskAcceptanceEvidenceSchema>;
 
+const runtimePersistedTaskAcceptanceEvidenceSchema = runtimeTaskAcceptanceEvidenceSchema.extend({
+	taskId: z.string().trim().min(1).optional(),
+	generation: z.number().int().positive().optional(),
+});
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
 		title: z.string().optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
-		autoReviewEnabled: z.boolean().optional(),
-		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
 		agentId: runtimePersistedBoardAgentIdSchema.optional(),
 		removedAgentId: runtimeRemovedAgentIdSchema.optional(),
@@ -183,18 +179,26 @@ export const runtimeBoardCardSchema = z
 		origin: runtimeTaskOriginSchema.optional(),
 		execution: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 		planning: runtimeTaskPlanningContextSchema.optional(),
-		acceptanceEvidence: runtimeTaskAcceptanceEvidenceSchema.optional(),
+		acceptanceEvidence: runtimePersistedTaskAcceptanceEvidenceSchema.optional(),
 		baseRef: z.string(),
 		createdAt: z.number(),
 		updatedAt: z.number(),
 	})
-	.transform(({ agentId, removedAgentId, ...card }) => {
+	.transform(({ agentId, removedAgentId, acceptanceEvidence, ...card }) => {
 		const migratedRemovedAgentId: "cline" | undefined =
 			agentId === "cline" || removedAgentId === "cline" ? "cline" : undefined;
+		const migratedAcceptanceEvidence = acceptanceEvidence
+			? runtimeTaskAcceptanceEvidenceSchema.parse({
+					...acceptanceEvidence,
+					taskId: acceptanceEvidence.taskId ?? card.id,
+					generation: acceptanceEvidence.generation ?? card.generation ?? 1,
+				})
+			: undefined;
 		return {
 			...card,
 			...(agentId && agentId !== "cline" ? { agentId } : {}),
 			...(migratedRemovedAgentId ? { removedAgentId: migratedRemovedAgentId } : {}),
+			...(migratedAcceptanceEvidence ? { acceptanceEvidence: migratedAcceptanceEvidence } : {}),
 			title: resolveTaskTitle(card.title, card.prompt),
 		};
 	});
@@ -288,7 +292,7 @@ export const runtimeBoardDataSchema = z
 	});
 export type RuntimeBoardData = z.infer<typeof runtimeBoardDataSchema>;
 
-export const runtimeTrackTaskStatusSchema = z.enum(["backlog", "in_progress", "review", "accepted"]);
+export const runtimeTrackTaskStatusSchema = z.enum(["backlog", "in_progress", "review", "accepted", "discarded"]);
 export type RuntimeTrackTaskStatus = z.infer<typeof runtimeTrackTaskStatusSchema>;
 
 export const runtimeTrackTaskCountsSchema = z.object({
@@ -296,6 +300,7 @@ export const runtimeTrackTaskCountsSchema = z.object({
 	inProgress: z.number().int().nonnegative(),
 	review: z.number().int().nonnegative(),
 	accepted: z.number().int().nonnegative(),
+	discarded: z.number().int().nonnegative(),
 });
 export type RuntimeTrackTaskCounts = z.infer<typeof runtimeTrackTaskCountsSchema>;
 
@@ -727,7 +732,6 @@ export type RuntimeWorktreeEnsureResponse = z.infer<typeof runtimeWorktreeEnsure
 
 export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
-	expectedExecutionAttemptId: z.string().nullable().optional(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
 
@@ -768,8 +772,6 @@ export const runtimeTaskTemplateSchema = z.object({
 	prompt: z.string(),
 	agentId: runtimeAgentIdSchema.optional(),
 	baseRef: z.string().optional(),
-	autoReviewEnabled: z.boolean().optional(),
-	autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 });
 export type RuntimeTaskTemplate = z.infer<typeof runtimeTaskTemplateSchema>;
 
@@ -850,10 +852,6 @@ export const runtimeConfigResponseSchema = z.object({
 	detectedCommands: z.array(z.string()),
 	agents: z.array(runtimeAgentDefinitionSchema),
 	shortcuts: z.array(runtimeProjectShortcutSchema),
-	commitPromptTemplate: z.string(),
-	openPrPromptTemplate: z.string(),
-	commitPromptTemplateDefault: z.string(),
-	openPrPromptTemplateDefault: z.string(),
 	taskTemplates: z.array(runtimeTaskTemplateSchema),
 });
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
@@ -864,8 +862,6 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	agentAutonomousModeEnabled: z.boolean().optional(),
 	shortcuts: z.array(runtimeProjectShortcutSchema).optional(),
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
-	commitPromptTemplate: z.string().optional(),
-	openPrPromptTemplate: z.string().optional(),
 	taskTemplates: z.array(runtimeTaskTemplateSchema).optional(),
 });
 export type RuntimeConfigSaveRequest = z.infer<typeof runtimeConfigSaveRequestSchema>;

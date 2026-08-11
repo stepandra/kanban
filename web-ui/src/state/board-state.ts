@@ -5,25 +5,20 @@ import * as runtimeTaskState from "@runtime-task-state";
 import { createInitialBoardData } from "@/data/board-data";
 import type { RuntimeAgentId, RuntimeTaskAcceptanceEvidence, RuntimeTaskOrigin } from "@/runtime/types";
 import { isAllowedCrossColumnCardMove, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
-import {
-	type BoardCard,
-	type BoardColumn,
-	type BoardColumnId,
-	type BoardData,
-	type BoardDependency,
-	type CardSelection,
-	DEFAULT_TASK_AUTO_REVIEW_MODE,
-	resolveTaskAutoReviewMode,
-	type TaskAutoReviewMode,
-	type TaskImage,
+import type {
+	BoardCard,
+	BoardColumn,
+	BoardColumnId,
+	BoardData,
+	BoardDependency,
+	CardSelection,
+	TaskImage,
 } from "@/types";
 
 export interface TaskDraft {
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
-	autoReviewEnabled?: boolean;
-	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
 	baseRef: string;
@@ -113,12 +108,19 @@ function normalizeTaskOrigin(rawOrigin: unknown): RuntimeTaskOrigin | undefined 
 	};
 }
 
-function normalizeTaskAcceptanceEvidence(rawEvidence: unknown): RuntimeTaskAcceptanceEvidence | undefined {
+function normalizeTaskAcceptanceEvidence(
+	rawEvidence: unknown,
+	taskId: string,
+	generation: number,
+): RuntimeTaskAcceptanceEvidence | undefined {
 	if (!rawEvidence || typeof rawEvidence !== "object") {
 		return undefined;
 	}
 	const evidence = rawEvidence as {
 		kind?: unknown;
+		taskId?: unknown;
+		generation?: unknown;
+		executionAttemptId?: unknown;
 		acceptedRevision?: unknown;
 		verifiedAt?: unknown;
 	};
@@ -128,6 +130,10 @@ function normalizeTaskAcceptanceEvidence(rawEvidence: unknown): RuntimeTaskAccep
 	const acceptedRevision = evidence.acceptedRevision as { sha?: unknown; remoteRef?: unknown };
 	if (
 		evidence.kind !== "verified_remote_revision" ||
+		(evidence.taskId !== undefined && evidence.taskId !== taskId) ||
+		(evidence.generation !== undefined && evidence.generation !== generation) ||
+		(evidence.executionAttemptId !== undefined &&
+			(typeof evidence.executionAttemptId !== "string" || !evidence.executionAttemptId.trim())) ||
 		typeof acceptedRevision.sha !== "string" ||
 		!/^[0-9a-f]{40,64}$/u.test(acceptedRevision.sha) ||
 		typeof acceptedRevision.remoteRef !== "string" ||
@@ -140,6 +146,9 @@ function normalizeTaskAcceptanceEvidence(rawEvidence: unknown): RuntimeTaskAccep
 	}
 	return {
 		kind: evidence.kind,
+		taskId,
+		generation,
+		...(typeof evidence.executionAttemptId === "string" ? { executionAttemptId: evidence.executionAttemptId } : {}),
 		acceptedRevision: {
 			sha: acceptedRevision.sha,
 			remoteRef: acceptedRevision.remoteRef,
@@ -158,8 +167,6 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		title?: unknown;
 		prompt?: unknown;
 		startInPlanMode?: unknown;
-		autoReviewEnabled?: unknown;
-		autoReviewMode?: unknown;
 		images?: unknown;
 		baseRef?: unknown;
 		agentId?: unknown;
@@ -185,6 +192,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		return null;
 	}
 	const now = Date.now();
+	const id = typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid);
 	const origin = normalizeTaskOrigin(card.origin);
 	const generation =
 		typeof card.generation === "number" && Number.isSafeInteger(card.generation) && card.generation > 0
@@ -220,17 +228,13 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 						: {}),
 				}
 			: undefined;
-	const acceptanceEvidence = normalizeTaskAcceptanceEvidence(card.acceptanceEvidence);
+	const acceptanceEvidence = normalizeTaskAcceptanceEvidence(card.acceptanceEvidence, id, generation);
 
 	return {
-		id: typeof card.id === "string" && card.id ? card.id : createShortTaskId(createBrowserUuid),
+		id,
 		title,
 		prompt,
 		startInPlanMode: typeof card.startInPlanMode === "boolean" ? card.startInPlanMode : false,
-		autoReviewEnabled: typeof card.autoReviewEnabled === "boolean" ? card.autoReviewEnabled : false,
-		autoReviewMode: resolveTaskAutoReviewMode(
-			typeof card.autoReviewMode === "string" ? (card.autoReviewMode as TaskAutoReviewMode) : undefined,
-		),
 		images: normalizeTaskImages(card.images),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId !== "cline"
@@ -286,21 +290,6 @@ function normalizeDependency(rawDependency: unknown, taskIds: Set<string>): Boar
 		fromTaskId,
 		toTaskId,
 		createdAt: typeof dependency.createdAt === "number" ? dependency.createdAt : Date.now(),
-	};
-}
-function removeDependenciesByTaskIds(board: BoardData, taskIds: Set<string>): BoardData {
-	if (taskIds.size === 0 || board.dependencies.length === 0) {
-		return board;
-	}
-	const dependencies = board.dependencies.filter(
-		(dependency) => !taskIds.has(dependency.fromTaskId) && !taskIds.has(dependency.toTaskId),
-	);
-	if (dependencies.length === board.dependencies.length) {
-		return board;
-	}
-	return {
-		...board,
-		dependencies,
 	};
 }
 export function normalizeBoardData(rawBoard: unknown): BoardData | null {
@@ -388,8 +377,6 @@ export function addTaskToColumnWithResult(
 			title: draft.title,
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
-			autoReviewEnabled: draft.autoReviewEnabled,
-			autoReviewMode: draft.autoReviewMode,
 			images: draft.images,
 			agentId: draft.agentId,
 			baseRef: draft.baseRef,
@@ -421,15 +408,8 @@ export function removeTaskDependency(board: BoardData, dependencyId: string): { 
 	return runtimeTaskState.removeTaskDependency(board, dependencyId);
 }
 
-export function getReadyLinkedTaskIdsForTaskInTrash(board: BoardData, taskId: string): string[] {
-	return runtimeTaskState.getReadyLinkedTaskIdsForTaskInTrash(board, taskId);
-}
-
-export function trashTaskAndGetReadyLinkedTaskIds(
-	board: BoardData,
-	taskId: string,
-): { board: BoardData; moved: boolean; readyTaskIds: string[] } {
-	return runtimeTaskState.trashTaskAndGetReadyLinkedTaskIds(board, taskId);
+export function discardTask(board: BoardData, taskId: string): { board: BoardData; moved: boolean } {
+	return runtimeTaskState.discardTask(board, taskId);
 }
 
 export function applyDragResult(
@@ -475,6 +455,13 @@ export function applyDragResult(
 		programmaticCardMoveInFlight: options?.programmaticCardMoveInFlight,
 	});
 	if (!isAllowedCrossColumnMove) {
+		return { board };
+	}
+	if (
+		sourceColumn.id === "backlog" &&
+		destinationColumn.id === "in_progress" &&
+		board.dependencies.some((dependency) => dependency.fromTaskId === result.draggableId)
+	) {
 		return { board };
 	}
 
@@ -602,8 +589,6 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				title: title || card.title,
 				prompt,
 				startInPlanMode,
-				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
-				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
 				images,
 				agentId: draft.agentId,
 				removedAgentId: draft.agentId === undefined ? card.removedAgentId : undefined,
@@ -635,68 +620,10 @@ export function updateTaskTitle(
 		title,
 		prompt: selection.card.prompt,
 		startInPlanMode: selection.card.startInPlanMode,
-		autoReviewEnabled: selection.card.autoReviewEnabled,
-		autoReviewMode: selection.card.autoReviewMode,
 		images: selection.card.images,
 		agentId: selection.card.agentId,
 		baseRef: selection.card.baseRef,
 	});
-}
-
-export function disableTaskAutoReview(board: BoardData, taskId: string): { board: BoardData; updated: boolean } {
-	const selection = findCardSelection(board, taskId);
-	if (!selection) {
-		return { board, updated: false };
-	}
-
-	return updateTask(board, taskId, {
-		prompt: selection.card.prompt,
-		startInPlanMode: selection.card.startInPlanMode,
-		autoReviewEnabled: false,
-		autoReviewMode: DEFAULT_TASK_AUTO_REVIEW_MODE,
-		images: selection.card.images,
-		agentId: selection.card.agentId,
-		baseRef: selection.card.baseRef,
-	});
-}
-
-export function removeTask(board: BoardData, taskId: string): { board: BoardData; removed: boolean } {
-	let removed = false;
-	const columns = board.columns.map((column) => {
-		const nextCards = column.cards.filter((card) => card.id !== taskId);
-		if (nextCards.length !== column.cards.length) {
-			removed = true;
-			return { ...column, cards: nextCards };
-		}
-		return column;
-	});
-	if (!removed) {
-		return { board, removed: false };
-	}
-	const boardWithUpdatedColumns = withUpdatedColumns(board, columns);
-	return {
-		board: removeDependenciesByTaskIds(boardWithUpdatedColumns, new Set([taskId])),
-		removed: true,
-	};
-}
-
-export function clearColumnTasks(
-	board: BoardData,
-	columnId: BoardColumnId,
-): { board: BoardData; clearedTaskIds: string[] } {
-	const targetColumn = board.columns.find((column) => column.id === columnId);
-	if (!targetColumn || targetColumn.cards.length === 0) {
-		return { board, clearedTaskIds: [] };
-	}
-
-	const clearedTaskIds = targetColumn.cards.map((card) => card.id);
-	const columns = board.columns.map((column) => (column.id === columnId ? { ...column, cards: [] } : column));
-	const boardWithUpdatedColumns = withUpdatedColumns(board, columns);
-
-	return {
-		board: removeDependenciesByTaskIds(boardWithUpdatedColumns, new Set(clearedTaskIds)),
-		clearedTaskIds,
-	};
 }
 
 export function findCardSelection(board: BoardData, taskId: string): CardSelection | null {

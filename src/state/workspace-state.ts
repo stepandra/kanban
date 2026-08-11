@@ -40,7 +40,7 @@ const BOARD_COLUMNS: Array<{ id: RuntimeBoardColumnId; title: string }> = [
 	{ id: "backlog", title: "Backlog" },
 	{ id: "in_progress", title: "In Progress" },
 	{ id: "review", title: "Review" },
-	{ id: "trash", title: "Done" },
+	{ id: "trash", title: "Archive" },
 ];
 
 interface WorkspaceIndexEntry {
@@ -626,7 +626,19 @@ export class WorkspaceStateConflictError extends Error {
 	}
 }
 
-function assertNoReviewAcceptanceViaSnapshotSave(currentBoard: RuntimeBoardData, nextBoard: RuntimeBoardData): void {
+function getTaskColumnIds(board: RuntimeBoardData): Map<string, RuntimeBoardColumnId> {
+	return new Map(board.columns.flatMap((column) => column.cards.map((card) => [card.id, column.id])));
+}
+
+function assertAuthorizedBoardSnapshotTransitions(currentBoard: RuntimeBoardData, nextBoard: RuntimeBoardData): void {
+	const currentTaskColumns = getTaskColumnIds(currentBoard);
+	const nextTaskColumns = getTaskColumnIds(nextBoard);
+	const deletedTaskId = Array.from(currentTaskColumns.keys()).find((taskId) => !nextTaskColumns.has(taskId));
+	if (deletedTaskId) {
+		throw new Error(
+			`Task "${deletedTaskId}" cannot be permanently deleted through a board snapshot save. Use the explicit task deletion command.`,
+		);
+	}
 	const reviewTaskIds = new Set(
 		currentBoard.columns.find((column) => column.id === "review")?.cards.map((card) => card.id) ?? [],
 	);
@@ -635,7 +647,28 @@ function assertNoReviewAcceptanceViaSnapshotSave(currentBoard: RuntimeBoardData,
 		?.cards.find((card) => reviewTaskIds.has(card.id));
 	if (acceptedThroughSnapshot) {
 		throw new Error(
-			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to Done through a board snapshot save. Use the reviewer-only task accept command with verified remote revision evidence.`,
+			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to the archive through a board snapshot save. Acceptance is unavailable until campaign-scoped receipts are implemented.`,
+		);
+	}
+	const blockedStartTaskId = nextBoard.dependencies
+		.map((dependency) => dependency.fromTaskId)
+		.find((taskId) => currentTaskColumns.get(taskId) === "backlog" && nextTaskColumns.get(taskId) === "in_progress");
+	if (blockedStartTaskId) {
+		throw new Error(`Task "${blockedStartTaskId}" cannot be started until all of its prerequisites are accepted.`);
+	}
+	const currentDependencyPairs = new Set(
+		currentBoard.dependencies.map((dependency) => `${dependency.fromTaskId}\u0000${dependency.toTaskId}`),
+	);
+	const linkedAfterAdmissionTaskId = nextBoard.dependencies
+		.filter((dependency) => !currentDependencyPairs.has(`${dependency.fromTaskId}\u0000${dependency.toTaskId}`))
+		.map((dependency) => dependency.fromTaskId)
+		.find((taskId) => {
+			const currentTask = currentBoard.columns.flatMap((column) => column.cards).find((card) => card.id === taskId);
+			return Boolean(currentTask?.execution);
+		});
+	if (linkedAfterAdmissionTaskId) {
+		throw new Error(
+			`Task "${linkedAfterAdmissionTaskId}" cannot gain a prerequisite after its execution has been admitted.`,
 		);
 	}
 }
@@ -802,7 +835,7 @@ export async function saveWorkspaceState(
 		}
 		const currentBoard = await readWorkspaceBoard(context.workspaceId);
 		const board = parsedPayload.board;
-		assertNoReviewAcceptanceViaSnapshotSave(currentBoard, board);
+		assertAuthorizedBoardSnapshotTransitions(currentBoard, board);
 		const sessions = parsedPayload.sessions;
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {

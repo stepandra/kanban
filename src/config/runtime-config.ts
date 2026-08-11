@@ -1,6 +1,6 @@
 // Persists Kanban-owned runtime preferences on disk.
 // This module stores Kanban settings such as selected agents, shortcuts, and
-// prompt templates.
+// task templates.
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -15,8 +15,6 @@ interface RuntimeGlobalConfigFileShape {
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
 	readyForReviewNotificationsEnabled?: boolean;
-	commitPromptTemplate?: string;
-	openPrPromptTemplate?: string;
 	taskTemplates?: RuntimeTaskTemplate[];
 }
 
@@ -32,10 +30,6 @@ export interface RuntimeConfigState {
 	agentAutonomousModeEnabled: boolean;
 	readyForReviewNotificationsEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
-	commitPromptTemplate: string;
-	openPrPromptTemplate: string;
-	commitPromptTemplateDefault: string;
-	openPrPromptTemplateDefault: string;
 	taskTemplates: RuntimeTaskTemplate[];
 }
 
@@ -45,8 +39,6 @@ export interface RuntimeConfigUpdateInput {
 	agentAutonomousModeEnabled?: boolean;
 	readyForReviewNotificationsEnabled?: boolean;
 	shortcuts?: RuntimeProjectShortcut[];
-	commitPromptTemplate?: string;
-	openPrPromptTemplate?: string;
 	taskTemplates?: RuntimeTaskTemplate[];
 }
 
@@ -56,52 +48,10 @@ const CONFIG_FILENAME = "config.json";
 const PROJECT_CONFIG_PARENT_DIR = ".cline";
 const PROJECT_CONFIG_DIR = "kanban";
 const PROJECT_CONFIG_FILENAME = "config.json";
-const DEFAULT_AGENT_ID: RuntimeAgentId = "claude";
-const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "grok", "kimi", "droid", "kiro"];
+const DEFAULT_AGENT_ID: RuntimeAgentId = "grok";
+const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["grok", "kimi", "claude", "codex"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
-const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
-
-- Do not run destructive commands: git reset --hard, git clean -fdx, git worktree remove, rm/mv on repository paths.
-- Do not edit files outside git workflows unless required for conflict resolution.
-- Preserve any pre-existing user uncommitted changes in the base worktree.
-
-Steps:
-1. In the current task worktree, stage and create a commit for the pending task changes.
-2. Find where {{base_ref}} is checked out:
-   - Run: git worktree list --porcelain
-   - If branch {{base_ref}} is checked out in path P, use that P.
-   - If not checked out anywhere, use current worktree as P by checking out {{base_ref}} there.
-3. In P, verify current branch is {{base_ref}}.
-4. If P has uncommitted changes, stash them: git -C P stash push -u -m "kanban-pre-cherry-pick"
-5. Cherry-pick the task commit into P. If this fails because .git/index.lock exists, wait briefly for any active git process to finish. If the lock remains and no git process is active, treat the lock as stale, remove it, and retry.
-6. If cherry-pick conflicts, resolve carefully, preserving both the intended task changes and existing user edits.
-7. If step 4 created a new stash entry, restore that stash with: git -C P stash pop <stash-ref>
-8. If stash pop conflicts, resolve them while preserving pre-existing user edits.
-9. Report:
-   - Final commit hash
-   - Final commit message
-   - Whether stash was used
-   - Whether conflicts were resolved
-   - Any remaining manual follow-up needed`;
-const DEFAULT_OPEN_PR_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, open a pull request against {{base_ref}}.
-
-- Do not run destructive commands: git reset --hard, git clean -fdx, git worktree remove, rm/mv on repository paths.
-- Do not modify the base worktree.
-- Keep all PR preparation in the current task worktree.
-
-Steps:
-1. Ensure all intended changes are committed in the current task worktree.
-2. If currently on detached HEAD, create a branch at the current commit in this worktree.
-3. Push the branch to origin and set upstream.
-4. Create a pull request with base {{base_ref}} and head as the pushed branch (use gh CLI if available).
-5. If a pull request already exists for the same head and base, return that existing PR URL instead of creating a duplicate.
-6. If PR creation is blocked, explain exactly why and provide the exact commands to complete it manually.
-7. Report:
-   - PR title: PR URL
-   - Base branch
-   - Head branch
-   - Any follow-up needed`;
 
 export function pickBestInstalledAgentIdFromDetected(detectedCommands: readonly string[]): RuntimeAgentId | null {
 	const detected = new Set(detectedCommands);
@@ -174,14 +124,6 @@ function normalizeShortcuts(shortcuts: RuntimeProjectShortcut[] | null | undefin
 	return normalized;
 }
 
-function normalizePromptTemplate(value: unknown, fallback: string): string {
-	if (typeof value !== "string") {
-		return fallback;
-	}
-	const normalized = value.trim();
-	return normalized.length > 0 ? value : fallback;
-}
-
 function normalizeTaskTemplate(template: RuntimeTaskTemplate): RuntimeTaskTemplate | null {
 	if (!template || typeof template !== "object") {
 		return null;
@@ -207,12 +149,6 @@ function normalizeTaskTemplate(template: RuntimeTaskTemplate): RuntimeTaskTempla
 	}
 	if (baseRef) {
 		normalized.baseRef = baseRef;
-	}
-	if (typeof template.autoReviewEnabled === "boolean") {
-		normalized.autoReviewEnabled = template.autoReviewEnabled;
-	}
-	if (template.autoReviewMode === "commit" || template.autoReviewMode === "pr") {
-		normalized.autoReviewMode = template.autoReviewMode;
 	}
 	return normalized;
 }
@@ -341,13 +277,6 @@ function toRuntimeConfigState({
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
 		),
 		shortcuts: normalizeShortcuts(projectConfig?.shortcuts),
-		commitPromptTemplate: normalizePromptTemplate(globalConfig?.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
-		openPrPromptTemplate: normalizePromptTemplate(
-			globalConfig?.openPrPromptTemplate,
-			DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
-		),
-		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
-		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
 		taskTemplates: normalizeTaskTemplates(globalConfig?.taskTemplates),
 	};
 }
@@ -368,8 +297,6 @@ async function writeRuntimeGlobalConfigFile(
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		readyForReviewNotificationsEnabled?: boolean;
-		commitPromptTemplate?: string;
-		openPrPromptTemplate?: string;
 		taskTemplates?: RuntimeTaskTemplate[];
 	},
 ): Promise<void> {
@@ -391,14 +318,6 @@ async function writeRuntimeGlobalConfigFile(
 		config.readyForReviewNotificationsEnabled === undefined
 			? DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
 			: normalizeBoolean(config.readyForReviewNotificationsEnabled, DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED);
-	const commitPromptTemplate =
-		config.commitPromptTemplate === undefined
-			? DEFAULT_COMMIT_PROMPT_TEMPLATE
-			: normalizePromptTemplate(config.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE);
-	const openPrPromptTemplate =
-		config.openPrPromptTemplate === undefined
-			? DEFAULT_OPEN_PR_PROMPT_TEMPLATE
-			: normalizePromptTemplate(config.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE);
 	const taskTemplates = config.taskTemplates === undefined ? undefined : normalizeTaskTemplates(config.taskTemplates);
 
 	const payload: RuntimeGlobalConfigFileShape = {};
@@ -427,12 +346,6 @@ async function writeRuntimeGlobalConfigFile(
 		readyForReviewNotificationsEnabled !== DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED
 	) {
 		payload.readyForReviewNotificationsEnabled = readyForReviewNotificationsEnabled;
-	}
-	if (hasOwnKey(existing, "commitPromptTemplate") || commitPromptTemplate !== DEFAULT_COMMIT_PROMPT_TEMPLATE) {
-		payload.commitPromptTemplate = commitPromptTemplate;
-	}
-	if (hasOwnKey(existing, "openPrPromptTemplate") || openPrPromptTemplate !== DEFAULT_OPEN_PR_PROMPT_TEMPLATE) {
-		payload.openPrPromptTemplate = openPrPromptTemplate;
 	}
 	if (taskTemplates !== undefined) {
 		if (taskTemplates.length > 0 || hasOwnKey(existing, "taskTemplates")) {
@@ -521,8 +434,6 @@ function createRuntimeConfigStateFromValues(input: {
 	agentAutonomousModeEnabled: boolean;
 	readyForReviewNotificationsEnabled: boolean;
 	shortcuts: RuntimeProjectShortcut[];
-	commitPromptTemplate: string;
-	openPrPromptTemplate: string;
 	taskTemplates: RuntimeTaskTemplate[];
 }): RuntimeConfigState {
 	return {
@@ -539,10 +450,6 @@ function createRuntimeConfigStateFromValues(input: {
 			DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED,
 		),
 		shortcuts: normalizeShortcuts(input.shortcuts),
-		commitPromptTemplate: normalizePromptTemplate(input.commitPromptTemplate, DEFAULT_COMMIT_PROMPT_TEMPLATE),
-		openPrPromptTemplate: normalizePromptTemplate(input.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE),
-		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
-		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
 		taskTemplates: normalizeTaskTemplates(input.taskTemplates),
 	};
 }
@@ -556,8 +463,6 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
 		shortcuts: [],
-		commitPromptTemplate: current.commitPromptTemplate,
-		openPrPromptTemplate: current.openPrPromptTemplate,
 		taskTemplates: current.taskTemplates,
 	});
 }
@@ -592,8 +497,6 @@ export async function saveRuntimeConfig(
 		agentAutonomousModeEnabled: boolean;
 		readyForReviewNotificationsEnabled: boolean;
 		shortcuts: RuntimeProjectShortcut[];
-		commitPromptTemplate: string;
-		openPrPromptTemplate: string;
 		taskTemplates: RuntimeTaskTemplate[];
 	},
 ): Promise<RuntimeConfigState> {
@@ -604,8 +507,6 @@ export async function saveRuntimeConfig(
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
-			commitPromptTemplate: config.commitPromptTemplate,
-			openPrPromptTemplate: config.openPrPromptTemplate,
 			taskTemplates: config.taskTemplates,
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, { shortcuts: config.shortcuts });
@@ -617,8 +518,6 @@ export async function saveRuntimeConfig(
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
 			shortcuts: config.shortcuts,
-			commitPromptTemplate: config.commitPromptTemplate,
-			openPrPromptTemplate: config.openPrPromptTemplate,
 			taskTemplates: config.taskTemplates,
 		});
 	});
@@ -639,8 +538,6 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			readyForReviewNotificationsEnabled:
 				updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
-			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
-			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
 			taskTemplates: updates.taskTemplates ?? current.taskTemplates,
 		};
 
@@ -649,8 +546,6 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
-			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
-			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
 			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts) ||
 			!areRuntimeTaskTemplatesEqual(nextConfig.taskTemplates, current.taskTemplates);
 
@@ -663,8 +558,6 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
-			commitPromptTemplate: nextConfig.commitPromptTemplate,
-			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 			taskTemplates: nextConfig.taskTemplates,
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, {
@@ -678,8 +571,6 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 			shortcuts: nextConfig.shortcuts,
-			commitPromptTemplate: nextConfig.commitPromptTemplate,
-			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 			taskTemplates: nextConfig.taskTemplates,
 		});
 	});
@@ -708,8 +599,6 @@ export async function updateGlobalRuntimeConfig(
 				readyForReviewNotificationsEnabled:
 					updates.readyForReviewNotificationsEnabled ?? current.readyForReviewNotificationsEnabled,
 				shortcuts: current.shortcuts,
-				commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
-				openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
 				taskTemplates: updates.taskTemplates ?? current.taskTemplates,
 			};
 
@@ -718,8 +607,6 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
-				nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
-				nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
 				!areRuntimeTaskTemplatesEqual(nextConfig.taskTemplates, current.taskTemplates);
 
 			if (!hasChanges) {
@@ -731,8 +618,6 @@ export async function updateGlobalRuntimeConfig(
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
-				commitPromptTemplate: nextConfig.commitPromptTemplate,
-				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 				taskTemplates: nextConfig.taskTemplates,
 			});
 
@@ -744,8 +629,6 @@ export async function updateGlobalRuntimeConfig(
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
 				shortcuts: nextConfig.shortcuts,
-				commitPromptTemplate: nextConfig.commitPromptTemplate,
-				openPrPromptTemplate: nextConfig.openPrPromptTemplate,
 				taskTemplates: nextConfig.taskTemplates,
 			});
 		},

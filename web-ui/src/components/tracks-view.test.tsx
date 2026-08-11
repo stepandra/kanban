@@ -18,7 +18,7 @@ const projection: RuntimeTracksProjection = {
 			order: 0,
 			archived: false,
 			activeMilestoneId: "backend-m1",
-			counts: { backlog: 1, inProgress: 1, review: 0, accepted: 2 },
+			counts: { backlog: 1, inProgress: 1, review: 0, accepted: 2, discarded: 0 },
 			progress: { acceptedWeight: 2, totalWeight: 4, percent: 50, basis: "count" },
 			milestones: [
 				{
@@ -28,7 +28,7 @@ const projection: RuntimeTracksProjection = {
 					state: "active",
 					order: 0,
 					scopeRevision: 2,
-					counts: { backlog: 1, inProgress: 1, review: 0, accepted: 2 },
+					counts: { backlog: 1, inProgress: 1, review: 0, accepted: 2, discarded: 0 },
 					progress: { acceptedWeight: 2, totalWeight: 4, percent: 50, basis: "count" },
 					tasks: [
 						{
@@ -44,7 +44,7 @@ const projection: RuntimeTracksProjection = {
 		},
 	],
 	unassigned: {
-		counts: { backlog: 1, inProgress: 0, review: 0, accepted: 0 },
+		counts: { backlog: 1, inProgress: 0, review: 0, accepted: 0, discarded: 0 },
 		tasks: [
 			{
 				taskId: "task-2",

@@ -50,6 +50,9 @@ interface CliOptions {
 }
 
 const KANBAN_VERSION = typeof packageJson.version === "string" ? packageJson.version : "0.1.0";
+const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
+const KANBAN_PROVENANCE_SCHEMA = "stepandra-kanban-provenance/v1";
+const KANBAN_BUILD_REVISION = process.env.KANBAN_BUILD_REVISION?.trim() || "development";
 
 function parseCliPortValue(rawValue: string): { mode: "fixed"; value: number } | { mode: "auto" } {
 	const normalized = rawValue.trim().toLowerCase();
@@ -682,7 +685,7 @@ function createProgram(invocationArgs: string[]): Command {
 		.option("--host <ip>", "Host IP to bind the server to (default: 127.0.0.1).")
 		.option("--port <number|auto>", "Runtime port (1-65535) or auto.", parseCliPortValue)
 		.option("--no-open", "Do not open browser automatically.")
-		.option("--skip-shutdown-cleanup", "Do not move sessions to done or delete task worktrees on shutdown.")
+		.option("--skip-shutdown-cleanup", "Do not stop or mark non-durable task sessions interrupted on shutdown.")
 		.option("--https", "Enable HTTPS. Requires both --cert and --key.")
 		.option("--cert <path>", "Path to a TLS certificate PEM file (implies HTTPS).")
 		.option("--key <path>", "Path to a TLS private key PEM file (implies HTTPS).")
@@ -713,6 +716,24 @@ function createProgram(invocationArgs: string[]): Command {
 		.description("Update Kanban to the latest published version.")
 		.action(async () => {
 			await runUpdateCommand();
+		});
+
+	program
+		.command("provenance")
+		.description("Report the identity and exact build revision of this Kanban executable.")
+		.option("--json", "Print machine-readable JSON.")
+		.action((options: { json?: boolean }) => {
+			const provenance = {
+				schema: KANBAN_PROVENANCE_SCHEMA,
+				repository: KANBAN_REPOSITORY,
+				version: KANBAN_VERSION,
+				revision: KANBAN_BUILD_REVISION,
+			};
+			if (options.json) {
+				console.log(JSON.stringify(provenance));
+				return;
+			}
+			console.log(`${provenance.repository} ${provenance.version} (${provenance.revision})`);
 		});
 
 	program.action(async (options: RootCommandOptions) => {

@@ -141,14 +141,7 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 	if (!taskId) {
 		throw new Error("Invalid worktree delete payload.");
 	}
-	const expectedExecutionAttemptId = parsed.expectedExecutionAttemptId?.trim() ?? parsed.expectedExecutionAttemptId;
-	if (expectedExecutionAttemptId === "") {
-		throw new Error("Invalid expected task execution attempt ID.");
-	}
-	return {
-		taskId,
-		...(expectedExecutionAttemptId !== undefined ? { expectedExecutionAttemptId } : {}),
-	};
+	return { taskId };
 }
 
 export function parseWorkspaceStateSaveRequest(value: unknown): RuntimeWorkspaceStateSaveRequest {

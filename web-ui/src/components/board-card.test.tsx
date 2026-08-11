@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { act, useState } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -83,8 +83,6 @@ function createCard(overrides?: Partial<Parameters<typeof BoardCard>[0]["card"]>
 		title: "Review API changes",
 		prompt: "Review API changes",
 		startInPlanMode: false,
-		autoReviewEnabled: false,
-		autoReviewMode: "commit" as const,
 		baseRef: "main",
 		createdAt: 1,
 		updatedAt: 1,
@@ -113,29 +111,6 @@ function createSummary(
 		previousTurnCheckpoint: null,
 		...overrides,
 	};
-}
-
-function Harness(): React.ReactElement {
-	const [card, setCard] = useState(
-		createCard({
-			autoReviewEnabled: true,
-			autoReviewMode: "pr",
-		}),
-	);
-
-	return (
-		<BoardCard
-			card={card}
-			index={0}
-			columnId="backlog"
-			onCancelAutomaticAction={() => {
-				setCard((currentCard) => ({
-					...currentCard,
-					autoReviewEnabled: false,
-				}));
-			}}
-		/>
-	);
 }
 
 describe("BoardCard", () => {
@@ -180,34 +155,42 @@ describe("BoardCard", () => {
 		}
 	});
 
-	it("shows a mode-specific cancel button and hides it after canceling auto review", async () => {
+	it("does not offer commit or PR publication actions in Review", async () => {
+		mockWorkspaceSnapshot = {
+			taskId: "task-1",
+			path: "/tmp/task-1",
+			exists: true,
+			branch: "task-1",
+			isDetached: false,
+			headCommit: "11223344556677889900",
+			changeId: null,
+			changedFiles: 2,
+			additions: 4,
+			deletions: 1,
+		};
 		await act(async () => {
-			root.render(<Harness />);
+			root.render(
+				<TooltipProvider>
+					<BoardCard card={createCard()} index={0} columnId="review" />
+				</TooltipProvider>,
+			);
 		});
 
-		const cancelButton = Array.from(container.querySelectorAll("button")).find(
-			(button) => button.textContent?.trim() === "Cancel Auto-PR",
+		expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Commit")).toBe(
+			false,
 		);
-		expect(cancelButton).toBeDefined();
-
-		await act(async () => {
-			cancelButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-			cancelButton?.click();
-		});
-
-		const nextCancelButton = Array.from(container.querySelectorAll("button")).find((button) =>
-			button.textContent?.includes("Cancel Auto-"),
+		expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Open PR")).toBe(
+			false,
 		);
-		expect(nextCancelButton).toBeUndefined();
 	});
 
-	it("shows a non-mutating reviewer acceptance marker in Review", async () => {
+	it("shows a non-mutating campaign acceptance marker in Review", async () => {
 		await act(async () => {
 			root.render(<BoardCard card={createCard()} index={0} columnId="review" isMoveToTrashLoading />);
 		});
 
-		expect(container.querySelector('button[aria-label="Move task to done"]')).toBeNull();
-		expect(container.textContent).toContain("Awaiting verified reviewer acceptance");
+		expect(container.querySelector('button[aria-label="Discard task"]')).toBeNull();
+		expect(container.textContent).toContain("Awaiting QA campaign acceptance");
 	});
 
 	it("shows Amp Architect provenance as a compact origin marker", async () => {

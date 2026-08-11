@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { RuntimeBoardData, RuntimeTaskAcceptanceEvidence } from "../../src/core/api-contract";
-import { acceptTaskWithEvidence, moveTaskToColumn } from "../../src/core/task-board-mutations";
+import {
+	type RuntimeBoardData,
+	type RuntimeTaskAcceptanceEvidence,
+	runtimeBoardCardSchema,
+} from "../../src/core/api-contract";
+import { discardTask, moveTaskToColumn } from "../../src/core/task-board-mutations";
 
 function createReviewBoard(): RuntimeBoardData {
 	return {
@@ -32,6 +36,9 @@ function createReviewBoard(): RuntimeBoardData {
 
 const acceptanceEvidence: RuntimeTaskAcceptanceEvidence = {
 	kind: "verified_remote_revision",
+	taskId: "task-1",
+	generation: 1,
+	executionAttemptId: "attempt-1",
 	acceptedRevision: {
 		sha: "0123456789abcdef0123456789abcdef01234567",
 		remoteRef: "refs/heads/kanban/task-1-review",
@@ -63,19 +70,34 @@ describe("Kanban acceptance boundary", () => {
 		);
 	});
 
-	it("moves Review to Done only when acceptance evidence is attached atomically", () => {
-		const accepted = acceptTaskWithEvidence(createReviewBoard(), "task-1", acceptanceEvidence);
-		expect(accepted.moved).toBe(true);
-		expect(accepted.acceptanceEvidence).toEqual(acceptanceEvidence);
-		expect(accepted.board.columns.find((column) => column.id === "review")?.cards).toEqual([]);
-		expect(accepted.board.columns.find((column) => column.id === "trash")?.cards[0]?.acceptanceEvidence).toEqual(
-			acceptanceEvidence,
-		);
-		expect(accepted.board.columns.find((column) => column.id === "trash")?.cards[0]?.execution).toBeUndefined();
+	it("migrates legacy acceptance evidence to the task generation when loading a card", () => {
+		const parsed = runtimeBoardCardSchema.parse({
+			id: "legacy-accepted",
+			title: "Legacy accepted task",
+			prompt: "Legacy accepted task",
+			startInPlanMode: false,
+			generation: 3,
+			acceptanceEvidence: {
+				kind: "verified_remote_revision",
+				acceptedRevision: acceptanceEvidence.acceptedRevision,
+				verifiedAt: 2,
+			},
+			baseRef: "main",
+			createdAt: 1,
+			updatedAt: 2,
+		});
+
+		expect(parsed.acceptanceEvidence).toMatchObject({ taskId: "legacy-accepted", generation: 3 });
 	});
 
 	it("clears historical acceptance evidence when a Done task is reopened", () => {
-		const accepted = acceptTaskWithEvidence(createReviewBoard(), "task-1", acceptanceEvidence);
+		const board = createReviewBoard();
+		const task = board.columns.find((column) => column.id === "review")?.cards[0];
+		if (!task) {
+			throw new Error("Expected review task.");
+		}
+		task.acceptanceEvidence = acceptanceEvidence;
+		const accepted = discardTask(board, "task-1");
 
 		const reopened = moveTaskToColumn(accepted.board, "task-1", "review", 3);
 

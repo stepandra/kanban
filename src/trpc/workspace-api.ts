@@ -295,21 +295,13 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			return await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
-				canDelete:
-					body.expectedExecutionAttemptId === undefined
-						? undefined
-						: async () => {
-								const state = await deps.buildWorkspaceStateSnapshot(
-									workspaceScope.workspaceId,
-									workspaceScope.workspacePath,
-								);
-								const task = state.board.columns
-									.find((column) => column.id === "trash")
-									?.cards.find((card) => card.id === body.taskId);
-								return (
-									Boolean(task) && (task?.execution?.attemptId ?? null) === body.expectedExecutionAttemptId
-								);
-							},
+				canDelete: async () => {
+					const state = await deps.buildWorkspaceStateSnapshot(
+						workspaceScope.workspaceId,
+						workspaceScope.workspacePath,
+					);
+					return !state.board.columns.some((column) => column.cards.some((card) => card.id === body.taskId));
+				},
 			});
 		},
 		loadTaskContext: async (workspaceScope, input) => {

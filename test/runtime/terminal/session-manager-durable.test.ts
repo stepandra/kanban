@@ -120,16 +120,15 @@ describe("TerminalSessionManager durable sessions", () => {
 	});
 
 	describe("reconcileDurableSessions", () => {
-		it("reaps workspace orphans even when no durable summary survived", async () => {
+		it("does not infer ownership or kill sessions when no durable identity was persisted", async () => {
+			const listSessionNames = vi.fn(async () => ["kanban.ws.codex.task-orphan.abcdef012345"]);
 			const killSession = vi.fn(async (_sessionName: string) => {});
 			const manager = new TerminalSessionManager({ workspaceId: "ws", warn: vi.fn() });
-			const orphanName = "kanban.ws.codex.task-orphan.abcdef012345";
 
-			await manager.reconcileDurableSessions(
-				createZmxControlStub({ listSessionNames: async () => [orphanName], killSession }),
-			);
+			await manager.reconcileDurableSessions(createZmxControlStub({ listSessionNames, killSession }));
 
-			expect(killSession).toHaveBeenCalledWith(orphanName);
+			expect(listSessionNames).toHaveBeenCalledOnce();
+			expect(killSession).not.toHaveBeenCalled();
 		});
 
 		it("keeps persisted durable sessions that are still alive in zmx", async () => {
@@ -163,7 +162,7 @@ describe("TerminalSessionManager durable sessions", () => {
 			expect(summary?.agentId).toBe("codex");
 		});
 
-		it("kills orphaned kanban sessions for this workspace and logs a warning", async () => {
+		it("reconciles only exact persisted identities and leaves every other live session untouched", async () => {
 			const killSession = vi.fn(async (_sessionName: string) => {});
 			const warn = vi.fn();
 			const manager = new TerminalSessionManager({ warn });
@@ -182,27 +181,9 @@ describe("TerminalSessionManager durable sessions", () => {
 
 			await manager.reconcileDurableSessions(control);
 
-			expect(killSession).toHaveBeenCalledTimes(1);
-			expect(killSession).toHaveBeenCalledWith("kanban.ws.codex.task-orphan.abcdef012345");
-			expect(warn).toHaveBeenCalledWith(expect.stringContaining("kanban.ws.codex.task-orphan.abcdef012345"));
+			expect(killSession).not.toHaveBeenCalled();
+			expect(warn).not.toHaveBeenCalled();
 			expect(manager.isDurableTaskSession("task-1")).toBe(true);
-		});
-
-		it("logs orphan kill failures without throwing", async () => {
-			const warn = vi.fn();
-			const manager = new TerminalSessionManager({ warn });
-			manager.hydrateFromRecord({
-				"task-1": createSummary({ durableSessionName: DURABLE_SESSION_NAME }),
-			});
-			const control = createZmxControlStub({
-				listSessionNames: async () => [DURABLE_SESSION_NAME, "kanban.ws.codex.task-orphan.abcdef012345"],
-				killSession: async () => {
-					throw new Error("zmx exploded");
-				},
-			});
-
-			await expect(manager.reconcileDurableSessions(control)).resolves.toBeUndefined();
-			expect(warn).toHaveBeenCalledWith(expect.stringContaining("zmx exploded"));
 		});
 
 		it("does not touch zmx at all when KANBAN_DURABLE_AGENT_SESSIONS=0", async () => {
@@ -250,7 +231,6 @@ describe("TerminalSessionManager durable sessions", () => {
 					workspaceTrustConfirmTimer: null,
 				},
 				listeners: new Map(),
-				suppressAutoRestartOnExit: false,
 			};
 			seedActiveDurableEntry(manager, entry);
 
@@ -304,7 +284,6 @@ describe("TerminalSessionManager durable sessions", () => {
 					onSessionCleanup: null,
 					workspaceTrustConfirmTimer: null,
 				},
-				suppressAutoRestartOnExit: false,
 			};
 			seedActiveDurableEntry(manager, entry);
 

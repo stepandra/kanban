@@ -13,14 +13,14 @@
     "task-management",
     "typescript"
   ],
-  "homepage": "https://github.com/cline/kanban",
+  "homepage": "https://github.com/stepandra/kanban",
   "bugs": {
-    "url": "https://github.com/cline/kanban/issues"
+    "url": "https://github.com/stepandra/kanban/issues"
   },
-  "author": "Cline",
+  "author": "Stepandra contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cline/kanban"
+    "url": "https://github.com/stepandra/kanban"
   },
   "type": "module",
   "bin": {

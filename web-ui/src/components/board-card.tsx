@@ -26,7 +26,6 @@ import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeTaskExecutionProjection, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
-import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { useMeasure } from "@/utils/react-use";
 import {
@@ -230,11 +229,6 @@ export const BoardCard = memo(function BoardCard({
 	onStart,
 	onRestoreFromTrash,
 	onSaveTitle,
-	onCommit,
-	onOpenPr,
-	onCancelAutomaticAction,
-	isCommitLoading = false,
-	isOpenPrLoading = false,
 	onDependencyPointerDown,
 	onDependencyPointerEnter,
 	isDependencySource = false,
@@ -254,11 +248,6 @@ export const BoardCard = memo(function BoardCard({
 	onMoveToTrash?: (taskId: string) => void;
 	onRestoreFromTrash?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
-	onCommit?: (taskId: string) => void;
-	onOpenPr?: (taskId: string) => void;
-	onCancelAutomaticAction?: (taskId: string) => void;
-	isCommitLoading?: boolean;
-	isOpenPrLoading?: boolean;
 	isMoveToTrashLoading?: boolean;
 	onDependencyPointerDown?: (taskId: string, event: MouseEvent<HTMLElement>) => void;
 	onDependencyPointerEnter?: (taskId: string) => void;
@@ -467,10 +456,6 @@ export const BoardCard = memo(function BoardCard({
 					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
 				}
 		: null;
-	const showReviewGitActions = columnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
-	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
-	const cancelAutomaticActionLabel =
-		!isTrashCard && card.autoReviewEnabled ? getTaskAutoReviewCancelButtonLabel(card.autoReviewMode) : null;
 	const agentOverrideLabel = useMemo(
 		() =>
 			isRemovedWorker
@@ -636,10 +621,10 @@ export const BoardCard = memo(function BoardCard({
 								) : columnId === "review" ? (
 									<span
 										className="inline-flex size-7 items-center justify-center text-text-tertiary"
-										title="Only the isolated reviewer can accept a verified task-specific remote revision"
+										title="Awaiting acceptance by the owning QA campaign"
 									>
 										<ShieldCheck size={14} />
-										<span className="sr-only">Awaiting verified reviewer acceptance</span>
+										<span className="sr-only">Awaiting QA campaign acceptance</span>
 									</span>
 								) : columnId === "trash" ? (
 									<Tooltip
@@ -656,7 +641,7 @@ export const BoardCard = memo(function BoardCard({
 											icon={<RotateCcw size={12} />}
 											variant="ghost"
 											size="sm"
-											aria-label="Restore task from done"
+											aria-label="Restore task from archive"
 											onMouseDown={stopEvent}
 											onClick={(event) => {
 												stopEvent(event);
@@ -791,52 +776,6 @@ export const BoardCard = memo(function BoardCard({
 										</span>
 									) : null}
 								</div>
-							) : null}
-							{showReviewGitActions ? (
-								<div className="flex gap-1.5 mt-1.5">
-									<Button
-										variant="primary"
-										size="sm"
-										icon={isCommitLoading ? <Spinner size={12} /> : undefined}
-										disabled={isAnyGitActionLoading}
-										style={{ flex: "1 1 0" }}
-										onMouseDown={stopEvent}
-										onClick={(event) => {
-											stopEvent(event);
-											onCommit?.(card.id);
-										}}
-									>
-										Commit
-									</Button>
-									<Button
-										variant="primary"
-										size="sm"
-										icon={isOpenPrLoading ? <Spinner size={12} /> : undefined}
-										disabled={isAnyGitActionLoading}
-										style={{ flex: "1 1 0" }}
-										onMouseDown={stopEvent}
-										onClick={(event) => {
-											stopEvent(event);
-											onOpenPr?.(card.id);
-										}}
-									>
-										Open PR
-									</Button>
-								</div>
-							) : null}
-							{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-								<Button
-									size="sm"
-									fill
-									style={{ marginTop: 12 }}
-									onMouseDown={stopEvent}
-									onClick={(event) => {
-										stopEvent(event);
-										onCancelAutomaticAction(card.id);
-									}}
-								>
-									{cancelAutomaticActionLabel}
-								</Button>
 							) : null}
 						</div>
 					</div>

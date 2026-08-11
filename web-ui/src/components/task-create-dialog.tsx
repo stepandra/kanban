@@ -26,18 +26,12 @@ import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { TaskTemplatePicker } from "@/components/task-template-picker";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
-import { NativeSelect } from "@/components/ui/native-select";
 import type { RuntimeAgentId, RuntimeTaskTemplate } from "@/runtime/types";
 import { useTaskTemplates } from "@/runtime/use-task-templates";
 import { LocalStorageKey } from "@/storage/local-storage-store";
-import type { TaskAutoReviewMode, TaskImage } from "@/types";
+import type { TaskImage } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
 import { useRawLocalStorageValue } from "@/utils/react-use";
-
-const AUTO_REVIEW_MODE_OPTIONS: Array<{ value: TaskAutoReviewMode; label: string }> = [
-	{ value: "commit", label: "Make commit" },
-	{ value: "pr", label: "Make PR" },
-];
 
 type TaskCreateStartAction = "start" | "start_and_open";
 
@@ -111,10 +105,6 @@ export function TaskCreateDialog({
 	onCreateStartAndOpen,
 	startInPlanMode,
 	onStartInPlanModeChange,
-	autoReviewEnabled,
-	onAutoReviewEnabledChange,
-	autoReviewMode,
-	onAutoReviewModeChange,
 	startInPlanModeDisabled = false,
 	workspaceId,
 	branchRef,
@@ -137,10 +127,6 @@ export function TaskCreateDialog({
 	onCreateStartAndOpen?: (options?: { keepDialogOpen?: boolean }) => string | null;
 	startInPlanMode: boolean;
 	onStartInPlanModeChange: (value: boolean) => void;
-	autoReviewEnabled: boolean;
-	onAutoReviewEnabledChange: (value: boolean) => void;
-	autoReviewMode: TaskAutoReviewMode;
-	onAutoReviewModeChange: (value: TaskAutoReviewMode) => void;
 	startInPlanModeDisabled?: boolean;
 	workspaceId: string | null;
 	branchRef: string;
@@ -158,7 +144,6 @@ export function TaskCreateDialog({
 	const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 	const nextFocusIndexRef = useRef<number | null>(null);
 	const startInPlanModeId = useId();
-	const autoReviewEnabledId = useId();
 	const createMoreId = useId();
 	const [primaryStartAction, setPrimaryStartAction] = useRawLocalStorageValue<TaskCreateStartAction>(
 		LocalStorageKey.TaskCreatePrimaryStartAction,
@@ -188,21 +173,8 @@ export function TaskCreateDialog({
 			if (template.agentId && onAgentIdChange) {
 				onAgentIdChange(template.agentId);
 			}
-			if (template.autoReviewEnabled !== undefined) {
-				onAutoReviewEnabledChange(template.autoReviewEnabled);
-			}
-			if (template.autoReviewMode) {
-				onAutoReviewModeChange(template.autoReviewMode);
-			}
 		},
-		[
-			branchOptions,
-			onAgentIdChange,
-			onAutoReviewEnabledChange,
-			onAutoReviewModeChange,
-			onBranchRefChange,
-			onPromptChange,
-		],
+		[branchOptions, onAgentIdChange, onBranchRefChange, onPromptChange],
 	);
 
 	const handleSaveTaskTemplate = useCallback(
@@ -212,11 +184,9 @@ export function TaskCreateDialog({
 				prompt,
 				...(agentId ? { agentId } : {}),
 				...(branchRef ? { baseRef: branchRef } : {}),
-				autoReviewEnabled,
-				autoReviewMode,
 			});
 		},
-		[agentId, autoReviewEnabled, autoReviewMode, branchRef, prompt, saveTaskTemplate],
+		[agentId, branchRef, prompt, saveTaskTemplate],
 	);
 
 	const handleDeleteTaskTemplate = useCallback(
@@ -581,37 +551,6 @@ export function TaskCreateDialog({
 							size="sm"
 							emptyText="No revisions detected"
 						/>
-					</div>
-
-					<div className="flex items-center gap-2 flex-wrap">
-						<label
-							htmlFor={autoReviewEnabledId}
-							className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-						>
-							<RadixCheckbox.Root
-								id={autoReviewEnabledId}
-								checked={autoReviewEnabled}
-								onCheckedChange={(checked) => onAutoReviewEnabledChange(checked === true)}
-								className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent"
-							>
-								<RadixCheckbox.Indicator>
-									<Check size={10} className="text-white" />
-								</RadixCheckbox.Indicator>
-							</RadixCheckbox.Root>
-							Automatically
-						</label>
-						<NativeSelect
-							size="sm"
-							value={autoReviewMode}
-							onChange={(e) => onAutoReviewModeChange(e.currentTarget.value as TaskAutoReviewMode)}
-							style={{ width: "16ch", maxWidth: "100%" }}
-						>
-							{AUTO_REVIEW_MODE_OPTIONS.map((option) => (
-								<option key={option.value} value={option.value}>
-									{option.label}
-								</option>
-							))}
-						</NativeSelect>
 					</div>
 
 					{onAgentIdChange ? (

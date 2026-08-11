@@ -256,19 +256,22 @@ explicit planning debt instead of disappearing from the overview.
 The screen offers navigation only: a task opens its Kanban detail and a linked
 workspace opens the corresponding change in the jj graph. Track and milestone
 authoring remains deferred until typed Amp Architect mutations exist. The
-Phase 1 projection treats the legacy `trash`/Done column as accepted work for
-progress compatibility; a future acceptance-receipt migration must replace
-that approximation without changing the projection contract.
+original Phase 1 projection treated every legacy `trash`/Done card as accepted;
+that approximation has been removed. Only retained, verified acceptance
+evidence counts as accepted, while unverified archived cards count as discarded.
 
 **Consequence:** Operators get a human-readable delivery map without creating
-another workflow authority or presenting speculative controls. Progress is
-useful now, while its legacy acceptance approximation remains explicit rather
-than being mistaken for proof of promotion.
+another workflow authority or presenting speculative controls. Progress cannot
+mistake an ordinary discard for proof of acceptance.
 
 ## D-016 — Review acceptance fails closed on verified remote revision evidence
 
-- **Status:** Implemented migration safety boundary; target acceptance superseded by D-020
+- **Status:** Superseded and implementation removed by D-020
 - **Date:** 2026-07-31
+
+> Historical record: the per-task command and Fixer credential described below
+> were removed before campaign acceptance shipped. Review now fails closed with
+> no acceptance entrypoint until D-020 campaign receipts are implemented.
 
 Moving a task from Review to Done is no longer a generic board move. The
 reviewer-only `task accept` command requires a full commit ID and an exact

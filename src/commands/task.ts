@@ -6,23 +6,20 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
-	RuntimeTaskAcceptanceEvidence,
 	RuntimeTaskOrigin,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { runtimeAgentIdSchema, runtimeAmpThreadIdSchema } from "../core/api-contract";
-import { dispatchReviewFixer } from "../core/review-fixer";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
-	acceptTaskWithEvidence,
 	addTaskDependency,
 	addTaskToColumn,
 	deleteTasksFromBoard,
+	discardTask,
 	getTaskColumnId,
 	moveTaskToColumn,
 	type RuntimeAddTaskDependencyResult,
 	removeTaskDependency,
-	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../core/task-board-mutations";
 import {
@@ -33,10 +30,8 @@ import {
 	waitForCurrentTaskExecutionAttempt,
 } from "../core/task-execution-reference";
 import { resolveProjectInputPath } from "../projects/project-path";
-import { detectRepositoryKind, loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
+import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
-import { runGit } from "../workspace/git-utils";
-import { runJj } from "../workspace/jj-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
@@ -75,23 +70,10 @@ function parseListColumn(value: string | undefined): ListTaskColumn | undefined 
 	if (value === undefined) {
 		return undefined;
 	}
-	if (value === "done") {
-		return "trash";
-	}
 	if (value === "backlog" || value === "in_progress" || value === "review" || value === "trash") {
 		return value;
 	}
-	throw new Error(`Invalid column "${value}". Expected one of: ${LIST_TASK_COLUMNS.join(", ")}, done.`);
-}
-
-function parseAutoReviewMode(value: string | undefined): "commit" | "pr" | undefined {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (value === "commit" || value === "pr") {
-		return value;
-	}
-	throw new Error(`Invalid auto review mode "${value}". Expected: commit, pr.`);
+	throw new Error(`Invalid column "${value}". Expected one of: ${LIST_TASK_COLUMNS.join(", ")}.`);
 }
 
 const VALID_AGENT_IDS = runtimeAgentIdSchema.options;
@@ -250,8 +232,6 @@ function formatTaskRecord(
 		column: columnId,
 		baseRef: task.baseRef,
 		startInPlanMode: task.startInPlanMode,
-		autoReviewEnabled: task.autoReviewEnabled === true,
-		autoReviewMode: task.autoReviewMode ?? "commit",
 		...(task.agentId ? { agentId: task.agentId } : {}),
 		...(task.origin ? { origin: task.origin } : {}),
 		...(task.acceptanceEvidence ? { acceptanceEvidence: task.acceptanceEvidence } : {}),
@@ -313,10 +293,13 @@ function getLinkFailureMessage(reason: RuntimeAddTaskDependencyResult["reason"])
 		return "These tasks are already linked.";
 	}
 	if (reason === "trash_task") {
-		return "Links cannot include done tasks.";
+		return "Links cannot include archived tasks.";
 	}
 	if (reason === "non_backlog") {
 		return "Links require at least one backlog task.";
+	}
+	if (reason === "task_admitted") {
+		return "A dependency cannot be added after a task execution has been admitted.";
 	}
 	return "One or both tasks could not be found.";
 }
@@ -381,13 +364,9 @@ async function stopTaskRuntimeSession(
 async function deleteTaskWorkspace(
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>,
 	taskId: string,
-	expectedExecutionAttemptId?: string | null,
 ): Promise<{ removed: boolean; error?: string }> {
 	try {
-		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({
-			taskId,
-			...(expectedExecutionAttemptId !== undefined ? { expectedExecutionAttemptId } : {}),
-		});
+		const deleted = await runtimeClient.workspace.deleteWorktree.mutate({ taskId });
 		return {
 			removed: deleted.removed,
 			error: deleted.ok ? undefined : deleted.error,
@@ -407,8 +386,6 @@ async function createTask(input: {
 	projectPath?: string;
 	baseRef?: string;
 	startInPlanMode?: boolean;
-	autoReviewEnabled?: boolean;
-	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
 	origin?: RuntimeTaskOrigin;
 }): Promise<JsonRecord> {
@@ -427,8 +404,6 @@ async function createTask(input: {
 				title: input.title,
 				prompt: input.prompt,
 				startInPlanMode: input.startInPlanMode,
-				autoReviewEnabled: input.autoReviewEnabled,
-				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
 				origin: input.origin,
 				baseRef: resolvedBaseRef,
@@ -451,8 +426,6 @@ async function createTask(input: {
 			prompt: created.prompt,
 			baseRef: created.baseRef,
 			startInPlanMode: created.startInPlanMode,
-			autoReviewEnabled: created.autoReviewEnabled === true,
-			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
 			...(created.origin ? { origin: created.origin } : {}),
 			generation: resolveTaskGeneration(created.generation),
@@ -468,8 +441,6 @@ async function updateTaskCommand(input: {
 	prompt?: string;
 	baseRef?: string;
 	startInPlanMode?: boolean;
-	autoReviewEnabled?: boolean;
-	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId | null;
 }): Promise<JsonRecord> {
 	if (
@@ -477,8 +448,6 @@ async function updateTaskCommand(input: {
 		input.prompt === undefined &&
 		input.baseRef === undefined &&
 		input.startInPlanMode === undefined &&
-		input.autoReviewEnabled === undefined &&
-		input.autoReviewMode === undefined &&
 		input.agentId === undefined
 	) {
 		throw new Error("task update requires at least one field to change.");
@@ -497,8 +466,6 @@ async function updateTaskCommand(input: {
 			prompt: input.prompt ?? taskRecord.task.prompt,
 			baseRef: input.baseRef ?? taskRecord.task.baseRef,
 			startInPlanMode: input.startInPlanMode ?? taskRecord.task.startInPlanMode,
-			autoReviewEnabled: input.autoReviewEnabled ?? taskRecord.task.autoReviewEnabled === true,
-			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
 		});
 		if (!updatedTask.updated || !updatedTask.task) {
@@ -660,6 +627,11 @@ async function startTaskDirect(input: {
 				}.`,
 			);
 		}
+		if (runtimeState.board.dependencies.some((dependency) => dependency.fromTaskId === currentRecord.task.id)) {
+			throw new Error(
+				`Task "${currentRecord.task.id}" cannot be started until all of its prerequisites are accepted.`,
+			);
+		}
 		if (currentRecord.task.removedAgentId === "cline") {
 			throw new Error(
 				`Task "${currentRecord.task.id}" still references the removed Cline worker. Assign a supported worker before starting it.`,
@@ -818,7 +790,6 @@ async function transitionExternalTask(input: {
 	const allowedSourceColumns: RuntimeBoardColumnId[] =
 		input.action === "claim" ? ["backlog", "in_progress", "review"] : ["in_progress", "review"];
 
-	let taskTitle: string | undefined;
 	let taskBaseRef = "";
 	const mutation = await mutateWorkspaceState(workspaceRepoPath, (latestState) => {
 		const record = findTaskRecord(latestState, input.taskId);
@@ -830,7 +801,6 @@ async function transitionExternalTask(input: {
 				`Task "${input.taskId}" is in "${record.columnId}" and cannot be ${input.action === "claim" ? "claimed" : "submitted"}.`,
 			);
 		}
-		taskTitle = typeof record.task.title === "string" ? record.task.title.trim() || undefined : undefined;
 		taskBaseRef = record.task.baseRef;
 		if (record.columnId === targetColumnId) {
 			return {
@@ -863,7 +833,7 @@ async function transitionExternalTask(input: {
 		baseRef: taskBaseRef,
 	});
 
-	const result: JsonRecord = {
+	return {
 		ok: true,
 		task: {
 			...mutation.value,
@@ -873,125 +843,20 @@ async function transitionExternalTask(input: {
 		workspacePath: workspaceRepoPath,
 		taskWorkspacePath: taskWorkspace.path,
 	};
-
-	// Review handoff is owned by submit, but it is not atomic with the board write:
-	// the card remains in Review when dispatch fails so a later submit can retry it.
-	if (input.action === "submit") {
-		result.reviewHandoff = {
-			...(await dispatchReviewFixer({
-				taskId: input.taskId,
-				projectPath: workspaceRepoPath,
-				taskWorkspacePath: taskWorkspace.exists ? taskWorkspace.path : undefined,
-				title: taskTitle,
-			})),
-		};
-	}
-
-	return result;
 }
 
 interface TrashTaskExecutionResult {
 	task: JsonRecord;
 	taskId: string;
 	previousColumnId: ListTaskColumn;
-	readyTaskIds: string[];
-	autoStartedTasks: JsonRecord[];
-	worktreeDeleted: boolean;
-	worktreeDeleteError?: string;
 	alreadyInTrash: boolean;
 }
 
 interface TrashTaskMutationValue {
 	task: JsonRecord;
 	previousColumnId: ListTaskColumn;
-	readyTaskIds: string[];
 	executionAttemptId: string | null;
 	alreadyInTrash: boolean;
-}
-
-function normalizeAcceptedRevisionSha(value: string): string {
-	const normalized = value.trim().toLowerCase();
-	if (!/^[0-9a-f]{40,64}$/u.test(normalized)) {
-		throw new Error("Accepted revision must be a full 40-64 character hexadecimal commit ID.");
-	}
-	return normalized;
-}
-
-function normalizeTaskAcceptanceRemoteRef(taskId: string, value: string): string {
-	const normalized = value.trim();
-	const requiredPrefix = `refs/heads/kanban/${taskId}-`;
-	if (
-		!normalized.startsWith(requiredPrefix) ||
-		normalized.includes("..") ||
-		!/^refs\/heads\/kanban\/[A-Za-z0-9._/-]+$/u.test(normalized)
-	) {
-		throw new Error(`Acceptance remote ref must be a task-specific branch under ${requiredPrefix}*.`);
-	}
-	return normalized;
-}
-
-function assertReviewerTaskContext(taskId: string): void {
-	const reviewerTaskId = process.env.KANBAN_REVIEW_TASK_ID?.trim();
-	if (reviewerTaskId !== taskId) {
-		throw new Error(
-			`Task "${taskId}" can only be accepted from its isolated reviewer context (KANBAN_REVIEW_TASK_ID=${taskId}).`,
-		);
-	}
-}
-
-async function resolveOriginRemoteUrl(taskWorkspacePath: string): Promise<string> {
-	const vcs = detectRepositoryKind(taskWorkspacePath);
-	if (vcs === "jj") {
-		const remotes = await runJj(taskWorkspacePath, ["git", "remote", "list"]);
-		if (!remotes.ok) {
-			throw new Error(remotes.stderr || "Could not list jj Git remotes.");
-		}
-		for (const line of remotes.stdout.split("\n")) {
-			const [name, ...urlParts] = line.trim().split(/\s+/u);
-			if (name === "origin" && urlParts.length > 0) {
-				return urlParts.join(" ");
-			}
-		}
-		throw new Error("The task jj workspace has no origin remote.");
-	}
-	if (vcs !== "git") {
-		throw new Error(`No Git or jj repository detected at task workspace ${taskWorkspacePath}.`);
-	}
-	const remote = await runGit(taskWorkspacePath, ["remote", "get-url", "origin"]);
-	if (!remote.ok || !remote.stdout) {
-		throw new Error(remote.stderr || remote.error || "The task Git workspace has no origin remote.");
-	}
-	return remote.stdout;
-}
-
-async function verifyTaskAcceptanceRemoteRevision(input: {
-	taskId: string;
-	taskWorkspacePath: string;
-	acceptedRevisionSha: string;
-	remoteRef: string;
-}): Promise<RuntimeTaskAcceptanceEvidence> {
-	const acceptedRevisionSha = normalizeAcceptedRevisionSha(input.acceptedRevisionSha);
-	const remoteRef = normalizeTaskAcceptanceRemoteRef(input.taskId, input.remoteRef);
-	const remoteUrl = await resolveOriginRemoteUrl(input.taskWorkspacePath);
-	const remoteRevision = await runGit(input.taskWorkspacePath, ["ls-remote", remoteUrl, remoteRef]);
-	if (!remoteRevision.ok) {
-		throw new Error(remoteRevision.stderr || remoteRevision.error || `Could not verify ${remoteRef} on origin.`);
-	}
-	const matchingLine = remoteRevision.stdout
-		.split("\n")
-		.map((line) => line.trim().split(/\s+/u))
-		.find(([sha, ref]) => sha?.toLowerCase() === acceptedRevisionSha && ref === remoteRef);
-	if (!matchingLine) {
-		throw new Error(`Remote ref ${remoteRef} does not resolve to accepted revision ${acceptedRevisionSha}.`);
-	}
-	return {
-		kind: "verified_remote_revision",
-		acceptedRevision: {
-			sha: acceptedRevisionSha,
-			remoteRef,
-		},
-		verifiedAt: Date.now(),
-	};
 }
 
 function columnCanHaveLiveTaskSession(columnId: ListTaskColumn): boolean {
@@ -1004,7 +869,6 @@ async function trashTaskById(input: {
 	projectPath?: string;
 	workspaceRepoPath: string;
 	runtimeClient: ReturnType<typeof createRuntimeTrpcClient>;
-	acceptanceEvidence?: RuntimeTaskAcceptanceEvidence;
 }): Promise<TrashTaskExecutionResult> {
 	const mutation = await mutateWorkspaceState<TrashTaskMutationValue>(input.workspaceRepoPath, (latestState) => {
 		const latestRecord = findTaskRecord(latestState, input.taskId);
@@ -1017,24 +881,15 @@ async function trashTaskById(input: {
 				value: {
 					task: formatTaskRecord(latestState, latestRecord.task, latestRecord.columnId),
 					previousColumnId: latestRecord.columnId,
-					readyTaskIds: [] as string[],
 					executionAttemptId: latestRecord.task.execution?.attemptId ?? null,
 					alreadyInTrash: true,
 				},
 				save: false,
 			};
 		}
-		if (latestRecord.columnId === "review" && !input.acceptanceEvidence) {
-			throw new Error(
-				`Task "${input.taskId}" is in Review and requires reviewer-only acceptance with verified remote revision evidence.`,
-			);
-		}
-
-		const trashed = input.acceptanceEvidence
-			? acceptTaskWithEvidence(latestState.board, input.taskId, input.acceptanceEvidence)
-			: trashTaskAndGetReadyLinkedTaskIds(latestState.board, input.taskId);
+		const trashed = discardTask(latestState.board, input.taskId);
 		if (!trashed.moved || !trashed.task) {
-			throw new Error(`Task "${input.taskId}" could not be moved to done.`);
+			throw new Error(`Task "${input.taskId}" could not be archived.`);
 		}
 
 		const nextState: RuntimeWorkspaceStateResponse = {
@@ -1046,7 +901,6 @@ async function trashTaskById(input: {
 			value: {
 				task: formatTaskRecord(nextState, trashed.task, "trash"),
 				previousColumnId: latestRecord.columnId,
-				readyTaskIds: trashed.readyTaskIds,
 				executionAttemptId: latestRecord.task.execution?.attemptId ?? null,
 				alreadyInTrash: false,
 			},
@@ -1062,9 +916,6 @@ async function trashTaskById(input: {
 			task: mutation.value.task,
 			taskId: input.taskId,
 			previousColumnId: mutation.value.previousColumnId,
-			readyTaskIds: [],
-			autoStartedTasks: [],
-			worktreeDeleted: false,
 			alreadyInTrash: true,
 		};
 	}
@@ -1073,80 +924,11 @@ async function trashTaskById(input: {
 		await stopTaskRuntimeSession(input.runtimeClient, input.taskId, mutation.value.executionAttemptId);
 	}
 
-	const autoStartedTasks: JsonRecord[] = [];
-	for (const readyTaskId of mutation.value.readyTaskIds) {
-		const started = await enqueueTaskStart({
-			cwd: input.cwd,
-			taskId: readyTaskId,
-			projectPath: input.projectPath,
-		});
-		autoStartedTasks.push(started);
-	}
-
-	const deletedWorkspace = await deleteTaskWorkspace(input.runtimeClient, input.taskId, null);
-
 	return {
 		task: mutation.value.task,
 		taskId: input.taskId,
 		previousColumnId: mutation.value.previousColumnId,
-		readyTaskIds: mutation.value.readyTaskIds,
-		autoStartedTasks,
-		worktreeDeleted: deletedWorkspace.removed,
-		worktreeDeleteError: deletedWorkspace.error,
 		alreadyInTrash: false,
-	};
-}
-
-async function acceptTask(input: {
-	cwd: string;
-	taskId: string;
-	projectPath?: string;
-	acceptedRevisionSha: string;
-	remoteRef: string;
-}): Promise<JsonRecord> {
-	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
-	const runtimeClient = createRuntimeTrpcClient(workspaceId);
-	const initialState = await runtimeClient.workspace.getState.query();
-	const record = findTaskRecord(initialState, input.taskId);
-	if (!record) {
-		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
-	}
-	if (record.columnId !== "review") {
-		throw new Error(`Task "${input.taskId}" must be in Review before it can be accepted.`);
-	}
-	assertReviewerTaskContext(input.taskId);
-	const taskWorkspace = await getTaskWorkspacePathInfo({
-		cwd: workspaceRepoPath,
-		taskId: input.taskId,
-		baseRef: record.task.baseRef,
-	});
-	if (!taskWorkspace.exists) {
-		throw new Error(`Task workspace does not exist for task "${input.taskId}".`);
-	}
-	const acceptanceEvidence = await verifyTaskAcceptanceRemoteRevision({
-		taskId: input.taskId,
-		taskWorkspacePath: taskWorkspace.path,
-		acceptedRevisionSha: input.acceptedRevisionSha,
-		remoteRef: input.remoteRef,
-	});
-	const accepted = await trashTaskById({
-		cwd: input.cwd,
-		taskId: input.taskId,
-		projectPath: input.projectPath,
-		workspaceRepoPath,
-		runtimeClient,
-		acceptanceEvidence,
-	});
-	return {
-		ok: true,
-		task: accepted.task,
-		acceptanceEvidence,
-		workspacePath: workspaceRepoPath,
-		readyTaskIds: accepted.readyTaskIds,
-		autoStartedTasks: accepted.autoStartedTasks,
-		worktreeDeleted: accepted.worktreeDeleted,
-		worktreeDeleteError: accepted.worktreeDeleteError,
 	};
 }
 
@@ -1156,7 +938,7 @@ async function trashTask(input: {
 	column?: ListTaskColumn;
 	projectPath?: string;
 }): Promise<JsonRecord> {
-	const target = resolveTaskCommandTarget(input, "task done");
+	const target = resolveTaskCommandTarget(input, "task trash");
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
@@ -1172,21 +954,16 @@ async function trashTask(input: {
 		if (trashed.alreadyInTrash) {
 			return {
 				ok: true,
-				message: `Task "${target.taskId}" is already done.`,
+				message: `Task "${target.taskId}" is already in trash.`,
 				task: trashed.task,
 				workspacePath: workspaceRepoPath,
-				readyTaskIds: [],
-				autoStartedTasks: [],
 			};
 		}
 		return {
 			ok: true,
 			task: trashed.task,
 			workspacePath: workspaceRepoPath,
-			readyTaskIds: trashed.readyTaskIds,
-			autoStartedTasks: trashed.autoStartedTasks,
-			worktreeDeleted: trashed.worktreeDeleted,
-			worktreeDeleteError: trashed.worktreeDeleteError,
+			workspaceRetained: true,
 		};
 	}
 
@@ -1199,9 +976,6 @@ async function trashTask(input: {
 			workspacePath: workspaceRepoPath,
 			trashedTasks: [],
 			alreadyTrashedTasks: [],
-			readyTaskIds: [],
-			autoStartedTasks: [],
-			worktreeCleanup: [],
 			count: 0,
 		};
 	}
@@ -1228,13 +1002,7 @@ async function trashTask(input: {
 		workspacePath: workspaceRepoPath,
 		trashedTasks: trashedTasks.map((result) => result.task),
 		alreadyTrashedTasks: alreadyTrashedTasks.map((result) => result.task),
-		readyTaskIds: [...new Set(trashedTasks.flatMap((result) => result.readyTaskIds))],
-		autoStartedTasks: trashedTasks.flatMap((result) => result.autoStartedTasks),
-		worktreeCleanup: trashedTasks.map((result) => ({
-			taskId: result.taskId,
-			removed: result.worktreeDeleted,
-			error: result.worktreeDeleteError,
-		})),
+		workspacesRetained: trashedTasks.map((result) => result.taskId),
 		count: trashedTasks.length,
 	};
 }
@@ -1277,6 +1045,13 @@ async function deleteTaskCommand(input: {
 			latestState.board,
 			latestTargetRecords.map(({ task }) => task.id),
 		);
+		if (deleted.blockedTaskIds.length > 0) {
+			throw new Error(
+				`Cannot permanently delete linked task${deleted.blockedTaskIds.length === 1 ? "" : "s"} ${deleted.blockedTaskIds
+					.map((taskId) => `"${taskId}"`)
+					.join(", ")}. Remove the dependency explicitly or delete the complete linked task set.`,
+			);
+		}
 		if (!deleted.deleted) {
 			return {
 				board: latestState.board,
@@ -1379,11 +1154,7 @@ export function registerTaskCommand(program: Command): void {
 		.command("list")
 		.description("List Kanban tasks for a workspace.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.option(
-			"--column <column>",
-			"Filter column: backlog | in_progress | review | done. trash is also accepted.",
-			parseListColumn,
-		)
+		.option("--column <column>", "Filter column: backlog | in_progress | review | trash.", parseListColumn)
 		.action(async (options: { projectPath?: string; column?: ListTaskColumn }) => {
 			await runTaskCommand(
 				async () =>
@@ -1403,8 +1174,6 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Task base branch/ref.")
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
-		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
-		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")} | default.`)
 		.option("--origin-amp-thread-id <thread-id>", "Amp Architect provenance supplied by the Amp plugin.")
 		.action(
@@ -1414,8 +1183,6 @@ export function registerTaskCommand(program: Command): void {
 				projectPath?: string;
 				baseRef?: string;
 				startInPlanMode?: unknown;
-				autoReviewEnabled?: unknown;
-				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
 				originAmpThreadId?: string;
 			}) => {
@@ -1428,8 +1195,6 @@ export function registerTaskCommand(program: Command): void {
 							projectPath: options.projectPath,
 							baseRef: options.baseRef,
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
-							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
-							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId) ?? undefined,
 							origin: parseAmpArchitectOrigin(options.originAmpThreadId),
 						}),
@@ -1446,8 +1211,6 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Replacement base branch/ref.")
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
-		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
-		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")}. Use "default" to clear.`)
 		.action(
 			async (options: {
@@ -1457,8 +1220,6 @@ export function registerTaskCommand(program: Command): void {
 				projectPath?: string;
 				baseRef?: string;
 				startInPlanMode?: unknown;
-				autoReviewEnabled?: unknown;
-				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
 			}) => {
 				await runTaskCommand(
@@ -1471,8 +1232,6 @@ export function registerTaskCommand(program: Command): void {
 							prompt: options.prompt,
 							baseRef: options.baseRef,
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
-							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
-							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId),
 						}),
 				);
@@ -1480,37 +1239,10 @@ export function registerTaskCommand(program: Command): void {
 		);
 
 	task
-		.command("accept")
-		.description("Accept a Review task after verifying its exact task-specific remote revision.")
-		.requiredOption("--task-id <id>", "Task ID.")
-		.requiredOption("--accepted-revision <sha>", "Full accepted commit ID.")
-		.requiredOption("--remote-ref <ref>", "Task-specific remote ref under refs/heads/kanban/<task-id>-*.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(
-			async (options: { taskId: string; acceptedRevision: string; remoteRef: string; projectPath?: string }) => {
-				await runTaskCommand(
-					async () =>
-						await acceptTask({
-							cwd: process.cwd(),
-							taskId: options.taskId,
-							projectPath: options.projectPath,
-							acceptedRevisionSha: options.acceptedRevision,
-							remoteRef: options.remoteRef,
-						}),
-				);
-			},
-		);
-
-	task
 		.command("trash")
-		.alias("done")
-		.description("Move a task or an entire column to done and clean up task workspaces.")
+		.description("Discard a task or an entire column without satisfying dependencies or deleting workspaces.")
 		.option("--task-id <id>", "Task ID.")
-		.option(
-			"--column <column>",
-			"Column to move to done: backlog | in_progress | review | done. trash is also accepted.",
-			parseListColumn,
-		)
+		.option("--column <column>", "Column to discard: backlog | in_progress | review | trash.", parseListColumn)
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.action(async (options: { taskId?: string; column?: ListTaskColumn; projectPath?: string }) => {
 			await runTaskCommand(
@@ -1528,11 +1260,7 @@ export function registerTaskCommand(program: Command): void {
 		.command("delete")
 		.description("Permanently delete a task or every task in a column.")
 		.option("--task-id <id>", "Task ID to permanently delete.")
-		.option(
-			"--column <column>",
-			"Column to bulk-delete: backlog | in_progress | review | done. trash is also accepted.",
-			parseListColumn,
-		)
+		.option("--column <column>", "Column to bulk-delete: backlog | in_progress | review | trash.", parseListColumn)
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.action(async (options: { taskId?: string; column?: ListTaskColumn; projectPath?: string }) => {
 			await runTaskCommand(
@@ -1563,7 +1291,7 @@ export function registerTaskCommand(program: Command): void {
 				"  Once only one linked task remains in backlog, Kanban reorients the saved link",
 				"  so the backlog task is the waiting dependent task and the other task is the",
 				"  prerequisite.",
-				"  When the prerequisite finishes review and moves to done, the waiting backlog",
+				"  When the prerequisite is explicitly accepted, the waiting backlog",
 				"  task becomes ready to start.",
 				"",
 			].join("\n"),

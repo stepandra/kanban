@@ -82,7 +82,7 @@ async function getAvailablePort(): Promise<number> {
 	return port;
 }
 
-async function waitForServerStart(process: ChildProcess, timeoutMs = 10_000): Promise<void> {
+async function waitForServerStart(process: ChildProcess, timeoutMs = 30_000): Promise<void> {
 	await new Promise<void>((resolveStart, rejectStart) => {
 		if (!process.stdout || !process.stderr) {
 			rejectStart(new Error("Expected child process stdout/stderr pipes to be available."));
@@ -234,7 +234,7 @@ async function runCliCommandAndCollectOutput(options: {
 		stderr += chunk.toString();
 	});
 
-	const didExit = await waitForExit(process, options.timeoutMs ?? 8_000);
+	const didExit = await waitForExit(process, options.timeoutMs ?? 15_000);
 	if (!didExit) {
 		process.kill("SIGKILL");
 	}
@@ -308,7 +308,7 @@ describe("source task commands", () => {
 					stderr += chunk.toString();
 				});
 
-				const didExit = await waitForExit(commandProcess, 8_000);
+				const didExit = await waitForExit(commandProcess, 15_000);
 				if (!didExit) {
 					commandProcess.kill("SIGKILL");
 				}
@@ -404,289 +404,213 @@ describe("source task commands", () => {
 		}
 	});
 
-	it("supports claim, submit, verified accept, and trash lifecycle commands", { timeout: 90_000 }, async () => {
-		const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-done-delete-");
-		const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-done-delete-");
-
-		try {
-			initGitRepository(projectPath);
-			writeFileSync(join(projectPath, "README.md"), "# Task Done Delete Test\n", "utf8");
-			commitAll(projectPath, "init");
-			const remotePath = join(homeDir, "acceptance-remote.git");
-			mkdirSync(remotePath, { recursive: true });
-			runGit(remotePath, ["init", "--bare"]);
-			runGit(projectPath, ["remote", "add", "origin", remotePath]);
-			runGit(projectPath, ["push", "-u", "origin", "main"]);
-
-			const port = String(await getAvailablePort());
-			// Stub the headless Fixer agent so `task submit` exercises the native
-			// review handoff without launching a real Amp run.
-			const fixerStubBinDir = join(homeDir, "fixer-stub-bin");
-			mkdirSync(fixerStubBinDir, { recursive: true });
-			const fixerStubPath = join(fixerStubBinDir, "amp");
-			writeFileSync(fixerStubPath, "#!/bin/sh\nexit 0\n", "utf8");
-			chmodSync(fixerStubPath, 0o755);
-			const env = createGitTestEnv({
-				HOME: homeDir,
-				USERPROFILE: homeDir,
-				KANBAN_RUNTIME_PORT: port,
-				KANBAN_REVIEW_FIXER_AMP_BIN: fixerStubPath,
-			});
-
-			const serverProcess = spawn(
-				process.execPath,
-				[
-					"--require",
-					resolveShutdownIpcHookPath(),
-					"--import",
-					resolveTsxLoaderImportSpecifier(),
-					resolve(process.cwd(), "src/cli.ts"),
-					"--no-open",
-				],
-				{
-					cwd: projectPath,
-					env,
-					stdio: ["ignore", "pipe", "pipe", "ipc"],
-				},
-			);
+	it(
+		"supports claim, submit, explicit trash deletion, and rejects removed completion commands",
+		{ timeout: 90_000 },
+		async () => {
+			const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-done-delete-");
+			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-task-done-delete-");
 
 			try {
-				await waitForServerStart(serverProcess, 30_000);
+				initGitRepository(projectPath);
+				writeFileSync(join(projectPath, "README.md"), "# Task Done Delete Test\n", "utf8");
+				commitAll(projectPath, "init");
 
-				const taskIds: string[] = [];
-				for (const prompt of [
-					"Create a temporary task for done and delete",
-					"Create another temporary task for done and delete",
-					"Create a legacy trash command task for done and delete",
-				]) {
-					const created = await runCliCommandAndCollectOutput({
-						args: ["task", "create", "--prompt", prompt, "--project-path", projectPath],
+				const port = String(await getAvailablePort());
+				const env = createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: port,
+				});
+
+				const serverProcess = spawn(
+					process.execPath,
+					[
+						"--require",
+						resolveShutdownIpcHookPath(),
+						"--import",
+						resolveTsxLoaderImportSpecifier(),
+						resolve(process.cwd(), "src/cli.ts"),
+						"--no-open",
+					],
+					{
+						cwd: projectPath,
+						env,
+						stdio: ["ignore", "pipe", "pipe", "ipc"],
+					},
+				);
+
+				try {
+					await waitForServerStart(serverProcess, 30_000);
+
+					const taskIds: string[] = [];
+					for (const prompt of [
+						"Create a temporary task for done and delete",
+						"Create another temporary task for done and delete",
+						"Create a legacy trash command task for done and delete",
+					]) {
+						const created = await runCliCommandAndCollectOutput({
+							args: ["task", "create", "--prompt", prompt, "--project-path", projectPath],
+							cwd: projectPath,
+							env,
+						});
+						expect(
+							created.didExit,
+							`task create did not exit in time.\nstdout:\n${created.stdout}\nstderr:\n${created.stderr}`,
+						).toBe(true);
+						expect(created.exitCode).toBe(0);
+
+						const createdPayload = JSON.parse(created.stdout) as {
+							ok?: boolean;
+							task?: { id?: string };
+						};
+						expect(createdPayload.ok).toBe(true);
+						expect(typeof createdPayload.task?.id).toBe("string");
+						if (createdPayload.task?.id) {
+							taskIds.push(createdPayload.task.id);
+						}
+					}
+					expect(taskIds).toHaveLength(3);
+
+					const prepared = await runCliCommandAndCollectOutput({
+						args: ["task", "prepare", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(prepared.didExit).toBe(true);
+					expect(prepared.exitCode).toBe(0);
+					const preparedPayload = JSON.parse(prepared.stdout) as {
+						ok?: boolean;
+						task?: { column?: string; projectPath?: string; taskWorkspacePath?: string };
+					};
+					expect(preparedPayload.ok).toBe(true);
+					expect(preparedPayload.task?.column).toBe("in_progress");
+					expect(preparedPayload.task?.projectPath).toBe(realpathSync(projectPath));
+					expect(preparedPayload.task?.taskWorkspacePath).toBeTruthy();
+					expect(existsSync(preparedPayload.task?.taskWorkspacePath ?? "")).toBe(true);
+					const taskWorkspacePath = preparedPayload.task?.taskWorkspacePath;
+					if (!taskWorkspacePath) {
+						throw new Error("Expected prepared task workspace path.");
+					}
+
+					const listedPrepared = await runCliCommandAndCollectOutput({
+						args: ["task", "list", "--column", "in_progress", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(listedPrepared.didExit).toBe(true);
+					expect(listedPrepared.exitCode).toBe(0);
+					const listedPreparedPayload = JSON.parse(listedPrepared.stdout) as {
+						tasks?: Array<{ id?: string; taskWorkspacePath?: string; taskWorkspaceExists?: boolean }>;
+					};
+					const listedPreparedTask = listedPreparedPayload.tasks?.find((task) => task.id === taskIds[0]);
+					expect(listedPreparedTask?.taskWorkspacePath).toBe(preparedPayload.task?.taskWorkspacePath);
+					expect(listedPreparedTask?.taskWorkspaceExists).toBe(true);
+
+					const claimed = await runCliCommandAndCollectOutput({
+						args: ["task", "claim", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(claimed.didExit).toBe(true);
+					expect(claimed.exitCode).toBe(0);
+					expect(claimed.stdout).toContain('"column": "in_progress"');
+
+					const submitted = await runCliCommandAndCollectOutput({
+						args: ["task", "submit", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(submitted.didExit).toBe(true);
+					expect(submitted.exitCode).toBe(0);
+					expect(submitted.stdout).toContain('"column": "review"');
+
+					const movedByDoneAlias = await runCliCommandAndCollectOutput({
+						args: ["task", "done", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
 						cwd: projectPath,
 						env,
 					});
 					expect(
-						created.didExit,
-						`task create did not exit in time.\nstdout:\n${created.stdout}\nstderr:\n${created.stderr}`,
+						movedByDoneAlias.didExit,
+						`task done did not exit in time.\nstdout:\n${movedByDoneAlias.stdout}\nstderr:\n${movedByDoneAlias.stderr}`,
 					).toBe(true);
-					expect(created.exitCode).toBe(0);
+					expect(movedByDoneAlias.exitCode).toBe(1);
+					expect(`${movedByDoneAlias.stdout}\n${movedByDoneAlias.stderr}`).toContain("unknown command 'done'");
 
-					const createdPayload = JSON.parse(created.stdout) as {
-						ok?: boolean;
-						task?: { id?: string };
-					};
-					expect(createdPayload.ok).toBe(true);
-					expect(typeof createdPayload.task?.id).toBe("string");
-					if (createdPayload.task?.id) {
-						taskIds.push(createdPayload.task.id);
+					const accepted = await runCliCommandAndCollectOutput({
+						args: ["task", "accept", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(accepted.didExit).toBe(true);
+					expect(accepted.exitCode).toBe(1);
+					expect(`${accepted.stdout}\n${accepted.stderr}`).toContain("unknown command 'accept'");
+					expect(existsSync(taskWorkspacePath)).toBe(true);
+
+					const movedByTrashCommand = await runCliCommandAndCollectOutput({
+						args: ["task", "trash", "--column", "backlog", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(
+						movedByTrashCommand.didExit,
+						`task trash did not exit in time.\nstdout:\n${movedByTrashCommand.stdout}\nstderr:\n${movedByTrashCommand.stderr}`,
+					).toBe(true);
+					expect(movedByTrashCommand.exitCode).toBe(0);
+					expect(movedByTrashCommand.stdout).toContain('"ok": true');
+					expect(movedByTrashCommand.stdout).toContain('"column": "backlog"');
+					expect(movedByTrashCommand.stdout).toContain('"count": 2');
+
+					const listedTrashBeforeDelete = await runCliCommandAndCollectOutput({
+						args: ["task", "list", "--column", "trash", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(
+						listedTrashBeforeDelete.didExit,
+						`task list --column trash did not exit in time.\nstdout:\n${listedTrashBeforeDelete.stdout}\nstderr:\n${listedTrashBeforeDelete.stderr}`,
+					).toBe(true);
+					expect(listedTrashBeforeDelete.exitCode).toBe(0);
+					expect(listedTrashBeforeDelete.stdout).toContain('"count": 2');
+
+					const deletedTrash = await runCliCommandAndCollectOutput({
+						args: ["task", "delete", "--column", "trash", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(
+						deletedTrash.didExit,
+						`task delete --column trash did not exit in time.\nstdout:\n${deletedTrash.stdout}\nstderr:\n${deletedTrash.stderr}`,
+					).toBe(true);
+					expect(deletedTrash.exitCode).toBe(0);
+					expect(deletedTrash.stdout).toContain('"ok": true');
+					expect(deletedTrash.stdout).toContain('"column": "trash"');
+					expect(deletedTrash.stdout).toContain('"count": 2');
+					expect(existsSync(taskWorkspacePath)).toBe(true);
+
+					const listedTrash = await runCliCommandAndCollectOutput({
+						args: ["task", "list", "--column", "trash", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+					});
+					expect(
+						listedTrash.didExit,
+						`task list --column trash did not exit in time.\nstdout:\n${listedTrash.stdout}\nstderr:\n${listedTrash.stderr}`,
+					).toBe(true);
+					expect(listedTrash.exitCode).toBe(0);
+					expect(listedTrash.stdout).toContain('"count": 0');
+				} finally {
+					await requestGracefulShutdown(serverProcess);
+					const stopped = await waitForExit(serverProcess, 5_000);
+					if (!stopped) {
+						serverProcess.kill("SIGKILL");
+						await waitForExit(serverProcess, 5_000);
 					}
 				}
-				expect(taskIds).toHaveLength(3);
-
-				const prepared = await runCliCommandAndCollectOutput({
-					args: ["task", "prepare", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(prepared.didExit).toBe(true);
-				expect(prepared.exitCode).toBe(0);
-				const preparedPayload = JSON.parse(prepared.stdout) as {
-					ok?: boolean;
-					task?: { column?: string; projectPath?: string; taskWorkspacePath?: string };
-				};
-				expect(preparedPayload.ok).toBe(true);
-				expect(preparedPayload.task?.column).toBe("in_progress");
-				expect(preparedPayload.task?.projectPath).toBe(realpathSync(projectPath));
-				expect(preparedPayload.task?.taskWorkspacePath).toBeTruthy();
-				expect(existsSync(preparedPayload.task?.taskWorkspacePath ?? "")).toBe(true);
-				const taskWorkspacePath = preparedPayload.task?.taskWorkspacePath;
-				if (!taskWorkspacePath) {
-					throw new Error("Expected prepared task workspace path.");
-				}
-
-				const listedPrepared = await runCliCommandAndCollectOutput({
-					args: ["task", "list", "--column", "in_progress", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(listedPrepared.didExit).toBe(true);
-				expect(listedPrepared.exitCode).toBe(0);
-				const listedPreparedPayload = JSON.parse(listedPrepared.stdout) as {
-					tasks?: Array<{ id?: string; taskWorkspacePath?: string; taskWorkspaceExists?: boolean }>;
-				};
-				const listedPreparedTask = listedPreparedPayload.tasks?.find((task) => task.id === taskIds[0]);
-				expect(listedPreparedTask?.taskWorkspacePath).toBe(preparedPayload.task?.taskWorkspacePath);
-				expect(listedPreparedTask?.taskWorkspaceExists).toBe(true);
-
-				const claimed = await runCliCommandAndCollectOutput({
-					args: ["task", "claim", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(claimed.didExit).toBe(true);
-				expect(claimed.exitCode).toBe(0);
-				expect(claimed.stdout).toContain('"column": "in_progress"');
-
-				const submitted = await runCliCommandAndCollectOutput({
-					args: ["task", "submit", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(submitted.didExit).toBe(true);
-				expect(submitted.exitCode).toBe(0);
-				expect(submitted.stdout).toContain('"column": "review"');
-				const submittedPayload = JSON.parse(submitted.stdout) as {
-					reviewHandoff?: { ok?: boolean; action?: string; state?: string; label?: string };
-				};
-				expect(submittedPayload.reviewHandoff?.ok).toBe(true);
-				expect(submittedPayload.reviewHandoff?.action).toBe("review_handoff");
-				expect(submittedPayload.reviewHandoff?.label).toBe(`ar-fixer-${taskIds[0] ?? ""}`);
-				expect(["running", "queued"]).toContain(submittedPayload.reviewHandoff?.state);
-
-				const movedByDoneAlias = await runCliCommandAndCollectOutput({
-					args: ["task", "done", "--task-id", taskIds[0] ?? "", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(
-					movedByDoneAlias.didExit,
-					`task done did not exit in time.\nstdout:\n${movedByDoneAlias.stdout}\nstderr:\n${movedByDoneAlias.stderr}`,
-				).toBe(true);
-				expect(movedByDoneAlias.exitCode).toBe(1);
-				expect(`${movedByDoneAlias.stdout}\n${movedByDoneAlias.stderr}`).toContain(
-					"requires reviewer-only acceptance",
-				);
-
-				const acceptedRevision = runGit(taskWorkspacePath, ["rev-parse", "HEAD"]);
-				const acceptedRemoteRef = `refs/heads/kanban/${taskIds[0] ?? ""}-review`;
-				runGit(taskWorkspacePath, ["push", "origin", `${acceptedRevision}:${acceptedRemoteRef}`]);
-				const rejectedOutsideReviewer = await runCliCommandAndCollectOutput({
-					args: [
-						"task",
-						"accept",
-						"--task-id",
-						taskIds[0] ?? "",
-						"--accepted-revision",
-						acceptedRevision,
-						"--remote-ref",
-						acceptedRemoteRef,
-						"--project-path",
-						projectPath,
-					],
-					cwd: projectPath,
-					env,
-				});
-				expect(rejectedOutsideReviewer.didExit).toBe(true);
-				expect(rejectedOutsideReviewer.exitCode).toBe(1);
-				expect(`${rejectedOutsideReviewer.stdout}\n${rejectedOutsideReviewer.stderr}`).toContain(
-					"isolated reviewer context",
-				);
-				const accepted = await runCliCommandAndCollectOutput({
-					args: [
-						"task",
-						"accept",
-						"--task-id",
-						taskIds[0] ?? "",
-						"--accepted-revision",
-						acceptedRevision,
-						"--remote-ref",
-						acceptedRemoteRef,
-						"--project-path",
-						projectPath,
-					],
-					cwd: projectPath,
-					env: {
-						...env,
-						KANBAN_REVIEW_TASK_ID: taskIds[0] ?? "",
-					},
-				});
-				expect(accepted.didExit).toBe(true);
-				expect(accepted.exitCode).toBe(0);
-				const acceptedPayload = JSON.parse(accepted.stdout) as {
-					ok?: boolean;
-					acceptanceEvidence?: {
-						acceptedRevision?: { sha?: string; remoteRef?: string };
-					};
-				};
-				expect(acceptedPayload.ok).toBe(true);
-				expect(acceptedPayload.acceptanceEvidence?.acceptedRevision).toEqual({
-					sha: acceptedRevision,
-					remoteRef: acceptedRemoteRef,
-				});
-
-				const movedByTrashCommand = await runCliCommandAndCollectOutput({
-					args: ["task", "trash", "--column", "backlog", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(
-					movedByTrashCommand.didExit,
-					`task trash did not exit in time.\nstdout:\n${movedByTrashCommand.stdout}\nstderr:\n${movedByTrashCommand.stderr}`,
-				).toBe(true);
-				expect(movedByTrashCommand.exitCode).toBe(0);
-				expect(movedByTrashCommand.stdout).toContain('"ok": true');
-				expect(movedByTrashCommand.stdout).toContain('"column": "backlog"');
-				expect(movedByTrashCommand.stdout).toContain('"count": 2');
-
-				const listedDoneBeforeDelete = await runCliCommandAndCollectOutput({
-					args: ["task", "list", "--column", "done", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(
-					listedDoneBeforeDelete.didExit,
-					`task list --column done did not exit in time.\nstdout:\n${listedDoneBeforeDelete.stdout}\nstderr:\n${listedDoneBeforeDelete.stderr}`,
-				).toBe(true);
-				expect(listedDoneBeforeDelete.exitCode).toBe(0);
-				expect(listedDoneBeforeDelete.stdout).toContain('"count": 3');
-
-				const listedTrashBeforeDelete = await runCliCommandAndCollectOutput({
-					args: ["task", "list", "--column", "trash", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(
-					listedTrashBeforeDelete.didExit,
-					`task list --column trash did not exit in time.\nstdout:\n${listedTrashBeforeDelete.stdout}\nstderr:\n${listedTrashBeforeDelete.stderr}`,
-				).toBe(true);
-				expect(listedTrashBeforeDelete.exitCode).toBe(0);
-				expect(listedTrashBeforeDelete.stdout).toContain('"count": 3');
-
-				const deletedDone = await runCliCommandAndCollectOutput({
-					args: ["task", "delete", "--column", "done", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(
-					deletedDone.didExit,
-					`task delete --column done did not exit in time.\nstdout:\n${deletedDone.stdout}\nstderr:\n${deletedDone.stderr}`,
-				).toBe(true);
-				expect(deletedDone.exitCode).toBe(0);
-				expect(deletedDone.stdout).toContain('"ok": true');
-				expect(deletedDone.stdout).toContain('"column": "trash"');
-				expect(deletedDone.stdout).toContain('"count": 3');
-
-				const listedTrash = await runCliCommandAndCollectOutput({
-					args: ["task", "list", "--column", "trash", "--project-path", projectPath],
-					cwd: projectPath,
-					env,
-				});
-				expect(
-					listedTrash.didExit,
-					`task list --column trash did not exit in time.\nstdout:\n${listedTrash.stdout}\nstderr:\n${listedTrash.stderr}`,
-				).toBe(true);
-				expect(listedTrash.exitCode).toBe(0);
-				expect(listedTrash.stdout).toContain('"count": 0');
 			} finally {
-				await requestGracefulShutdown(serverProcess);
-				const stopped = await waitForExit(serverProcess, 5_000);
-				if (!stopped) {
-					serverProcess.kill("SIGKILL");
-					await waitForExit(serverProcess, 5_000);
-				}
+				cleanupProject();
+				cleanupHome();
 			}
-		} finally {
-			cleanupProject();
-			cleanupHome();
-		}
-	});
+		},
+	);
 });

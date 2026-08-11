@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { CardDetailView } from "@/components/card-detail-view";
-import { ClearTrashDialog } from "@/components/clear-trash-dialog";
 import { DebugDialog } from "@/components/debug-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
@@ -82,7 +81,6 @@ export default function App(): ReactElement {
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 	const [isWorkerCommandLogOpen, setIsWorkerCommandLogOpen] = useState(false);
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
-	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	const [isTracksOpen, setIsTracksOpen] = useState(false);
 	const [pendingJjTaskId, setPendingJjTaskId] = useState<string | null>(null);
@@ -184,7 +182,6 @@ export default function App(): ReactElement {
 		startTaskSession,
 		stopTaskSession,
 		sendTaskSessionInput,
-		cleanupTaskWorkspace,
 		fetchTaskWorkspaceInfo,
 	} = useTaskSessions({
 		currentProjectId,
@@ -281,10 +278,6 @@ export default function App(): ReactElement {
 		setNewTaskImages,
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
-		newTaskAutoReviewEnabled,
-		setNewTaskAutoReviewEnabled,
-		newTaskAutoReviewMode,
-		setNewTaskAutoReviewMode,
 		isNewTaskStartInPlanModeDisabled,
 		newTaskBranchRef,
 		setNewTaskBranchRef,
@@ -297,10 +290,6 @@ export default function App(): ReactElement {
 		setEditTaskImages,
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
-		editTaskAutoReviewEnabled,
-		setEditTaskAutoReviewEnabled,
-		editTaskAutoReviewMode,
-		setEditTaskAutoReviewMode,
 		isEditTaskStartInPlanModeDisabled,
 		editTaskBranchRef,
 		setEditTaskBranchRef,
@@ -353,11 +342,6 @@ export default function App(): ReactElement {
 
 	const {
 		runningGitAction,
-		taskGitActionLoadingByTaskId,
-		commitTaskLoadingById,
-		openPrTaskLoadingById,
-		agentCommitTaskLoadingById,
-		agentOpenPrTaskLoadingById,
 		isDiscardingHomeWorkingChanges,
 		gitActionError,
 		gitActionErrorTitle,
@@ -366,20 +350,10 @@ export default function App(): ReactElement {
 		runGitAction,
 		switchHomeBranch,
 		discardHomeWorkingChanges,
-		handleCommitTask,
-		handleOpenPrTask,
-		handleAgentCommitTask,
-		handleAgentOpenPrTask,
-		runAutoReviewGitAction,
 		resetGitActionState,
 	} = useGitActions({
 		currentProjectId,
-		workspaceVcs,
-		board,
 		selectedCard,
-		runtimeProjectConfig,
-		sendTaskSessionInput,
-		fetchTaskWorkspaceInfo,
 		isGitHistoryOpen: gitFeaturesEnabled && isGitHistoryOpen,
 		refreshWorkspaceState,
 	});
@@ -495,7 +469,6 @@ export default function App(): ReactElement {
 
 	useEffect(() => {
 		resetTaskEditorState();
-		setIsClearTrashDialogOpen(false);
 		resetGitActionState();
 		resetProjectNavigationState();
 		resetTerminalPanelsState();
@@ -581,33 +554,23 @@ export default function App(): ReactElement {
 		handleMoveReviewCardToTrash,
 		handleMoveTasksToColumn,
 		handleRestoreTaskFromTrash,
-		handleCancelAutomaticTaskAction,
-		handleOpenClearTrash,
-		handleConfirmClearTrash,
 		handleAddReviewComments,
 		handleSendReviewComments,
 		moveToTrashLoadingById,
-		trashTaskCount,
 	} = useBoardInteractions({
 		board,
 		setBoard,
-		sessions,
-		setSessions,
 		selectedCard,
 		selectedTaskId,
 		currentProjectId,
 		setSelectedTaskId,
-		setIsClearTrashDialogOpen,
 		setIsGitHistoryOpen,
 		stopTaskSession,
-		cleanupTaskWorkspace,
 		ensureTaskWorkspace,
 		startTaskSession,
 		fetchTaskWorkspaceInfo,
 		sendTaskSessionInput,
 		readyForReviewNotificationsEnabled,
-		taskGitActionLoadingByTaskId,
-		runAutoReviewGitAction,
 	});
 
 	const {
@@ -743,10 +706,6 @@ export default function App(): ReactElement {
 			startInPlanMode={editTaskStartInPlanMode}
 			onStartInPlanModeChange={setEditTaskStartInPlanMode}
 			startInPlanModeDisabled={isEditTaskStartInPlanModeDisabled}
-			autoReviewEnabled={editTaskAutoReviewEnabled}
-			onAutoReviewEnabledChange={setEditTaskAutoReviewEnabled}
-			autoReviewMode={editTaskAutoReviewMode}
-			onAutoReviewModeChange={setEditTaskAutoReviewMode}
 			workspaceId={currentProjectId}
 			branchRef={editTaskBranchRef}
 			branchOptions={createTaskBranchOptions}
@@ -922,16 +881,10 @@ export default function App(): ReactElement {
 												onCreateTask={handleOpenCreateTask}
 												onStartTask={handleStartTaskFromBoard}
 												onStartAllTasks={handleStartAllBacklogTasksFromBoard}
-												onClearTrash={handleOpenClearTrash}
 												editingTaskId={editingTaskId}
 												inlineTaskEditor={inlineTaskEditor}
 												onEditTask={handleOpenEditTask}
 												onSaveTaskTitle={handleSaveTaskTitle}
-												onCommitTask={handleCommitTask}
-												onOpenPrTask={handleOpenPrTask}
-												onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
-												commitTaskLoadingById={commitTaskLoadingById}
-												openPrTaskLoadingById={openPrTaskLoadingById}
 												moveToTrashLoadingById={moveToTrashLoadingById}
 												onMoveToTrashTask={handleMoveReviewCardToTrash}
 												onRestoreFromTrashTask={handleRestoreTaskFromTrash}
@@ -997,8 +950,6 @@ export default function App(): ReactElement {
 									currentProjectId={currentProjectId}
 									workspacePath={workspacePath}
 									gitFeaturesEnabled={gitFeaturesEnabled}
-									selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-									runtimeConfig={runtimeProjectConfig ?? null}
 									sessionSummary={detailSession}
 									executionProjection={executionProjections[selectedCard.card.id] ?? null}
 									dependencies={board.dependencies}
@@ -1009,25 +960,15 @@ export default function App(): ReactElement {
 									onCreateTask={handleOpenCreateTask}
 									onStartTask={handleStartTaskFromBoard}
 									onStartAllTasks={handleStartAllBacklogTasksFromBoard}
-									onClearTrash={handleOpenClearTrash}
 									editingTaskId={editingTaskId}
 									inlineTaskEditor={inlineTaskEditor}
 									onEditTask={(task) => {
 										handleOpenEditTask(task, { preserveDetailSelection: true });
 									}}
 									onSaveTaskTitle={handleSaveTaskTitle}
-									onCommitTask={handleCommitTask}
-									onOpenPrTask={handleOpenPrTask}
-									onAgentCommitTask={handleAgentCommitTask}
-									onAgentOpenPrTask={handleAgentOpenPrTask}
-									commitTaskLoadingById={commitTaskLoadingById}
-									openPrTaskLoadingById={openPrTaskLoadingById}
-									agentCommitTaskLoadingById={agentCommitTaskLoadingById}
-									agentOpenPrTaskLoadingById={agentOpenPrTaskLoadingById}
 									moveToTrashLoadingById={moveToTrashLoadingById}
 									onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
 									onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
-									onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
 									onAddReviewComments={(taskId: string, text: string) => {
 										void handleAddReviewComments(taskId, text);
 									}}
@@ -1107,10 +1048,6 @@ export default function App(): ReactElement {
 					startInPlanMode={newTaskStartInPlanMode}
 					onStartInPlanModeChange={setNewTaskStartInPlanMode}
 					startInPlanModeDisabled={isNewTaskStartInPlanModeDisabled}
-					autoReviewEnabled={newTaskAutoReviewEnabled}
-					onAutoReviewEnabledChange={setNewTaskAutoReviewEnabled}
-					autoReviewMode={newTaskAutoReviewMode}
-					onAutoReviewModeChange={setNewTaskAutoReviewMode}
 					workspaceId={currentProjectId}
 					branchRef={newTaskBranchRef}
 					branchOptions={createTaskBranchOptions}
@@ -1118,12 +1055,6 @@ export default function App(): ReactElement {
 					agentId={newTaskAgentId}
 					onAgentIdChange={setNewTaskAgentId}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-				/>
-				<ClearTrashDialog
-					open={isClearTrashDialogOpen}
-					taskCount={trashTaskCount}
-					onCancel={() => setIsClearTrashDialogOpen(false)}
-					onConfirm={handleConfirmClearTrash}
 				/>
 				<StartupOnboardingDialog
 					open={isStartupOnboardingDialogOpen}

@@ -1,19 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { type RuntimeBoardData, runtimeBoardCardSchema } from "../../src/core/api-contract";
 import {
-	type RuntimeBoardData,
-	type RuntimeTaskAcceptanceEvidence,
-	runtimeBoardCardSchema,
-} from "../../src/core/api-contract";
-import {
-	acceptTaskWithEvidence,
 	addTaskDependency,
 	addTaskToColumn,
 	canAddTaskDependency,
 	deleteTasksFromBoard,
+	discardTask,
 	moveTaskToColumn,
 	recordTaskExecutionAttempt,
-	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 } from "../../src/core/task-board-mutations";
 
@@ -29,56 +24,32 @@ function createBoard(): RuntimeBoardData {
 	};
 }
 
-function createAcceptanceEvidence(taskId: string): RuntimeTaskAcceptanceEvidence {
-	return {
-		kind: "verified_remote_revision",
-		acceptedRevision: {
-			sha: "0123456789abcdef0123456789abcdef01234567",
-			remoteRef: `refs/heads/kanban/${taskId}-review`,
-		},
-		verifiedAt: 2,
-	};
-}
-
 describe("dependency readiness", () => {
-	it("starts a dependent task only after all of its prerequisites are done", () => {
+	it("rejects starting a dependent while a prerequisite is pending", () => {
 		const createDependent = addTaskToColumn(
 			createBoard(),
 			"backlog",
 			{ prompt: "Dependent task", baseRef: "main" },
 			() => "aaaaa111",
 		);
-		const createFirstPrerequisite = addTaskToColumn(
+		const createPrerequisite = addTaskToColumn(
 			createDependent.board,
-			"review",
-			{ prompt: "First prerequisite", baseRef: "main" },
+			"backlog",
+			{ prompt: "Prerequisite", baseRef: "main" },
 			() => "bbbbb111",
 		);
-		const createSecondPrerequisite = addTaskToColumn(
-			createFirstPrerequisite.board,
-			"review",
-			{ prompt: "Second prerequisite", baseRef: "main" },
-			() => "ccccc111",
-		);
-		const firstLink = addTaskDependency(createSecondPrerequisite.board, "aaaaa", "bbbbb");
-		if (!firstLink.added) {
-			throw new Error("Expected first dependency to be created.");
-		}
-		const secondLink = addTaskDependency(firstLink.board, "aaaaa", "ccccc");
-		if (!secondLink.added) {
-			throw new Error("Expected second dependency to be created.");
+		const linked = addTaskDependency(createPrerequisite.board, "aaaaa", "bbbbb");
+		if (!linked.added) {
+			throw new Error("Expected dependency to be created.");
 		}
 
-		const firstDone = acceptTaskWithEvidence(secondLink.board, "bbbbb", createAcceptanceEvidence("bbbbb"));
-		expect(firstDone.readyTaskIds).toEqual([]);
-		expect(firstDone.board.dependencies).toHaveLength(1);
+		const started = moveTaskToColumn(linked.board, "aaaaa", "in_progress");
 
-		const allDone = acceptTaskWithEvidence(firstDone.board, "ccccc", createAcceptanceEvidence("ccccc"));
-		expect(allDone.readyTaskIds).toEqual(["aaaaa"]);
-		expect(allDone.board.dependencies).toEqual([]);
+		expect(started.moved).toBe(false);
+		expect(started.board).toBe(linked.board);
 	});
 
-	it("unblocks a dependent when its prerequisite is trashed from the in_progress column", () => {
+	it("keeps a dependent blocked when its prerequisite is discarded from the in_progress column", () => {
 		const createDependent = addTaskToColumn(
 			createBoard(),
 			"backlog",
@@ -101,13 +72,12 @@ describe("dependency readiness", () => {
 			queuedAt: 10,
 		});
 
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(admitted.board, "bbbbb");
-		expect(trashed.readyTaskIds).toEqual(["aaaaa"]);
-		expect(trashed.board.dependencies).toEqual([]);
+		const trashed = discardTask(admitted.board, "bbbbb");
+		expect(trashed.board.dependencies).toHaveLength(1);
 		expect(trashed.task?.execution).toBeUndefined();
 	});
 
-	it("unblocks a dependent when its prerequisite is trashed from the backlog column", () => {
+	it("keeps a dependent blocked when its prerequisite is discarded from the backlog column", () => {
 		const createPrerequisite = addTaskToColumn(
 			createBoard(),
 			"backlog",
@@ -125,9 +95,8 @@ describe("dependency readiness", () => {
 			throw new Error("Expected dependency to be created.");
 		}
 
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, "bbbbb");
-		expect(trashed.readyTaskIds).toEqual(["aaaaa"]);
-		expect(trashed.board.dependencies).toEqual([]);
+		const trashed = discardTask(linked.board, "bbbbb");
+		expect(trashed.board.dependencies).toHaveLength(1);
 	});
 
 	it("unblocks nothing when an already-trashed prerequisite is trashed again", () => {
@@ -147,12 +116,11 @@ describe("dependency readiness", () => {
 		if (!linked.added) {
 			throw new Error("Expected dependency to be created.");
 		}
-		const firstTrash = acceptTaskWithEvidence(linked.board, "bbbbb", createAcceptanceEvidence("bbbbb"));
-		expect(firstTrash.readyTaskIds).toEqual(["aaaaa"]);
+		const firstTrash = discardTask(linked.board, "bbbbb");
+		expect(firstTrash.board.dependencies).toHaveLength(1);
 
-		const secondTrash = trashTaskAndGetReadyLinkedTaskIds(firstTrash.board, "bbbbb");
+		const secondTrash = discardTask(firstTrash.board, "bbbbb");
 		expect(secondTrash.moved).toBe(false);
-		expect(secondTrash.readyTaskIds).toEqual([]);
 	});
 });
 
@@ -209,6 +177,31 @@ describe("dependency cycle detection", () => {
 		expect(secondLink.added).toBe(true);
 		expect(secondLink.board.dependencies).toHaveLength(2);
 	});
+
+	it("rejects a dependency added after the dependent execution is admitted", () => {
+		const dependent = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Dependent", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		const prerequisite = addTaskToColumn(
+			dependent.board,
+			"backlog",
+			{ prompt: "Prerequisite", baseRef: "main" },
+			() => "bbbbb111",
+		);
+		const admitted = recordTaskExecutionAttempt(prerequisite.board, "aaaaa", {
+			attemptId: "attempt-1",
+			generation: 1,
+			queuedAt: 1,
+		});
+
+		const linked = addTaskDependency(admitted.board, "aaaaa", "bbbbb");
+
+		expect(linked).toMatchObject({ added: false, reason: "task_admitted" });
+		expect(linked.board).toBe(admitted.board);
+	});
 });
 
 describe("task priority", () => {
@@ -243,7 +236,7 @@ describe("task priority", () => {
 });
 
 describe("deleteTasksFromBoard", () => {
-	it("removes a trashed task and any dependencies that reference it", () => {
+	it("refuses to delete a task while a surviving task still references it", () => {
 		const createA = addTaskToColumn(
 			createBoard(),
 			"backlog",
@@ -255,13 +248,13 @@ describe("deleteTasksFromBoard", () => {
 		if (!linked.added) {
 			throw new Error("Expected dependency to be created.");
 		}
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, "bbbbb");
+		const trashed = discardTask(linked.board, "bbbbb");
 		const deleted = deleteTasksFromBoard(trashed.board, ["bbbbb"]);
 
-		expect(deleted.deleted).toBe(true);
-		expect(deleted.deletedTaskIds).toEqual(["bbbbb"]);
-		expect(deleted.board.columns.find((column) => column.id === "trash")?.cards).toEqual([]);
-		expect(deleted.board.dependencies).toEqual([]);
+		expect(deleted.deleted).toBe(false);
+		expect(deleted.deletedTaskIds).toEqual([]);
+		expect(deleted.blockedTaskIds).toEqual(["bbbbb"]);
+		expect(deleted.board).toBe(trashed.board);
 	});
 
 	it("removes multiple trashed tasks at once", () => {
@@ -272,7 +265,23 @@ describe("deleteTasksFromBoard", () => {
 
 		expect(deleted.deleted).toBe(true);
 		expect(deleted.deletedTaskIds.sort()).toEqual(["aaaaa", "bbbbb"]);
+		expect(deleted.blockedTaskIds).toEqual([]);
 		expect(deleted.board.columns.find((column) => column.id === "trash")?.cards).toEqual([]);
+	});
+
+	it("deletes a complete linked task set without changing dependency state for surviving tasks", () => {
+		const createA = addTaskToColumn(createBoard(), "trash", { prompt: "Task A", baseRef: "main" }, () => "aaaaa111");
+		const createB = addTaskToColumn(createA.board, "trash", { prompt: "Task B", baseRef: "main" }, () => "bbbbb111");
+		const board = {
+			...createB.board,
+			dependencies: [{ id: "dependency-1", fromTaskId: "aaaaa", toTaskId: "bbbbb", createdAt: 1 }],
+		};
+
+		const deleted = deleteTasksFromBoard(board, ["aaaaa", "bbbbb"]);
+
+		expect(deleted.deleted).toBe(true);
+		expect(deleted.deletedTaskIds.sort()).toEqual(["aaaaa", "bbbbb"]);
+		expect(deleted.board.dependencies).toEqual([]);
 	});
 });
 

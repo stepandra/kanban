@@ -27,10 +27,6 @@ function createRuntimeConfigResponse(taskTemplates: RuntimeConfigResponse["taskT
 		detectedCommands: ["codex"],
 		agents: [],
 		shortcuts: [],
-		commitPromptTemplate: "",
-		openPrPromptTemplate: "",
-		commitPromptTemplateDefault: "",
-		openPrPromptTemplateDefault: "",
 		taskTemplates,
 	};
 }
@@ -131,8 +127,6 @@ describe("useTaskTemplates", () => {
 				name: "Docs",
 				prompt: "Write docs",
 				baseRef: "main",
-				autoReviewEnabled: true,
-				autoReviewMode: "pr",
 			});
 		});
 		const saved = result.saved;
@@ -148,8 +142,6 @@ describe("useTaskTemplates", () => {
 					name: "Docs",
 					prompt: "Write docs",
 					baseRef: "main",
-					autoReviewEnabled: true,
-					autoReviewMode: "pr",
 				},
 			],
 		});

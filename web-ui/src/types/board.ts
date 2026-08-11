@@ -3,7 +3,6 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeMilestone,
 	RuntimeTaskAcceptanceEvidence,
-	RuntimeTaskAutoReviewMode,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
@@ -13,41 +12,13 @@ import type {
 
 export type BoardColumnId = RuntimeBoardColumnId;
 
-export type TaskAutoReviewMode = RuntimeTaskAutoReviewMode;
 export type TaskImage = RuntimeTaskImage;
-
-export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";
-
-export function resolveTaskAutoReviewMode(mode: TaskAutoReviewMode | null | undefined): TaskAutoReviewMode {
-	if (mode === "pr") {
-		return mode;
-	}
-	return DEFAULT_TASK_AUTO_REVIEW_MODE;
-}
-
-export function getTaskAutoReviewActionLabel(mode: TaskAutoReviewMode | null | undefined): string {
-	const resolvedMode = resolveTaskAutoReviewMode(mode);
-	if (resolvedMode === "pr") {
-		return "PR";
-	}
-	return "commit";
-}
-
-export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | null | undefined): string {
-	const resolvedMode = resolveTaskAutoReviewMode(mode);
-	if (resolvedMode === "pr") {
-		return "Cancel Auto-PR";
-	}
-	return "Cancel Auto-commit";
-}
 
 export interface BoardCard {
 	id: string;
 	title: string;
 	prompt: string;
 	startInPlanMode: boolean;
-	autoReviewEnabled?: boolean;
-	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
 	removedAgentId?: "cline";

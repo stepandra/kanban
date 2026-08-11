@@ -15,7 +15,6 @@ import {
 	CircleDot,
 	ExternalLink,
 	FolderOpen,
-	GitCommit,
 	Palette,
 	Plus,
 	RefreshCw,
@@ -35,8 +34,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
-import { NativeSelect } from "@/components/ui/native-select";
-import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
@@ -54,7 +51,7 @@ import {
 	getBrowserNotificationPermission,
 	requestBrowserNotificationPermission,
 } from "@/utils/notification-permission";
-import { useUnmount, useWindowEvent } from "@/utils/react-use";
+import { useWindowEvent } from "@/utils/react-use";
 
 interface RuntimeSettingsAgentRowModel {
 	id: RuntimeAgentId;
@@ -76,20 +73,11 @@ function buildDisplayedAgentCommand(agentId: RuntimeAgentId, binary: string, aut
 	return [binary, ...args.map(quoteCommandPartForDisplay)].join(" ");
 }
 
-function normalizeTemplateForComparison(value: string): string {
-	return value.replaceAll("\r\n", "\n").trim();
-}
-
-const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }> = [
-	{ value: "commit", label: "Commit" },
-	{ value: "pr", label: "Make PR" },
-];
-
 export type RuntimeSettingsSection = "shortcuts";
 
 const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["claude", "codex", "grok", "kimi"];
 
-type SettingsNavId = "readiness" | "general" | "git-prompts" | "notifications" | "appearance" | "project";
+type SettingsNavId = "readiness" | "general" | "notifications" | "appearance" | "project";
 
 const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 	id: SettingsNavId;
@@ -98,7 +86,6 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 }> = [
 	{ id: "readiness", label: "System readiness", icon: <ServerCog size={16} /> },
 	{ id: "general", label: "Execution", icon: <SlidersHorizontal size={16} /> },
-	{ id: "git-prompts", label: "Review", icon: <GitCommit size={16} /> },
 	{ id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
 	{ id: "appearance", label: "Appearance", icon: <Palette size={16} /> },
 	{ id: "project", label: "Project", icon: <FolderOpen size={16} /> },
@@ -218,30 +205,19 @@ function InlineUtilityButton({
 	text,
 	onClick,
 	disabled,
-	monospace,
-	widthCh,
 }: {
 	text: string;
 	onClick: () => void;
 	disabled?: boolean;
-	monospace?: boolean;
-	widthCh?: number;
 }): React.ReactElement {
 	return (
 		<Button
 			size="sm"
 			disabled={disabled}
 			onClick={onClick}
-			className={cn(monospace && "font-mono")}
 			style={{
 				fontSize: 10,
 				verticalAlign: "middle",
-				...(typeof widthCh === "number"
-					? {
-							width: `${widthCh}ch`,
-							justifyContent: "center",
-						}
-					: {}),
 			}}
 		>
 			{text}
@@ -362,13 +338,8 @@ export function RuntimeSettingsDialog({
 	const [draftThemeId, setDraftThemeId] = useState<ThemeId>(readStoredThemeId);
 	const [notificationPermission, setNotificationPermission] = useState<BrowserNotificationPermission>("unsupported");
 	const [shortcuts, setShortcuts] = useState<RuntimeProjectShortcut[]>([]);
-	const [commitPromptTemplate, setCommitPromptTemplate] = useState("");
-	const [openPrPromptTemplate, setOpenPrPromptTemplate] = useState("");
-	const [selectedPromptVariant, setSelectedPromptVariant] = useState<TaskGitAction>("commit");
-	const [copiedVariableToken, setCopiedVariableToken] = useState<string | null>(null);
 	const [saveError, setSaveError] = useState<string | null>(null);
 	const [pendingShortcutScrollIndex, setPendingShortcutScrollIndex] = useState<number | null>(null);
-	const copiedVariableResetTimerRef = useRef<number | null>(null);
 	const shortcutsSectionRef = useRef<HTMLHeadingElement | null>(null);
 	const shortcutRowRefs = useRef<Array<HTMLDivElement | null>>([]);
 	const bodyRef = useRef<HTMLDivElement>(null);
@@ -386,21 +357,6 @@ export function RuntimeSettingsDialog({
 		retainDataOnError: true,
 	});
 	const controlsDisabled = isLoading || isSaving || config === null;
-	const commitPromptTemplateDefault = config?.commitPromptTemplateDefault ?? "";
-	const openPrPromptTemplateDefault = config?.openPrPromptTemplateDefault ?? "";
-	const isCommitPromptAtDefault =
-		normalizeTemplateForComparison(commitPromptTemplate) ===
-		normalizeTemplateForComparison(commitPromptTemplateDefault);
-	const isOpenPrPromptAtDefault =
-		normalizeTemplateForComparison(openPrPromptTemplate) ===
-		normalizeTemplateForComparison(openPrPromptTemplateDefault);
-	const selectedPromptValue = selectedPromptVariant === "commit" ? commitPromptTemplate : openPrPromptTemplate;
-	const selectedPromptDefaultValue =
-		selectedPromptVariant === "commit" ? commitPromptTemplateDefault : openPrPromptTemplateDefault;
-	const isSelectedPromptAtDefault =
-		selectedPromptVariant === "commit" ? isCommitPromptAtDefault : isOpenPrPromptAtDefault;
-	const selectedPromptPlaceholder =
-		selectedPromptVariant === "commit" ? "Commit prompt template" : "PR prompt template";
 	const bypassPermissionsCheckboxId = "runtime-settings-bypass-permissions";
 	const refreshNotificationPermission = useCallback(() => {
 		setNotificationPermission(getBrowserNotificationPermission());
@@ -440,8 +396,6 @@ export function RuntimeSettingsDialog({
 	const initialAgentAutonomousModeEnabled = config?.agentAutonomousModeEnabled ?? true;
 	const initialReadyForReviewNotificationsEnabled = config?.readyForReviewNotificationsEnabled ?? true;
 	const initialShortcuts = config?.shortcuts ?? [];
-	const initialCommitPromptTemplate = config?.commitPromptTemplate ?? "";
-	const initialOpenPrPromptTemplate = config?.openPrPromptTemplate ?? "";
 	const hasUnsavedChanges = useMemo(() => {
 		if (!config) {
 			return false;
@@ -461,29 +415,16 @@ export function RuntimeSettingsDialog({
 		if (!areRuntimeProjectShortcutsEqual(shortcuts, initialShortcuts)) {
 			return true;
 		}
-		if (
-			normalizeTemplateForComparison(commitPromptTemplate) !==
-			normalizeTemplateForComparison(initialCommitPromptTemplate)
-		) {
-			return true;
-		}
-		return (
-			normalizeTemplateForComparison(openPrPromptTemplate) !==
-			normalizeTemplateForComparison(initialOpenPrPromptTemplate)
-		);
+		return false;
 	}, [
 		agentAutonomousModeEnabled,
-		commitPromptTemplate,
 		config,
 		draftThemeId,
 		initialAgentAutonomousModeEnabled,
-		initialCommitPromptTemplate,
-		initialOpenPrPromptTemplate,
 		initialReadyForReviewNotificationsEnabled,
 		initialSelectedAgentId,
 		initialShortcuts,
 		initialThemeId,
-		openPrPromptTemplate,
 		readyForReviewNotificationsEnabled,
 		selectedAgentId,
 		shortcuts,
@@ -501,13 +442,9 @@ export function RuntimeSettingsDialog({
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
 		setReadyForReviewNotificationsEnabled(config?.readyForReviewNotificationsEnabled ?? true);
 		setShortcuts(config?.shortcuts ?? []);
-		setCommitPromptTemplate(config?.commitPromptTemplate ?? "");
-		setOpenPrPromptTemplate(config?.openPrPromptTemplate ?? "");
 		setSaveError(null);
 	}, [
 		config?.agentAutonomousModeEnabled,
-		config?.commitPromptTemplate,
-		config?.openPrPromptTemplate,
 		config?.readyForReviewNotificationsEnabled,
 		config?.selectedAgentId,
 		config?.shortcuts,
@@ -563,13 +500,6 @@ export function RuntimeSettingsDialog({
 		};
 	}, [pendingShortcutScrollIndex, shortcuts]);
 
-	useUnmount(() => {
-		if (copiedVariableResetTimerRef.current !== null) {
-			window.clearTimeout(copiedVariableResetTimerRef.current);
-			copiedVariableResetTimerRef.current = null;
-		}
-	});
-
 	const handleBodyScroll = useCallback(() => {
 		if (isScrollingProgrammatically.current) return;
 		const body = bodyRef.current;
@@ -608,36 +538,6 @@ export function RuntimeSettingsDialog({
 		}, 600);
 	}, []);
 
-	const handleCopyVariableToken = (token: string) => {
-		void (async () => {
-			try {
-				await navigator.clipboard.writeText(token);
-				setCopiedVariableToken(token);
-				if (copiedVariableResetTimerRef.current !== null) {
-					window.clearTimeout(copiedVariableResetTimerRef.current);
-				}
-				copiedVariableResetTimerRef.current = window.setTimeout(() => {
-					setCopiedVariableToken((current) => (current === token ? null : current));
-					copiedVariableResetTimerRef.current = null;
-				}, 2000);
-			} catch {
-				// Ignore clipboard failures.
-			}
-		})();
-	};
-
-	const handleSelectedPromptChange = (value: string) => {
-		if (selectedPromptVariant === "commit") {
-			setCommitPromptTemplate(value);
-			return;
-		}
-		setOpenPrPromptTemplate(value);
-	};
-
-	const handleResetSelectedPrompt = () => {
-		handleSelectedPromptChange(selectedPromptDefaultValue);
-	};
-
 	const handleSave = async () => {
 		setSaveError(null);
 		if (!config) {
@@ -662,8 +562,6 @@ export function RuntimeSettingsDialog({
 			agentAutonomousModeEnabled,
 			readyForReviewNotificationsEnabled,
 			shortcuts,
-			commitPromptTemplate,
-			openPrPromptTemplate,
 		});
 		if (!saved) {
 			setSaveError("Could not save runtime settings. Check runtime logs and try again.");
@@ -821,67 +719,6 @@ export function RuntimeSettingsDialog({
 						</label>
 						<p className="text-text-secondary text-[13px] ml-6 mt-0 mb-0">
 							Allows agents to use tools without stopping for permission. Use at your own risk.
-						</p>
-					</div>
-
-					{/* ---- Git Prompts ---- */}
-					<div data-settings-section="git-prompts" />
-					<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
-						<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">
-							<GitCommit size={16} className="text-text-secondary" />
-							Review automation
-						</h2>
-					</div>
-					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
-						<p className="text-text-secondary text-[13px] mt-0 mb-2">
-							Modify the prompts sent to the agent when using Commit or Make PR on tasks in Review.
-						</p>
-						<div className="flex items-center justify-between gap-2 mb-2">
-							<NativeSelect
-								value={selectedPromptVariant}
-								onChange={(event) => setSelectedPromptVariant(event.target.value as TaskGitAction)}
-								disabled={controlsDisabled}
-								style={{ minWidth: 220 }}
-							>
-								{GIT_PROMPT_VARIANT_OPTIONS.map((option) => (
-									<option key={option.value} value={option.value}>
-										{option.label}
-									</option>
-								))}
-							</NativeSelect>
-							<Button
-								variant="ghost"
-								size="sm"
-								onClick={handleResetSelectedPrompt}
-								disabled={controlsDisabled || isSelectedPromptAtDefault}
-							>
-								Reset
-							</Button>
-						</div>
-						<textarea
-							rows={5}
-							value={selectedPromptValue}
-							onChange={(event) => handleSelectedPromptChange(event.target.value)}
-							placeholder={selectedPromptPlaceholder}
-							disabled={controlsDisabled}
-							className="w-full rounded-md border border-border bg-surface-2 p-3 text-[13px] text-text-primary font-mono placeholder:text-text-tertiary focus:border-border-focus focus:outline-none resize-none disabled:opacity-40"
-						/>
-						<p className="text-text-secondary text-[13px] mt-2 mb-0">
-							Use{" "}
-							<InlineUtilityButton
-								text={
-									copiedVariableToken === TASK_GIT_BASE_REF_PROMPT_VARIABLE.token
-										? "Copied!"
-										: TASK_GIT_BASE_REF_PROMPT_VARIABLE.token
-								}
-								monospace
-								widthCh={Math.max(TASK_GIT_BASE_REF_PROMPT_VARIABLE.token.length, "Copied!".length) + 2}
-								onClick={() => {
-									handleCopyVariableToken(TASK_GIT_BASE_REF_PROMPT_VARIABLE.token);
-								}}
-								disabled={controlsDisabled}
-							/>{" "}
-							to reference {TASK_GIT_BASE_REF_PROMPT_VARIABLE.description}
 						</p>
 					</div>
 

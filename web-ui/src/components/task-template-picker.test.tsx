@@ -7,7 +7,7 @@ import type { RuntimeTaskTemplate } from "@/runtime/types";
 
 const SAMPLE_TEMPLATES: RuntimeTaskTemplate[] = [
 	{ id: "tpl-1", name: "Bug fix", prompt: "Fix the bug" },
-	{ id: "tpl-2", name: "Docs", prompt: "Write docs", baseRef: "main", autoReviewEnabled: true, autoReviewMode: "pr" },
+	{ id: "tpl-2", name: "Docs", prompt: "Write docs", baseRef: "main" },
 ];
 
 function findButtonByText(root: ParentNode, text: string): HTMLButtonElement | null {

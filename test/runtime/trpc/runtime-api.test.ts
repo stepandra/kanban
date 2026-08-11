@@ -151,10 +151,6 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		agentAutonomousModeEnabled: true,
 		readyForReviewNotificationsEnabled: true,
 		shortcuts: [],
-		commitPromptTemplate: "commit",
-		openPrPromptTemplate: "pr",
-		commitPromptTemplateDefault: "commit",
-		openPrPromptTemplateDefault: "pr",
 		taskTemplates: [],
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
@@ -174,8 +170,6 @@ function createWorkspaceStateWithTask(input: {
 		createdAt: 1,
 		updatedAt: 1,
 		startInPlanMode: false,
-		autoReviewEnabled: false,
-		autoReviewMode: "commit" as const,
 	};
 	return {
 		repoPath: "/tmp/repo",
@@ -681,7 +675,47 @@ describe("createRuntimeApi update handlers", () => {
 		expect(broadcastRuntimeWorkspaceStateUpdated).toHaveBeenCalledWith("workspace-1", "/tmp/repo");
 	});
 
-	it("persists an admitted attempt after the task reaches review", async () => {
+	it("rejects queueing a task with pending prerequisites", async () => {
+		const state = createWorkspaceStateWithTask({ columnId: "backlog" });
+		state.board.columns[0]?.cards.push({
+			id: "task-2",
+			title: "Prerequisite",
+			prompt: "Prepare",
+			baseRef: "main",
+			generation: 1,
+			createdAt: 2,
+			updatedAt: 2,
+			startInPlanMode: false,
+		});
+		state.board.dependencies.push({
+			id: "dependency-1",
+			fromTaskId: "task-1",
+			toTaskId: "task-2",
+			createdAt: 3,
+		});
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			buildWorkspaceStateSnapshot: vi.fn(async () => state),
+		});
+
+		await expect(
+			api.enqueueTaskExecution({ workspaceId: "workspace-1", workspacePath: "/tmp/repo" }, { taskId: "task-1" }),
+		).resolves.toEqual({
+			ok: false,
+			state: null,
+			task: null,
+			attempt: null,
+			error: 'Task "task-1" cannot be started until all of its prerequisites are accepted.',
+		});
+		expect(absurdTaskStartMocks.enqueueAbsurdTaskStart).not.toHaveBeenCalled();
+	});
+
+	it("rejects an admitted attempt when the task changes columns before persistence", async () => {
 		let persistedState = createWorkspaceStateWithTask({ columnId: "backlog", generation: 2 });
 		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockImplementationOnce(async () => {
 			const moved = moveTaskToColumn(persistedState.board, "task-1", "review");
@@ -716,12 +750,73 @@ describe("createRuntimeApi update handlers", () => {
 			{ taskId: "task-1" },
 		);
 
-		expect(response.ok).toBe(true);
-		expect(persistedState.board.columns.find((column) => column.id === "review")?.cards[0]?.execution).toEqual({
-			attemptId: "attempt-1",
-			generation: 2,
-			queuedAt: expect.any(Number),
+		expect(response).toEqual({
+			ok: false,
+			state: null,
+			task: null,
+			attempt: null,
+			error: 'Task "task-1" changed while its execution attempt was being queued.',
 		});
+		expect(
+			persistedState.board.columns.find((column) => column.id === "review")?.cards[0]?.execution,
+		).toBeUndefined();
+	});
+
+	it("rejects an admitted attempt when a prerequisite is linked before persistence", async () => {
+		let persistedState = createWorkspaceStateWithTask({ columnId: "backlog", generation: 2 });
+		absurdTaskStartMocks.enqueueAbsurdTaskStart.mockImplementationOnce(async () => {
+			persistedState.board.columns[0]?.cards.push({
+				id: "task-2",
+				title: "Prerequisite",
+				prompt: "Prepare",
+				baseRef: "main",
+				generation: 1,
+				createdAt: 2,
+				updatedAt: 2,
+				startInPlanMode: false,
+			});
+			persistedState.board.dependencies.push({
+				id: "dependency-1",
+				fromTaskId: "task-1",
+				toTaskId: "task-2",
+				createdAt: 3,
+			});
+			return { attemptId: "attempt-1", raw: { task_id: "attempt-1" } };
+		});
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => ({}) as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			buildWorkspaceStateSnapshot: vi.fn(async () => persistedState),
+			mutateWorkspaceState: async (_workspacePath, mutate) => {
+				const mutation = mutate(persistedState);
+				const saved = mutation.save !== false;
+				if (saved) {
+					persistedState = {
+						...persistedState,
+						board: mutation.board,
+						revision: persistedState.revision + 1,
+					};
+				}
+				return { value: mutation.value, state: persistedState, saved };
+			},
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+		});
+
+		await expect(
+			api.enqueueTaskExecution({ workspaceId: "workspace-1", workspacePath: "/tmp/repo" }, { taskId: "task-1" }),
+		).resolves.toEqual({
+			ok: false,
+			state: null,
+			task: null,
+			attempt: null,
+			error: 'Task "task-1" cannot be started until all of its prerequisites are accepted.',
+		});
+		expect(absurdTaskStartMocks.enqueueAbsurdTaskStart).toHaveBeenCalledOnce();
+		expect(persistedState.board.columns[0]?.cards.find((card) => card.id === "task-1")?.execution).toBeUndefined();
 	});
 
 	it("orders concurrent attempt receipts even when the clock does not advance", async () => {

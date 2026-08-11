@@ -1,6 +1,6 @@
 // PTY-backed runtime for agent task sessions and the workspace shell terminal.
-// It owns process lifecycle, terminal protocol filtering, and summary updates
-// for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
+// It observes process lifecycle, filters terminal protocols, and updates
+// summaries for command-driven agents and shell sessions.
 import type {
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskHookActivity,
@@ -37,26 +37,15 @@ import {
 import type { TerminalSessionListener, TerminalSessionService } from "./terminal-session-service";
 import { TerminalStateMirror } from "./terminal-state-mirror";
 import { type WorkerCommandAttempt, WorkerCommandLog } from "./worker-command-log";
-import {
-	buildZmxWorkspaceSessionPrefix,
-	createZmxSessionControl,
-	prepareZmxAgentSession,
-	type ZmxSessionControl,
-} from "./zmx-agent-session";
+import { createZmxSessionControl, prepareZmxAgentSession, type ZmxSessionControl } from "./zmx-agent-session";
 
 const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
-const AUTO_RESTART_WINDOW_MS = 5_000;
-const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
 // TUI apps (Codex, OpenCode) can query OSC 10/11 before the browser terminal is attached
 // and ready to answer. We intercept those startup probes during early PTY output, synthesize
 // foreground/background color replies, then disable the filter once a live terminal listener
 // has attached.
 const OSC_FOREGROUND_QUERY_REPLY = "\u001b]10;rgb:e6e6/eded/f3f3\u001b\\";
 const OSC_BACKGROUND_QUERY_REPLY = "\u001b]11;rgb:1717/1717/2121\u001b\\";
-
-type RestartableSessionRequest =
-	| { kind: "task"; request: StartTaskSessionRequest }
-	| { kind: "shell"; request: StartShellSessionRequest };
 
 interface ActiveProcessState {
 	session: PtySession;
@@ -82,10 +71,6 @@ interface SessionEntry {
 	terminalStateMirror: TerminalStateMirror | null;
 	listenerIdCounter: number;
 	listeners: Map<number, TerminalSessionListener>;
-	restartRequest: RestartableSessionRequest | null;
-	suppressAutoRestartOnExit: boolean;
-	autoRestartTimestamps: number[];
-	pendingAutoRestart: Promise<void> | null;
 	pendingOperation: Promise<void>;
 }
 
@@ -161,24 +146,6 @@ function isActiveState(state: RuntimeTaskSessionState): boolean {
 	return state === "running" || state === "awaiting_review";
 }
 
-function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTaskSessionRequest {
-	return {
-		...request,
-		args: [...request.args],
-		images: request.images ? request.images.map((image) => ({ ...image })) : undefined,
-		env: request.env ? { ...request.env } : undefined,
-		executionAttempt: request.executionAttempt ? { ...request.executionAttempt } : undefined,
-	};
-}
-
-function cloneStartShellSessionRequest(request: StartShellSessionRequest): StartShellSessionRequest {
-	return {
-		...request,
-		args: request.args ? [...request.args] : undefined,
-		env: request.env ? { ...request.env } : undefined,
-	};
-}
-
 function compareExecutionAttempts(
 	candidate: RuntimeTaskExecutionAttemptReference,
 	current: RuntimeTaskExecutionAttemptReference,
@@ -233,6 +200,8 @@ export interface TerminalSessionManagerOptions {
 	// Injectable so tests can stub zmx (an optional external binary). Defaults
 	// to the real zmx CLI control surface.
 	zmxControl?: ZmxSessionControl;
+	// Retained for caller compatibility. Reconciliation intentionally never
+	// infers session ownership from workspace-derived name prefixes.
 	workspaceId?: string;
 	warn?: (message: string) => void;
 }
@@ -243,12 +212,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private readonly durableTaskIds = new Set<string>();
 	private readonly workerCommandLog = new WorkerCommandLog();
 	private readonly zmxControl: ZmxSessionControl;
-	private readonly workspaceSessionPrefix: string | null;
 	private readonly warn: (message: string) => void;
 
 	constructor(options?: TerminalSessionManagerOptions) {
 		this.zmxControl = options?.zmxControl ?? createZmxSessionControl();
-		this.workspaceSessionPrefix = buildZmxWorkspaceSessionPrefix(options?.workspaceId ?? "");
 		this.warn = options?.warn ?? ((message) => process.stderr.write(`[kanban] ${message}\n`));
 	}
 
@@ -308,10 +275,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 				terminalStateMirror: null,
 				listenerIdCounter: 1,
 				listeners: new Map(),
-				restartRequest: null,
-				suppressAutoRestartOnExit: false,
-				autoRestartTimestamps: [],
-				pendingAutoRestart: null,
 				pendingOperation: Promise.resolve(),
 			});
 			// Repopulate durable-session tracking from the persisted record so a
@@ -323,10 +286,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 				this.durableTaskIds.delete(taskId);
 			}
 		}
-		// Reconcile against the real zmx daemon in the background: drop durable
-		// markers for sessions that died while the runtime was down and reap
-		// orphans. reconcileDurableSessions never rejects.
-		if (this.durableTaskIds.size > 0 || this.workspaceSessionPrefix) {
+		// Reconcile exact persisted identities against the real zmx daemon in
+		// the background. reconcileDurableSessions never rejects.
+		if (this.durableTaskIds.size > 0) {
 			void this.reconcileDurableSessions();
 		}
 	}
@@ -358,16 +320,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	// - A persisted durable session missing from `zmx list` died while the
 	//   runtime was down: the durable marker is cleared and an active-looking
 	//   summary is reset to idle so it no longer masquerades as reattachable.
-	// - DECISION: `kanban.*` zmx sessions belonging to this workspace that match
-	//   no known task are killed automatically (with a logged warning) rather
-	//   than left running. Orphaned sessions hold worktree directories open and
-	//   consume resources with no UI surface to reach them; leaking them forever
-	//   is worse than reaping them. The manager's workspace id scopes the prefix,
-	//   so sessions owned by other kanban workspaces are never touched. Deriving
-	//   a prefix from persisted sessions remains a fallback for callers that
-	//   construct a manager without workspace context.
+	// - Sessions not named by a persisted durableSessionName are left untouched.
+	//   Name prefixes and in-memory absence are not lifecycle authority.
 	//
-	// This method never rejects; list/kill failures are logged as warnings.
+	// This method never rejects; list failures are logged as warnings.
 	async reconcileDurableSessions(control?: ZmxSessionControl): Promise<void> {
 		// KANBAN_DURABLE_AGENT_SESSIONS=0 fully disables durable sessions,
 		// including any zmx interaction during reconciliation.
@@ -388,22 +344,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		const liveSessionNames = new Set(sessionNames);
-
-		const workspacePrefixes = new Set<string>();
-		if (this.workspaceSessionPrefix) {
-			workspacePrefixes.add(this.workspaceSessionPrefix);
-		}
-		for (const taskId of this.durableTaskIds) {
-			const summary = this.entries.get(taskId)?.summary;
-			if (!summary?.durableSessionName || !summary.agentId) {
-				continue;
-			}
-			const agentMarker = `.${summary.agentId}.`;
-			const markerIndex = summary.durableSessionName.indexOf(agentMarker);
-			if (markerIndex > 0) {
-				workspacePrefixes.add(summary.durableSessionName.slice(0, markerIndex + 1));
-			}
-		}
 
 		for (const taskId of Array.from(this.durableTaskIds)) {
 			const entry = this.entries.get(taskId);
@@ -432,29 +372,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 				listener.onState?.(cloneSummary(summary));
 			}
 			this.emitSummary(summary);
-		}
-
-		const knownSessionNames = new Set<string>();
-		for (const taskId of this.durableTaskIds) {
-			const sessionName = this.entries.get(taskId)?.summary.durableSessionName;
-			if (sessionName) {
-				knownSessionNames.add(sessionName);
-			}
-		}
-		for (const sessionName of sessionNames) {
-			if (!sessionName.startsWith("kanban.") || knownSessionNames.has(sessionName)) {
-				continue;
-			}
-			if (!Array.from(workspacePrefixes).some((prefix) => sessionName.startsWith(prefix))) {
-				continue;
-			}
-			try {
-				await zmx.killSession(sessionName);
-				this.warn(`Killed orphaned durable zmx session "${sessionName}" (no matching kanban task).`);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				this.warn(`Could not kill orphaned durable zmx session "${sessionName}". ${message}`);
-			}
 		}
 	}
 
@@ -509,17 +426,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (requestedAttempt) {
 				entry.executionAttempt = { ...requestedAttempt };
 			}
-			entry.restartRequest = {
-				kind: "task",
-				request: cloneStartTaskSessionRequest(request),
-			};
 			return cloneSummary(entry.summary);
 		}
-
-		entry.restartRequest = {
-			kind: "task",
-			request: cloneStartTaskSessionRequest(request),
-		};
 
 		if (entry.active) {
 			stopWorkspaceTrustTimers(entry.active);
@@ -722,7 +630,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 						exitCode: event.exitCode,
 						interrupted: currentActive.session.wasInterrupted(),
 					});
-					const shouldAutoRestart = this.shouldAutoRestart(currentEntry);
 
 					for (const taskListener of currentEntry.listeners.values()) {
 						taskListener.onState?.(cloneSummary(summary));
@@ -730,9 +637,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					currentEntry.active = null;
 					this.emitSummary(summary);
-					if (shouldAutoRestart) {
-						this.scheduleAutoRestart(currentEntry);
-					}
 
 					const cleanupFn = currentActive.onSessionCleanup;
 					currentActive.onSessionCleanup = null;
@@ -832,10 +736,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	async startShellSession(request: StartShellSessionRequest): Promise<RuntimeTaskSessionSummary> {
 		const entry = this.ensureEntry(request.taskId);
-		entry.restartRequest = {
-			kind: "shell",
-			request: cloneStartShellSessionRequest(request),
-		};
 		if (entry.active && entry.summary.state === "running") {
 			return cloneSummary(entry.summary);
 		}
@@ -1233,8 +1133,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 		const active = entry.active;
 		const cleanupFn = active?.onSessionCleanup ?? null;
-		const previousSuppressAutoRestart = entry.suppressAutoRestartOnExit;
-		entry.suppressAutoRestartOnExit = true;
 		if (active) {
 			active.onSessionCleanup = null;
 			stopWorkspaceTrustTimers(active);
@@ -1246,7 +1144,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			} catch (error: unknown) {
 				const message = error instanceof Error ? error.message : String(error);
 				this.warn(`Could not kill durable zmx session "${sessionName}" for task "${taskId}". ${message}`);
-				entry.suppressAutoRestartOnExit = previousSuppressAutoRestart;
 				if (active) {
 					active.onSessionCleanup = cleanupFn;
 				}
@@ -1270,7 +1167,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 				listener.onExit?.(0);
 			}
 		}
-		entry.suppressAutoRestartOnExit = previousSuppressAutoRestart;
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
 				// Best effort: cleanup failure is non-critical.
@@ -1327,10 +1223,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			terminalStateMirror: null,
 			listenerIdCounter: 1,
 			listeners: new Map(),
-			restartRequest: null,
-			suppressAutoRestartOnExit: false,
-			autoRestartTimestamps: [],
-			pendingAutoRestart: null,
 			pendingOperation: Promise.resolve(),
 		};
 		this.entries.set(taskId, created);
@@ -1344,58 +1236,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			() => undefined,
 		);
 		return await queued;
-	}
-
-	private shouldAutoRestart(entry: SessionEntry): boolean {
-		const wasSuppressed = entry.suppressAutoRestartOnExit;
-		entry.suppressAutoRestartOnExit = false;
-		if (wasSuppressed) {
-			return false;
-		}
-		if (entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {
-			return false;
-		}
-		const currentTime = now();
-		entry.autoRestartTimestamps = entry.autoRestartTimestamps.filter(
-			(timestamp) => currentTime - timestamp < AUTO_RESTART_WINDOW_MS,
-		);
-		if (entry.autoRestartTimestamps.length >= MAX_AUTO_RESTARTS_PER_WINDOW) {
-			return false;
-		}
-		entry.autoRestartTimestamps.push(currentTime);
-		return true;
-	}
-
-	private scheduleAutoRestart(entry: SessionEntry): void {
-		if (entry.pendingAutoRestart) {
-			return;
-		}
-		const restartRequest = entry.restartRequest;
-		if (!restartRequest || restartRequest.kind !== "task") {
-			return;
-		}
-		let pendingAutoRestart: Promise<void> | null = null;
-		pendingAutoRestart = (async () => {
-			try {
-				await this.startTaskSession(cloneStartTaskSessionRequest(restartRequest.request));
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				const summary = updateSummary(entry, {
-					warningMessage: message,
-				});
-				const output = Buffer.from(`\r\n[kanban] ${message}\r\n`, "utf8");
-				for (const listener of entry.listeners.values()) {
-					listener.onOutput?.(output);
-					listener.onState?.(cloneSummary(summary));
-				}
-				this.emitSummary(summary);
-			} finally {
-				if (entry.pendingAutoRestart === pendingAutoRestart) {
-					entry.pendingAutoRestart = null;
-				}
-			}
-		})();
-		entry.pendingAutoRestart = pendingAutoRestart;
 	}
 
 	private emitSummary(summary: RuntimeTaskSessionSummary): void {

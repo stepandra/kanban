@@ -5,7 +5,6 @@ import {
 	trackTaskCreated,
 	trackTaskDependencyCreated,
 	trackTaskResumedFromTrash,
-	trackTasksAutoStartedFromDependency,
 } from "@/telemetry/events";
 
 const captureMock = vi.hoisted(() => vi.fn());
@@ -28,23 +27,21 @@ describe("telemetry events", () => {
 		isTelemetryEnabledMock.mockReturnValue(true);
 	});
 
-	it("captures task creation with auto review metadata", () => {
+	it("captures task creation metadata", () => {
 		trackTaskCreated({
 			selected_agent_id: "unknown",
 			start_in_plan_mode: true,
-			auto_review_mode: "pr",
 			prompt_character_count: 42,
 		});
 
 		expect(captureMock).toHaveBeenCalledWith("task_created", {
 			selected_agent_id: "unknown",
 			start_in_plan_mode: true,
-			auto_review_mode: "pr",
 			prompt_character_count: 42,
 		});
 	});
 
-	it("captures task creation without auto review metadata when automation is disabled", () => {
+	it("captures task creation outside plan mode", () => {
 		trackTaskCreated({
 			selected_agent_id: "unknown",
 			start_in_plan_mode: false,
@@ -60,14 +57,10 @@ describe("telemetry events", () => {
 
 	it("captures the new task workflow events", () => {
 		trackTaskDependencyCreated();
-		trackTasksAutoStartedFromDependency(3);
 		trackTaskResumedFromTrash();
 
 		expect(captureMock).toHaveBeenNthCalledWith(1, "task_dependency_created", {});
-		expect(captureMock).toHaveBeenNthCalledWith(2, "tasks_auto_started_from_dependency", {
-			started_task_count: 3,
-		});
-		expect(captureMock).toHaveBeenNthCalledWith(3, "task_resumed_from_trash", {});
+		expect(captureMock).toHaveBeenNthCalledWith(2, "task_resumed_from_trash", {});
 	});
 
 	it("skips capture when telemetry is disabled", () => {

@@ -4,10 +4,9 @@ Kanban is a local Node runtime plus a React app for running many coding-agent ta
 
 ## Accepted target and migration status
 
-The current checkout still implements local PTY/zmx workers and a per-task Amp
-Fixer. Those paths describe the implementation below, but they are no longer
-target architecture and must not be deepened. The per-task Amp Orb path has
-already been removed from the Amp plugin.
+The current checkout implements local zmx-backed workers and has removed the
+per-task Amp worker, Fixer, reviewer, and Orb paths. Campaign-scoped QA and
+remote Grok transport are target architecture but are not yet implemented.
 
 The accepted target is recorded in
 [`decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md`](./decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md):
@@ -69,10 +68,9 @@ integration.
 
 ## Current implemented dependency map
 
-This diagram shows the current runtime dependencies and authority boundaries,
-including legacy paths that the accepted target removes. Solid arrows are
-commands or authoritative writes. Dashed arrows are read-only projections,
-telemetry, or navigation.
+This diagram shows the current runtime dependencies and authority boundaries.
+Solid arrows are commands or authoritative writes. Dashed arrows are read-only
+projections, telemetry, or navigation.
 
 ```mermaid
 flowchart LR
@@ -86,9 +84,8 @@ flowchart LR
         runtime["Local runtime"]
         state[("Board, generations,<br/>review and acceptance")]
         workspace["jj-native task workspaces"]
-        terminal["PTY session manager"]
+        terminal["zmx session manager"]
         hooks["Worker hooks"]
-        reviewQueue["Per-task review Fixer queue"]
     end
 
     subgraph orchestration["Juja — execution adapter and cockpit"]
@@ -101,7 +98,6 @@ flowchart LR
     subgraph execution["Execution surfaces"]
         zmx["zmx durable sessions"]
         cliWorkers["Claude / Codex / Grok / Kimi"]
-        ampFixer["Amp Fixer / Integrator"]
     end
 
     operator --> browser
@@ -124,10 +120,6 @@ flowchart LR
     hooks -.-> runtime
     cliWorkers -->|"explicit task submit"| runtime
 
-    runtime -->|"post-Review handoff<br/>(not atomic with board write)"| reviewQueue
-    reviewQueue --> ampFixer
-    ampFixer -->|"verified accept"| runtime
-
     zellij -.->|"board projection"| runtime
     zellij -.->|"attach / focus"| zmx
     absurd -.->|"attempt projection"| runtime
@@ -141,10 +133,10 @@ flowchart LR
     classDef data fill:#4c1d55,stroke:#d8b4fe,color:#e6edf3
 
     class operator,architect human
-    class browser,ampPlugin,trpc,runtime,workspace,terminal,hooks,reviewQueue kanbanNode
+    class browser,ampPlugin,trpc,runtime,workspace,terminal,hooks kanbanNode
     class juja,absurdWorker,zellij scheduler
     class state,absurd data
-    class zmx,cliWorkers,ampFixer executionNode
+    class zmx,cliWorkers executionNode
 ```
 
 ## Accepted target orchestration
@@ -274,8 +266,8 @@ The most important non-obvious split is that `juja` is the adapter into
 Absurd, while Absurd owns durable execution attempts. `zmx` keeps an admitted
 worker process alive, and Zellij only observes or focuses it. The Amp plugin is
 the Architect/task-tool boundary. Its former task-Orb path has been removed;
-the runtime's remaining per-task Fixer is legacy migration code, not a future
-extension point. A worker report, terminal process, pane, Orb thread, ACP
+there is no per-task Fixer or acceptance entrypoint. A worker report, terminal
+process, pane, Orb thread, ACP
 stream, Rhai workflow, or Absurd attempt can never accept a card by itself.
 
 The target cockpit replaces the current harness-shaped zmx lookup. It keeps the
@@ -461,12 +453,10 @@ separate context. The board renders a compact human label and the detail view
 exposes the supported `amp threads continue <thread-id>` command; neither
 surface can update task lifecycle from Amp thread state.
 
-The current completion path moves in-progress work to Review and hands the task
-to a per-task Fixer. That is a temporary safety boundary, not the target.
-Candidate-backed submit will atomically publish immutable task evidence without
-starting a Fixer. Only the owning QA campaign will accept its exact frozen
-member set after publishing one verified campaign revision. Generic
-`done`/`trash` and UI movement remain unable to bypass acceptance.
+The current completion path moves in-progress work to Review and stops there.
+No per-task acceptance entrypoint exists. The future owning QA campaign will
+accept its exact frozen member set after publishing one verified campaign
+revision. Discard and ordinary UI movement remain unable to bypass acceptance.
 
 ## Main Flows
 

@@ -62,7 +62,7 @@ function createChangesResponse(): RuntimeWorkspaceChangesResponse {
 	};
 }
 
-function createWorkspaceState(executionAttemptId?: string): RuntimeWorkspaceStateResponse {
+function createWorkspaceState(executionAttemptId?: string, taskPresent = true): RuntimeWorkspaceStateResponse {
 	return {
 		repoPath: "/tmp/repo",
 		statePath: "/tmp/state.json",
@@ -76,21 +76,23 @@ function createWorkspaceState(executionAttemptId?: string): RuntimeWorkspaceStat
 				{
 					id: "trash",
 					title: "Done",
-					cards: [
-						{
-							id: "task-1",
-							title: "Task",
-							prompt: "Task",
-							startInPlanMode: false,
-							baseRef: "main",
-							generation: 1,
-							...(executionAttemptId
-								? { execution: { attemptId: executionAttemptId, generation: 1, queuedAt: 10 } }
-								: {}),
-							createdAt: 1,
-							updatedAt: 1,
-						},
-					],
+					cards: taskPresent
+						? [
+								{
+									id: "task-1",
+									title: "Task",
+									prompt: "Task",
+									startInPlanMode: false,
+									baseRef: "main",
+									generation: 1,
+									...(executionAttemptId
+										? { execution: { attemptId: executionAttemptId, generation: 1, queuedAt: 10 } }
+										: {}),
+									createdAt: 1,
+									updatedAt: 1,
+								},
+							]
+						: [],
 				},
 			],
 			dependencies: [],
@@ -244,7 +246,7 @@ describe("createWorkspaceApi loadChanges", () => {
 });
 
 describe("createWorkspaceApi deleteWorktree", () => {
-	it("checks the terminal execution fence while holding the worktree operation lock", async () => {
+	it("deletes only after the task is absent from the authoritative board", async () => {
 		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockReset();
 		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockImplementation(
 			async (options: { canDelete?: () => Promise<boolean> }) => ({
@@ -254,8 +256,8 @@ describe("createWorkspaceApi deleteWorktree", () => {
 		);
 		const buildWorkspaceStateSnapshot = vi
 			.fn()
-			.mockResolvedValueOnce(createWorkspaceState("attempt-newer"))
-			.mockResolvedValueOnce(createWorkspaceState());
+			.mockResolvedValueOnce(createWorkspaceState())
+			.mockResolvedValueOnce(createWorkspaceState(undefined, false));
 		const api = createWorkspaceApi({
 			ensureTerminalManagerForWorkspace: vi.fn(),
 			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
@@ -264,11 +266,13 @@ describe("createWorkspaceApi deleteWorktree", () => {
 		});
 		const workspaceScope = { workspaceId: "workspace-1", workspacePath: "/tmp/repo" };
 
-		await expect(
-			api.deleteWorktree(workspaceScope, { taskId: "task-1", expectedExecutionAttemptId: null }),
-		).resolves.toEqual({ ok: true, removed: false });
-		await expect(
-			api.deleteWorktree(workspaceScope, { taskId: "task-1", expectedExecutionAttemptId: null }),
-		).resolves.toEqual({ ok: true, removed: true });
+		await expect(api.deleteWorktree(workspaceScope, { taskId: "task-1" })).resolves.toEqual({
+			ok: true,
+			removed: false,
+		});
+		await expect(api.deleteWorktree(workspaceScope, { taskId: "task-1" })).resolves.toEqual({
+			ok: true,
+			removed: true,
+		});
 	});
 });

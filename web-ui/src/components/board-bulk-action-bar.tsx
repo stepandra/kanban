@@ -70,7 +70,7 @@ export function BoardBulkActionBar({
 					Review
 				</option>
 				<option value="trash" disabled={!canMoveToTrash}>
-					Done
+					Discard
 				</option>
 			</NativeSelect>
 			<Button
@@ -83,12 +83,12 @@ export function BoardBulkActionBar({
 			<AlertDialog open={isTrashConfirmOpen} onOpenChange={setIsTrashConfirmOpen}>
 				<AlertDialogHeader>
 					<AlertDialogTitle>
-						Move {selectedCount} {taskLabel} to Done?
+						Discard {selectedCount} {taskLabel}?
 					</AlertDialogTitle>
 				</AlertDialogHeader>
 				<AlertDialogBody>
 					<AlertDialogDescription>
-						The selected task sessions will be stopped and their workspaces cleaned up.
+						The selected task sessions will be stopped. Their workspaces and dependency history will be retained.
 					</AlertDialogDescription>
 				</AlertDialogBody>
 				<AlertDialogFooter>
@@ -97,7 +97,7 @@ export function BoardBulkActionBar({
 					</AlertDialogCancel>
 					<AlertDialogAction asChild>
 						<Button variant="danger" onClick={() => onMoveToColumn("trash")}>
-							Move to Done
+							Discard
 						</Button>
 					</AlertDialogAction>
 				</AlertDialogFooter>

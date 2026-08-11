@@ -131,8 +131,6 @@ describe("BoardCard memoization", () => {
 			cards: [createCard("task-a", "Task A"), createCard("task-b", "Task B")],
 		};
 		const columnProps = {
-			onCommitTask: vi.fn(),
-			onOpenPrTask: vi.fn(),
 			onMoveToTrashTask: vi.fn(),
 			onSaveTitle: vi.fn(),
 			onCardClick: vi.fn(),

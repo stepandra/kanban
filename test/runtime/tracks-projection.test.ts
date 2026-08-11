@@ -59,6 +59,16 @@ function createBoard(): RuntimeBoardData {
 						prompt: "Evaluation gate",
 						startInPlanMode: false,
 						planning: { trackId: "ml", milestoneId: "ml-v1", weight: 1 },
+						acceptanceEvidence: {
+							kind: "verified_remote_revision",
+							taskId: "ml-eval",
+							generation: 1,
+							acceptedRevision: {
+								sha: "0123456789abcdef0123456789abcdef01234567",
+								remoteRef: "refs/heads/kanban/ml-eval-accepted",
+							},
+							verifiedAt: 4,
+						},
 						baseRef: "main",
 						createdAt: 4,
 						updatedAt: 4,

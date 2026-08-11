@@ -10,8 +10,6 @@ function createCard(id: string, overrides?: Partial<BoardCard>): BoardCard {
 		title: id,
 		prompt: id,
 		startInPlanMode: false,
-		autoReviewEnabled: false,
-		autoReviewMode: "commit",
 		baseRef: "main",
 		createdAt: 1,
 		updatedAt: 1,

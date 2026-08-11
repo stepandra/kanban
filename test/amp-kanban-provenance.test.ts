@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildTaskArgs } from "../amp/kanban";
+import { assertExpectedKanbanRevision, buildTaskArgs, parseKanbanProvenance } from "../amp/kanban";
 
 describe("Amp Kanban task provenance", () => {
 	it("adds the current Architect thread only when creating a task", () => {
@@ -31,31 +31,6 @@ describe("Amp Kanban task provenance", () => {
 		expect(updateArgs).not.toContain(threadId);
 	});
 
-	it("passes exact revision evidence to reviewer-only accept", () => {
-		expect(
-			buildTaskArgs(
-				{
-					action: "accept",
-					taskId: "task-1",
-					acceptedRevision: "0123456789abcdef0123456789abcdef01234567",
-					remoteRef: "refs/heads/kanban/task-1-review",
-				},
-				"/workspace",
-			),
-		).toEqual([
-			"task",
-			"accept",
-			"--task-id",
-			"task-1",
-			"--accepted-revision",
-			"0123456789abcdef0123456789abcdef01234567",
-			"--remote-ref",
-			"refs/heads/kanban/task-1-review",
-			"--project-path",
-			"/workspace",
-		]);
-	});
-
 	it("uses the explicit trash command instead of the legacy done alias", () => {
 		expect(
 			buildTaskArgs(
@@ -66,5 +41,21 @@ describe("Amp Kanban task provenance", () => {
 				"/workspace",
 			),
 		).toEqual(["task", "trash", "--task-id", "task-1", "--project-path", "/workspace"]);
+	});
+
+	it("rejects an executable from a different published revision", () => {
+		const expectedRevision = "a".repeat(40);
+		const provenance = parseKanbanProvenance(
+			JSON.stringify({
+				schema: "stepandra-kanban-provenance/v1",
+				repository: "https://github.com/stepandra/kanban",
+				version: "0.1.70",
+				revision: "b".repeat(40),
+			}),
+		);
+
+		expect(() => assertExpectedKanbanRevision(provenance, expectedRevision)).toThrow(
+			`this plugin requires ${expectedRevision}`,
+		);
 	});
 });

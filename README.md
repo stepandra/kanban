@@ -4,7 +4,7 @@
   <img src="https://github.com/user-attachments/assets/2aa3dcc7-94e3-4076-bcfe-6d0272007cfe" width="100%" />
 </p>
 
-A replacement for your IDE better suited for running many agents in parallel and reviewing diffs. Each task card gets its own terminal and worktree, all handled for you automatically. Enable auto-commit and link cards together to create dependency chains that complete large amounts of work autonomously.
+A control plane for running many coding tasks in parallel and reviewing their work. Each task card gets its own terminal and retained workspace, while explicit dependencies prevent blocked work from starting early.
 
 > [!WARNING]
 > Kanban is a research preview and uses experimental features of CLI agents like bypassing permissions and runtime hooks for more autonomy. We'd love your feedback in #kanban on our [discord](https://discord.gg/cline).
@@ -16,7 +16,7 @@ A replacement for your IDE better suited for running many agents in parallel and
 <a href="https://www.npmjs.com/package/kanban" target="_blank">NPM</a>
 </td>
 <td align="center">
-<a href="https://github.com/cline/kanban" target="_blank">GitHub</a>
+<a href="https://github.com/stepandra/kanban" target="_blank">GitHub</a>
 </td>
 <td align="center">
 <a href="https://github.com/cline/kanban/issues" target="_blank">Issues</a>
@@ -54,10 +54,10 @@ amp plugins add https://raw.githubusercontent.com/stepandra/kanban/main/amp/kanb
 
 Then ask Amp to add, assign, link, or start Kanban tasks from any thread. Prefer Grok Build for implementation; Claude, Codex, and Kimi remain compatibility harnesses. Amp itself plans and decomposes work rather than running individual tasks. For a dedicated planning thread, run **Kanban: Decompose into tasks** from Amp's command palette. It opens a native Amp `medium` thread rather than embedding another agent runtime in Kanban.
 
-Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. Review acceptance and trash cleanup are distinct operations: `accept` verifies the task-specific remote revision, while `trash` is cleanup rather than acceptance and may remove the task workspace and start newly ready dependants.
+Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. `trash` explicitly discards a task without satisfying dependencies or deleting its workspace. Acceptance is reserved for the owning QA campaign and is currently fail-closed until campaign-scoped receipts are implemented.
 
 ### 3. Link and automate
-<kbd>⌘</kbd> + click a card to link it to another task. When a card is completed and moved to trash, linked tasks auto-start. Combine with auto-commit for fully autonomous dependency chains: one task completes → commits → kicks off the next → repeat. It’s a pretty magical experience asking your agent to decompose a big task into subtasks that auto-commit - he’ll cleverly do it in a way that parallelizes for maximum efficiency and links tasks together for end-to-end autonomy.
+<kbd>⌘</kbd> + click a card to link it to another task. A dependency points from the waiting task to its prerequisite. Waiting tasks stay blocked when prerequisites are discarded; only verified campaign acceptance can satisfy the dependency.
 
 ### 4. Start tasks
 Hit the play button on a card. Kanban creates an ephemeral worktree just for that task so agents work in parallel without merge conflicts. Under the hood, it also symlinks gitignored files like `node_modules` so you don't have to worry about slow `npm install`s for each copy of your project.
@@ -73,7 +73,7 @@ Click a card to view the agent's TUI and a diff of all the changes in that workt
 To easily test and debug your app, create a Script Shortcut in settings. Use a command like `npm run dev` so that all you have to do is hit a play button in the navbar instead of remembering commands or asking your agent to do it.
 
 ### 6. Ship it
-When the work looks good, hit **Commit** or **Open PR**. Kanban sends a dynamic prompt to the agent to convert the worktree into a commit on your base ref or a new PR branch, and work through any merge conflicts intelligently. Or skip review by enabling auto-commit / auto-PR and the agent ships as soon as it's done. Move the card to trash to clean up the worktree (you can always resume later since Kanban tracks the resume ID).
+The owning QA campaign freezes the candidate set, integrates it in one `a1.xxlarge` Amp Orb, fans out production checks, fixes findings in that same Orb, and publishes one verified campaign revision. Per-task workers and Review cards cannot commit, push, or accept themselves.
 
 ### 7. Keep track with git interface
 Click the branch name in the navbar to open a full git interface to browse commit history, switch branches, fetch, pull, push, and visualize your git all without leaving Kanban. Keep track of everything your agents are doing across branches as work is completed.

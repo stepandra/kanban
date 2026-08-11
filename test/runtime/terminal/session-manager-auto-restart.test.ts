@@ -39,7 +39,7 @@ function createMockPtySession(pid: number, request: MockSpawnRequest) {
 	};
 }
 
-describe("TerminalSessionManager auto-restart", () => {
+describe("TerminalSessionManager process lifecycle", () => {
 	beforeEach(() => {
 		prepareAgentLaunchMock.mockReset();
 		ptySessionSpawnMock.mockReset();
@@ -50,10 +50,10 @@ describe("TerminalSessionManager auto-restart", () => {
 		}));
 	});
 
-	it("restarts an attached agent session after it exits", async () => {
+	it("reports an unexpected exit without restarting the process", async () => {
 		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
-			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			const session = createMockPtySession(111, request);
 			spawnedSessions.push(session);
 			return session;
 		});
@@ -76,12 +76,16 @@ describe("TerminalSessionManager auto-restart", () => {
 
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
 		spawnedSessions[0]?.triggerExit(130);
+		await Promise.resolve();
+		await Promise.resolve();
 
-		await vi.waitFor(() => {
-			expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
+		expect(manager.getSummary("task-1")).toMatchObject({
+			state: "awaiting_review",
+			reviewReason: "error",
+			exitCode: 130,
+			pid: null,
 		});
-		expect(manager.getSummary("task-1")?.state).toBe("running");
-		expect(manager.getSummary("task-1")?.pid).toBe(222);
 	});
 
 	it("does not restart an attached agent session after an explicit stop", async () => {

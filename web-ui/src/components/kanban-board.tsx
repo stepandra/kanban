@@ -44,18 +44,12 @@ export function KanbanBoard({
 	onCreateTask,
 	onStartTask,
 	onStartAllTasks,
-	onClearTrash,
 	editingTaskId,
 	inlineTaskEditor,
 	onEditTask,
 	onSaveTaskTitle,
-	onCommitTask,
-	onOpenPrTask,
-	onCancelAutomaticTaskAction,
 	onMoveToTrashTask,
 	onRestoreFromTrashTask,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
 	moveToTrashLoadingById,
 	dependencies,
 	onCreateDependency,
@@ -76,18 +70,12 @@ export function KanbanBoard({
 	onCreateTask: () => void;
 	onStartTask?: (taskId: string) => void;
 	onStartAllTasks?: () => void;
-	onClearTrash?: () => void;
 	editingTaskId?: string | null;
 	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
-	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	onMoveToTrashTask?: (taskId: string) => void;
 	onRestoreFromTrashTask?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	dependencies: BoardDependency[];
 	onCreateDependency?: (fromTaskId: string, toTaskId: string) => void;
@@ -604,18 +592,12 @@ export function KanbanBoard({
 								onCreateTask={column.id === "backlog" ? onCreateTask : undefined}
 								onStartTask={column.id === "backlog" ? onStartTask : undefined}
 								onStartAllTasks={column.id === "backlog" ? onStartAllTasks : undefined}
-								onClearTrash={column.id === "trash" ? onClearTrash : undefined}
 								editingTaskId={column.id === "backlog" ? editingTaskId : null}
 								inlineTaskEditor={column.id === "backlog" ? inlineTaskEditor : undefined}
 								onEditTask={column.id === "backlog" ? onEditTask : undefined}
 								onSaveTitle={column.id !== "trash" ? onSaveTaskTitle : undefined}
-								onCommitTask={column.id === "review" ? onCommitTask : undefined}
-								onOpenPrTask={column.id === "review" ? onOpenPrTask : undefined}
-								onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 								onMoveToTrashTask={column.id === "review" ? onMoveToTrashTask : undefined}
 								onRestoreFromTrashTask={column.id === "trash" ? onRestoreFromTrashTask : undefined}
-								commitTaskLoadingById={column.id === "review" ? commitTaskLoadingById : undefined}
-								openPrTaskLoadingById={column.id === "review" ? openPrTaskLoadingById : undefined}
 								moveToTrashLoadingById={column.id === "review" ? moveToTrashLoadingById : undefined}
 								activeDragTaskId={activeDragTaskId}
 								activeDragSourceColumnId={activeDragSourceColumnId}

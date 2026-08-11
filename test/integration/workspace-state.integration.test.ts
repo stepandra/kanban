@@ -186,7 +186,140 @@ describe.sequential("workspace-state integration", () => {
 						sessions: {},
 						expectedRevision: saved.revision,
 					}),
-				).rejects.toThrow("cannot move from Review to Done through a board snapshot save");
+				).rejects.toThrow("cannot move from Review to the archive through a board snapshot save");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("rejects task deletion and blocked starts through whole-board snapshot saves", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-authority-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-authority");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const initial = await loadWorkspaceState(workspacePath);
+				const board = createBoard("Dependent");
+				board.columns[0]?.cards.push({
+					id: "task-2",
+					title: "Prerequisite",
+					prompt: "Prerequisite",
+					startInPlanMode: false,
+					baseRef: "main",
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+				});
+				board.dependencies.push({
+					id: "dependency-1",
+					fromTaskId: "task-1",
+					toTaskId: "task-2",
+					createdAt: Date.now(),
+				});
+				const saved = await saveWorkspaceState(workspacePath, {
+					board,
+					sessions: {},
+					expectedRevision: initial.revision,
+				});
+				const withoutPrerequisite: RuntimeBoardData = {
+					...saved.board,
+					columns: saved.board.columns.map((column) => ({
+						...column,
+						cards: column.cards.filter((card) => card.id !== "task-2"),
+					})),
+					dependencies: [],
+				};
+
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: withoutPrerequisite,
+						sessions: {},
+						expectedRevision: saved.revision,
+					}),
+				).rejects.toThrow('Task "task-2" cannot be permanently deleted through a board snapshot save');
+
+				const dependentTask = saved.board.columns
+					.find((column) => column.id === "backlog")
+					?.cards.find((card) => card.id === "task-1");
+				if (!dependentTask) {
+					throw new Error("Expected dependent task in saved board.");
+				}
+				const blockedStart: RuntimeBoardData = {
+					...saved.board,
+					columns: saved.board.columns.map((column) => {
+						if (column.id === "backlog") {
+							return { ...column, cards: column.cards.filter((card) => card.id !== "task-1") };
+						}
+						if (column.id === "in_progress") {
+							return {
+								...column,
+								cards: [dependentTask],
+							};
+						}
+						return column;
+					}),
+				};
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: blockedStart,
+						sessions: {},
+						expectedRevision: saved.revision,
+					}),
+				).rejects.toThrow('Task "task-1" cannot be started until all of its prerequisites are accepted');
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("rejects prerequisites added through a snapshot after execution admission", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-admission-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-admission");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const initial = await loadWorkspaceState(workspacePath);
+				const admittedBoard = createBoard("Admitted task");
+				const admittedTask = admittedBoard.columns[0]?.cards[0];
+				if (!admittedTask) {
+					throw new Error("Expected admitted task.");
+				}
+				admittedTask.execution = { attemptId: "attempt-1", generation: 1, queuedAt: 1 };
+				admittedBoard.columns[0]?.cards.push({
+					id: "task-2",
+					title: "Prerequisite",
+					prompt: "Prerequisite",
+					startInPlanMode: false,
+					baseRef: "main",
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+				});
+				const saved = await saveWorkspaceState(workspacePath, {
+					board: admittedBoard,
+					sessions: {},
+					expectedRevision: initial.revision,
+				});
+				const linkedBoard: RuntimeBoardData = {
+					...saved.board,
+					dependencies: [
+						{
+							id: "dependency-1",
+							fromTaskId: "task-1",
+							toTaskId: "task-2",
+							createdAt: Date.now(),
+						},
+					],
+				};
+
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: linkedBoard,
+						sessions: {},
+						expectedRevision: saved.revision,
+					}),
+				).rejects.toThrow('Task "task-1" cannot gain a prerequisite after its execution has been admitted');
 			} finally {
 				cleanup();
 			}

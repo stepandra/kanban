@@ -242,7 +242,7 @@ describe("KanbanBoard toolbar (filter, selection, keyboard navigation)", () => {
 		expect(captured.columns.in_progress?.cardIds).toEqual(["task-2"]);
 	});
 
-	it("supports multi-select and a single-confirmed bulk move to done", async () => {
+	it("supports multi-select and a single-confirmed bulk discard", async () => {
 		const onMoveTasksToColumn = vi.fn();
 		await renderBoard({ onMoveTasksToColumn });
 
@@ -265,10 +265,10 @@ describe("KanbanBoard toolbar (filter, selection, keyboard navigation)", () => {
 		});
 
 		const dialog = document.body.querySelector("[role='alertdialog']");
-		expect(dialog?.textContent).toContain("Move 2 tasks to Done?");
+		expect(dialog?.textContent).toContain("Discard 2 tasks?");
 
 		const confirmButton = [...(dialog?.querySelectorAll("button") ?? [])].find(
-			(button) => button.textContent === "Move to Done",
+			(button) => button.textContent === "Discard",
 		);
 		if (!confirmButton) {
 			throw new Error("Expected the bulk move confirmation button to be rendered.");

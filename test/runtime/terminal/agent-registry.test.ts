@@ -19,15 +19,11 @@ function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): 
 	return {
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
-		selectedAgentId: "claude",
+		selectedAgentId: "grok",
 		selectedShortcutLabel: null,
 		agentAutonomousModeEnabled: true,
 		readyForReviewNotificationsEnabled: true,
 		shortcuts: [],
-		commitPromptTemplate: "commit",
-		openPrPromptTemplate: "pr",
-		commitPromptTemplateDefault: "commit",
-		openPrPromptTemplateDefault: "pr",
 		taskTemplates: [],
 		...overrides,
 	};
@@ -69,7 +65,7 @@ describe("buildRuntimeConfigResponse", () => {
 		const response = buildRuntimeConfigResponse(config);
 
 		expect(response.agentAutonomousModeEnabled).toBe(true);
-		expect(response.agents.map((agent) => agent.id)).toEqual(["claude", "codex", "grok", "kimi"]);
+		expect(response.agents.map((agent) => agent.id)).toEqual(["grok", "kimi", "claude", "codex"]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "grok")?.defaultArgs).toEqual([
@@ -88,7 +84,7 @@ describe("buildRuntimeConfigResponse", () => {
 		const response = buildRuntimeConfigResponse(config);
 
 		expect(response.agentAutonomousModeEnabled).toBe(false);
-		expect(response.agents.map((agent) => agent.id)).toEqual(["claude", "codex", "grok", "kimi"]);
+		expect(response.agents.map((agent) => agent.id)).toEqual(["grok", "kimi", "claude", "codex"]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "grok")?.defaultArgs).toEqual([

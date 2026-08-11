@@ -76,6 +76,9 @@ function TaskCounts({ counts }: { counts: RuntimeTrackTaskCounts }): React.React
 			<span title="Accepted">
 				<span className="text-status-green">{counts.accepted}</span> accepted
 			</span>
+			<span title="Discarded">
+				<span className="text-text-tertiary">{counts.discarded}</span> discarded
+			</span>
 		</div>
 	);
 }
@@ -85,6 +88,7 @@ const taskStatusLabel: Record<RuntimeTrackTaskRef["status"], string> = {
 	in_progress: "In progress",
 	review: "Review",
 	accepted: "Accepted",
+	discarded: "Discarded",
 };
 
 function TaskRow({
@@ -118,6 +122,7 @@ function TaskRow({
 					task.status === "in_progress" && "text-status-blue",
 					task.status === "review" && "text-status-gold",
 					task.status === "accepted" && "text-status-green",
+					task.status === "discarded" && "text-text-tertiary",
 					task.status === "backlog" && "text-text-secondary",
 				)}
 			>

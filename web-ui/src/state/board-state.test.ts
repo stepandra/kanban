@@ -5,13 +5,11 @@ import {
 	addTaskDependency,
 	addTaskToColumn,
 	applyDragResult,
-	clearColumnTasks,
-	disableTaskAutoReview,
+	discardTask,
 	getTaskColumnId,
 	moveTaskToColumn,
 	normalizeBoardData,
 	type TaskDraft,
-	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
 	updateTaskTitle,
 } from "@/state/board-state";
@@ -82,6 +80,8 @@ function attachAcceptanceEvidence(board: BoardData, taskId: string): BoardData {
 							...card,
 							acceptanceEvidence: {
 								kind: "verified_remote_revision",
+								taskId,
+								generation: card.generation ?? 1,
 								acceptedRevision: {
 									sha: "0123456789abcdef0123456789abcdef01234567",
 									remoteRef: `refs/heads/kanban/${taskId}-review`,
@@ -151,7 +151,7 @@ describe("board dependency state", () => {
 		expect(sameTask.reason).toBe("same_task");
 	});
 
-	it("preserves backlog-to-backlog link order and reorients it when one task starts", () => {
+	it("keeps a dependent task blocked until its prerequisite is accepted", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -164,11 +164,11 @@ describe("board dependency state", () => {
 		});
 
 		const movedA = moveTaskToColumn(bothBacklog.board, taskA, "in_progress");
-		expect(movedA.moved).toBe(true);
+		expect(movedA.moved).toBe(false);
 		expect(movedA.board.dependencies).toEqual([
 			expect.objectContaining({
-				fromTaskId: taskB,
-				toTaskId: taskA,
+				fromTaskId: taskA,
+				toTaskId: taskB,
 			}),
 		]);
 	});
@@ -188,7 +188,7 @@ describe("board dependency state", () => {
 		]);
 	});
 
-	it("unlocks backlog cards only after every prerequisite is trashed", () => {
+	it("keeps backlog cards blocked when every prerequisite is discarded", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -203,17 +203,16 @@ describe("board dependency state", () => {
 		const dependencyB = addTaskDependency(dependencyA.board, taskC, taskB);
 		expect(dependencyB.added).toBe(true);
 
-		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskA);
+		const moveATrash = discardTask(dependencyB.board, taskA);
 		expect(moveATrash.moved).toBe(true);
-		expect(moveATrash.board.dependencies).toHaveLength(1);
-		expect(moveATrash.readyTaskIds).toEqual([]);
+		expect(moveATrash.board.dependencies).toHaveLength(2);
 
-		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(moveATrash.board, taskB);
+		const moveBTrash = discardTask(moveATrash.board, taskB);
 		expect(moveBTrash.moved).toBe(true);
-		expect(moveBTrash.readyTaskIds).toEqual([taskC]);
+		expect(moveBTrash.board.dependencies).toHaveLength(2);
 	});
 
-	it("unlocks backlog cards when an in-progress prerequisite is trashed", () => {
+	it("keeps a backlog card blocked when an in-progress prerequisite is discarded", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -223,12 +222,11 @@ describe("board dependency state", () => {
 		const linked = addTaskDependency(movedA.board, taskA, taskB);
 		expect(linked.added).toBe(true);
 
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, taskA);
-		expect(trashed.readyTaskIds).toEqual([taskB]);
-		expect(trashed.board.dependencies).toEqual([]);
+		const trashed = discardTask(linked.board, taskA);
+		expect(trashed.board.dependencies).toHaveLength(1);
 	});
 
-	it("removes dependency links once both linked cards are in trash", () => {
+	it("preserves dependency history when linked cards are discarded", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -240,13 +238,13 @@ describe("board dependency state", () => {
 		expect(linked.board.dependencies).toHaveLength(1);
 
 		const movedATrash = moveTaskToColumn(linked.board, taskA, "trash");
-		expect(movedATrash.board.dependencies).toHaveLength(0);
+		expect(movedATrash.board.dependencies).toHaveLength(1);
 
 		const movedBTrash = moveTaskToColumn(movedATrash.board, taskB, "trash");
-		expect(movedBTrash.board.dependencies).toHaveLength(0);
+		expect(movedBTrash.board.dependencies).toHaveLength(1);
 	});
 
-	it("removes links once neither endpoint remains in backlog", () => {
+	it("rejects starting a dependent while its prerequisite is pending", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -258,10 +256,12 @@ describe("board dependency state", () => {
 		expect(linked.board.dependencies).toHaveLength(1);
 
 		const movedB = moveTaskToColumn(linked.board, taskB, "in_progress");
-		expect(movedB.board.dependencies).toHaveLength(0);
+		expect(movedB.moved).toBe(false);
+		expect(getTaskColumnId(movedB.board, taskB)).toBe("backlog");
+		expect(movedB.board.dependencies).toHaveLength(1);
 	});
 
-	it("drops links automatically when an unlocked backlog card starts", () => {
+	it("does not auto-unlock a dependent after all prerequisites are discarded", () => {
 		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
 		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
 		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
@@ -271,15 +271,13 @@ describe("board dependency state", () => {
 		const firstLink = addTaskDependency(movedB.board, taskC, taskA);
 		const secondLink = addTaskDependency(firstLink.board, taskC, taskB);
 
-		const trashA = trashTaskAndGetReadyLinkedTaskIds(secondLink.board, taskA);
-		expect(trashA.readyTaskIds).toEqual([]);
+		const trashA = discardTask(secondLink.board, taskA);
 
-		const trashB = trashTaskAndGetReadyLinkedTaskIds(trashA.board, taskB);
-		expect(trashB.readyTaskIds).toEqual([taskC]);
+		const trashB = discardTask(trashA.board, taskB);
 
 		const autoStarted = moveTaskToColumn(trashB.board, taskC, "in_progress");
-		expect(autoStarted.moved).toBe(true);
-		expect(autoStarted.board.dependencies).toEqual([]);
+		expect(autoStarted.moved).toBe(false);
+		expect(autoStarted.board.dependencies).toHaveLength(2);
 	});
 
 	it("keeps manual in-progress to review drags disabled", () => {
@@ -557,19 +555,25 @@ describe("board dependency state", () => {
 		expect(inProgressColumn?.cards.map((card) => card.id)).toEqual([taskC, taskA, taskB]);
 	});
 
-	it("removes dependencies when trash is cleared", () => {
-		const fixture = createBacklogBoard(["Task A", "Task B"]);
-		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
-		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
-		const linked = addTaskDependency(fixture.board, taskA, taskB);
+	it("rejects dragging a blocked backlog task into in progress", () => {
+		const fixture = createBacklogBoard(["Dependent", "Prerequisite"]);
+		const dependentId = requireTaskId(fixture.taskIdByPrompt.Dependent, "Dependent");
+		const prerequisiteId = requireTaskId(fixture.taskIdByPrompt.Prerequisite, "Prerequisite");
+		const linked = addTaskDependency(fixture.board, dependentId, prerequisiteId);
 		expect(linked.added).toBe(true);
-		expect(linked.board.dependencies.length).toBe(1);
 
-		const moved = moveTaskToColumn(linked.board, taskA, "trash");
-		expect(moved.moved).toBe(true);
-		const cleared = clearColumnTasks(moved.board, "trash");
-		expect(cleared.clearedTaskIds).toContain(taskA);
-		expect(cleared.board.dependencies).toEqual([]);
+		const dragged = applyDragResult(linked.board, {
+			draggableId: dependentId,
+			type: "CARD",
+			source: { droppableId: "backlog", index: 0 },
+			destination: { droppableId: "in_progress", index: 0 },
+			reason: "DROP",
+			mode: "FLUID",
+			combine: null,
+		});
+
+		expect(dragged.board).toBe(linked.board);
+		expect(dragged.moveEvent).toBeUndefined();
 	});
 
 	it("normalizes boards and keeps valid unique links", () => {
@@ -602,9 +606,8 @@ describe("board dependency state", () => {
 		const normalized = normalizeBoardData(rawBoard);
 		expect(normalized).not.toBeNull();
 		expect(normalized?.dependencies.map((dependency) => `${dependency.fromTaskId}->${dependency.toTaskId}`)).toEqual([
-			"b->a",
+			"a->b",
 			"c->a",
-			"b->c",
 		]);
 	});
 
@@ -671,6 +674,8 @@ describe("board dependency state", () => {
 		expect(acceptedTask?.execution).toEqual({ attemptId: "attempt-3", generation: 3, queuedAt: 40 });
 		expect(acceptedTask?.acceptanceEvidence).toEqual({
 			kind: "verified_remote_revision",
+			taskId: "accepted",
+			generation: 3,
 			acceptedRevision: {
 				sha: "0123456789abcdef0123456789abcdef01234567",
 				remoteRef: "refs/heads/kanban/accepted-review",
@@ -710,7 +715,7 @@ describe("board dependency state", () => {
 	it("clears the admitted execution receipt when a task moves to Done", () => {
 		const { board, taskId } = createBoardWithExecutionReceipt();
 		const inProgress = moveTaskToColumn(board, taskId, "in_progress");
-		const trashed = trashTaskAndGetReadyLinkedTaskIds(inProgress.board, taskId);
+		const trashed = discardTask(inProgress.board, taskId);
 
 		expect(trashed.moved).toBe(true);
 		expect(trashed.board.columns.find((column) => column.id === "trash")?.cards[0]?.execution).toBeUndefined();
@@ -800,28 +805,6 @@ describe("board dependency state", () => {
 			threadId: "T-019fb3aa-000b-752a-a88e-337592dae657",
 		});
 		expect(cards.find((card) => card.id === "invalid")?.origin).toBeUndefined();
-	});
-
-	it("disables auto-review settings for a task", () => {
-		let board = createInitialBoardData();
-		board = addTaskToColumn(board, "review", {
-			prompt: "Task A",
-			autoReviewEnabled: true,
-			autoReviewMode: "commit",
-			baseRef: "main",
-		});
-		const task = board.columns.find((column) => column.id === "review")?.cards[0];
-		expect(task).toBeDefined();
-		if (!task) {
-			throw new Error("Expected review task to exist");
-		}
-
-		const disabled = disableTaskAutoReview(board, task.id);
-		expect(disabled.updated).toBe(true);
-
-		const updatedTask = disabled.board.columns.find((column) => column.id === "review")?.cards[0];
-		expect(updatedTask?.autoReviewEnabled).toBe(false);
-		expect(updatedTask?.autoReviewMode).toBe("commit");
 	});
 
 	it("updates only the task title", () => {

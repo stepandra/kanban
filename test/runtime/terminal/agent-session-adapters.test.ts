@@ -218,7 +218,7 @@ enabled = true
 		expect(launch.args.at(-1)).toContain("Implement the task");
 		expect(launch.args.at(-1)).toContain("'task' 'submit' '--task-id' 'task-1'");
 		expect(launch.args.at(-1)).toContain("'--project-path' '/tmp/project with spaces'");
-		expect(launch.args.at(-1)).toContain("Do not run `done`, commit, or push");
+		expect(launch.args.at(-1)).toContain("Do not accept, discard, commit, or push");
 	});
 
 	it("gives Grok and Kimi a task-scoped review submission command", async () => {
@@ -320,185 +320,35 @@ enabled = true
 		expect(launch.deferredStartupInput).toContain("Implement with approvals");
 	});
 
-	it("writes Gemini settings with AfterTool mapped to to_in_progress", async () => {
-		setupTempHome();
-		await prepareAgentLaunch({
-			taskId: "task-1",
-			agentId: "gemini",
-			binary: "gemini",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			workspaceId: "workspace-1",
-		});
-
-		const settingsPath = join(homedir(), ".cline", "kanban", "hooks", "gemini", "settings.json");
-		const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
-			hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
-		};
-		const afterToolCommand = settings.hooks?.AfterTool?.[0]?.hooks?.[0]?.command;
-		expect(afterToolCommand).toContain("hooks");
-		expect(afterToolCommand).toContain("gemini-hook");
-		const hookScriptPath = join(homedir(), ".cline", "kanban", "hooks", "gemini", "gemini-hook.mjs");
-		expect(existsSync(hookScriptPath)).toBe(false);
+	it.each([
+		["gemini", "gemini"],
+		["opencode", "opencode"],
+		["droid", "droid"],
+		["kiro", "kiro-cli"],
+	] as const)("blocks launch-disabled persisted %s agent IDs", async (agentId, binary) => {
+		await expect(
+			prepareAgentLaunch({
+				taskId: `task-${agentId}`,
+				agentId,
+				binary,
+				args: [],
+				cwd: "/tmp",
+				prompt: "Do not run",
+			}),
+		).rejects.toThrow(`Agent "${agentId}" is launch-disabled and retained only for persisted compatibility`);
 	});
 
-	it("writes OpenCode plugin with root-session filtering and permission hooks", async () => {
-		setupTempHome();
-		await prepareAgentLaunch({
-			taskId: "task-1",
-			agentId: "opencode",
-			binary: "opencode",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			workspaceId: "workspace-1",
-		});
-
-		const pluginPath = join(homedir(), ".cline", "kanban", "hooks", "opencode", "kanban.js");
-		const plugin = readFileSync(pluginPath, "utf8");
-		expect(plugin).toContain("parentID");
-		expect(plugin).toContain('"permission.ask"');
-		expect(plugin).toContain('"tool.execute.before"');
-		expect(plugin).toContain('"tool.execute.after"');
-		expect(plugin).toContain("session.status");
-		expect(plugin).toContain("message.part.updated");
-		expect(plugin).toContain("last_assistant_message");
-		expect(plugin).toContain("--metadata-base64");
-		expect(plugin).toContain('if (kind === "review")');
-		expect(plugin).toContain('currentState = "idle"');
-	});
-
-	it("loads OpenCode preferred model from LOCALAPPDATA state and auth paths", async () => {
-		const homePath = setupTempHome();
-		const localAppDataPath = join(homePath, "AppData", "Local");
-		process.env.LOCALAPPDATA = localAppDataPath;
-
-		const statePath = join(localAppDataPath, "opencode", "state");
-		mkdirSync(statePath, { recursive: true });
-		writeFileSync(
-			join(statePath, "model.json"),
-			JSON.stringify(
-				{
-					recent: [
-						{ providerID: "anthropic", modelID: "claude-3-7-sonnet" },
-						{ providerID: "openai", modelID: "gpt-4o" },
-					],
-				},
-				null,
-				2,
-			),
-			"utf8",
-		);
-
-		const authPath = join(localAppDataPath, "opencode");
-		mkdirSync(authPath, { recursive: true });
-		writeFileSync(
-			join(authPath, "auth.json"),
-			JSON.stringify(
-				{
-					openai: { key: "sk-test" },
-				},
-				null,
-				2,
-			),
-			"utf8",
-		);
-
-		const launch = await prepareAgentLaunch({
-			taskId: "task-opencode-model",
-			agentId: "opencode",
-			binary: "opencode",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-		});
-
-		const modelIndex = launch.args.indexOf("--model");
-		expect(modelIndex).toBeGreaterThan(-1);
-		expect(launch.args[modelIndex + 1]).toBe("openai/gpt-4o");
-	});
-
-	it("writes Droid settings with hook transitions and runtime autonomy mode", async () => {
-		setupTempHome();
-		const launch = await prepareAgentLaunch({
-			taskId: "task-1",
-			agentId: "droid",
-			binary: "droid",
-			args: [],
-			autonomousModeEnabled: true,
-			cwd: "/tmp",
-			prompt: "",
-			workspaceId: "workspace-1",
-		});
-
-		expect(launch.env.KANBAN_HOOK_TASK_ID).toBe("task-1");
-		expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
-
-		const settingsArgIndex = launch.args.indexOf("--settings");
-		expect(settingsArgIndex).toBeGreaterThanOrEqual(0);
-		const settingsPath = launch.args[settingsArgIndex + 1];
-		expect(settingsPath).toBeDefined();
-
-		const settings = JSON.parse(readFileSync(settingsPath ?? "", "utf8")) as {
-			autonomyMode?: string;
-			hooks?: Record<string, Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>>;
-		};
-		expect(settings.autonomyMode).toBe("auto-high");
-		expect(settings.hooks?.Stop?.[0]?.hooks?.[0]?.command).toContain("to_review");
-		expect(settings.hooks?.Notification?.[0]?.hooks?.[0]?.command).toContain("activity");
-		expect(settings.hooks?.Notification?.[1]?.hooks?.[0]?.command).toContain("to_review");
-		expect(settings.hooks?.PreToolUse?.[0]?.matcher).toBe("*");
-		expect(settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command).toContain("activity");
-		const preToolInProgressHook = settings.hooks?.PreToolUse?.find(
-			(hook) => hook.matcher === "Read|Grep|Glob|FetchUrl|WebSearch|Execute|Task|Edit|Create",
-		);
-		expect(preToolInProgressHook?.hooks?.[0]?.command).toContain("to_in_progress");
-		const preToolReviewHook = settings.hooks?.PreToolUse?.find((hook) => hook.matcher === "AskUser");
-		expect(preToolReviewHook?.hooks?.[0]?.command).toContain("to_review");
-		expect(settings.hooks?.PostToolUse?.[0]?.matcher).toBe("*");
-		expect(settings.hooks?.PostToolUse?.[0]?.hooks?.[0]?.command).toContain("activity");
-		const postToolInProgressHook = settings.hooks?.PostToolUse?.find((hook) => hook.matcher === "AskUser");
-		expect(postToolInProgressHook?.hooks?.[0]?.command).toContain("to_in_progress");
-		expect(settings.hooks?.UserPromptSubmit?.[0]?.hooks?.[0]?.command).toContain("to_in_progress");
-	});
-
-	it("writes Kiro agent hooks and uses a Kanban-managed soft planning prompt", async () => {
-		setupTempHome();
-		const launch = await prepareAgentLaunch({
-			taskId: "task-kiro-1",
-			agentId: "kiro",
-			binary: "kiro-cli",
-			args: ["chat"],
-			autonomousModeEnabled: true,
-			cwd: "/tmp",
-			prompt: "Investigate deployment drift",
-			startInPlanMode: true,
-			workspaceId: "workspace-1",
-		});
-
-		expect(launch.env.KANBAN_HOOK_TASK_ID).toBe("task-kiro-1");
-		expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
-		expect(launch.args).toContain("--agent");
-		expect(launch.args[launch.args.indexOf("--agent") + 1]).toBe("kanban");
-		expect(launch.args).toContain("--trust-all-tools");
-		const initialPrompt = launch.args.at(-1) ?? "";
-		expect(initialPrompt).toContain("Do not modify files");
-		expect(initialPrompt).toContain("Task:\nInvestigate deployment drift");
-
-		const configPath = join(homedir(), ".kiro", "agents", "kanban.json");
-		const config = JSON.parse(readFileSync(configPath, "utf8")) as {
-			tools?: string[];
-			hooks?: Record<string, Array<{ command?: string }>>;
-		};
-		expect(config.tools).toEqual(["*"]);
-		expect(config.hooks?.agentSpawn?.[0]?.command).toContain("to_in_progress");
-		expect(config.hooks?.userPromptSubmit?.[0]?.command).toContain("to_in_progress");
-		expect(config.hooks?.preToolUse?.[0]?.command).toContain("activity");
-		expect(config.hooks?.preToolUse?.[1]?.command).toContain("to_in_progress");
-		expect(config.hooks?.postToolUse?.[0]?.command).toContain("activity");
-		expect(config.hooks?.stop?.[0]?.command).toContain("to_review");
-		expect(config.hooks?.stop?.[0]?.command).toContain("Waiting for review");
+	it("keeps the persisted Amp ID behind a non-Orb compatibility fence", async () => {
+		await expect(
+			prepareAgentLaunch({
+				taskId: "task-amp",
+				agentId: "amp",
+				binary: "amp",
+				args: [],
+				cwd: "/tmp",
+				prompt: "Do not run",
+			}),
+		).rejects.toThrow("Amp task executor IDs are retained only for persisted compatibility");
 	});
 
 	it("materializes task images for CLI prompts", async () => {
@@ -566,8 +416,29 @@ enabled = true
 		expect(launch.deferredStartupInput?.endsWith("\r")).toBe(true);
 	});
 
-	it("adds resume flags for each agent", async () => {
+	it("adds resume flags for supported agents", async () => {
 		setupTempHome();
+		const grokLaunch = await prepareAgentLaunch({
+			taskId: "task-grok",
+			agentId: "grok",
+			binary: "grok",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+		expect(grokLaunch.args).toContain("--continue");
+
+		const kimiLaunch = await prepareAgentLaunch({
+			taskId: "task-kimi",
+			agentId: "kimi",
+			binary: "kimi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+		expect(kimiLaunch.args).toContain("--continue");
 
 		const codexLaunch = await prepareAgentLaunch({
 			taskId: "task-codex",
@@ -590,50 +461,6 @@ enabled = true
 			resumeFromTrash: true,
 		});
 		expect(claudeLaunch.args).toContain("--continue");
-
-		const geminiLaunch = await prepareAgentLaunch({
-			taskId: "task-gemini",
-			agentId: "gemini",
-			binary: "gemini",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			resumeFromTrash: true,
-		});
-		expect(geminiLaunch.args).toEqual(expect.arrayContaining(["--resume", "latest"]));
-
-		const opencodeLaunch = await prepareAgentLaunch({
-			taskId: "task-opencode",
-			agentId: "opencode",
-			binary: "opencode",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			resumeFromTrash: true,
-		});
-		expect(opencodeLaunch.args).toContain("--continue");
-
-		const droidLaunch = await prepareAgentLaunch({
-			taskId: "task-droid",
-			agentId: "droid",
-			binary: "droid",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			resumeFromTrash: true,
-		});
-		expect(droidLaunch.args).toContain("--resume");
-
-		const kiroLaunch = await prepareAgentLaunch({
-			taskId: "task-kiro",
-			agentId: "kiro",
-			binary: "kiro-cli",
-			args: ["chat"],
-			cwd: "/tmp",
-			prompt: "",
-			resumeFromTrash: true,
-		});
-		expect(kiroLaunch.args).toContain("--resume");
 	});
 
 	it("places Codex hook config before the resume subcommand", async () => {
@@ -666,7 +493,7 @@ enabled = true
 		}
 	});
 
-	it("applies autonomous mode flags in adapters for non-droid CLIs", async () => {
+	it("applies autonomous mode flags in supported adapters", async () => {
 		setupTempHome();
 
 		const claudeLaunch = await prepareAgentLaunch({
@@ -694,28 +521,6 @@ enabled = true
 			prompt: "",
 		});
 		expect(codexLaunch.args).toContain("--dangerously-bypass-approvals-and-sandbox");
-
-		const geminiLaunch = await prepareAgentLaunch({
-			taskId: "task-gemini-auto",
-			agentId: "gemini",
-			binary: "gemini",
-			args: [],
-			autonomousModeEnabled: true,
-			cwd: "/tmp",
-			prompt: "",
-		});
-		expect(geminiLaunch.args).toContain("--yolo");
-
-		const kiroLaunch = await prepareAgentLaunch({
-			taskId: "task-kiro-auto",
-			agentId: "kiro",
-			binary: "kiro-cli",
-			args: ["chat"],
-			autonomousModeEnabled: true,
-			cwd: "/tmp",
-			prompt: "",
-		});
-		expect(kiroLaunch.args).toContain("--trust-all-tools");
 	});
 
 	it("does not add a Claude permission mode when args already set one", async () => {
@@ -795,27 +600,5 @@ enabled = true
 			prompt: "",
 		});
 		expect(codexLaunch.args).toContain("--dangerously-bypass-approvals-and-sandbox");
-
-		const geminiLaunch = await prepareAgentLaunch({
-			taskId: "task-gemini-no-auto",
-			agentId: "gemini",
-			binary: "gemini",
-			args: ["--yolo"],
-			autonomousModeEnabled: false,
-			cwd: "/tmp",
-			prompt: "",
-		});
-		expect(geminiLaunch.args).toContain("--yolo");
-
-		const kiroLaunch = await prepareAgentLaunch({
-			taskId: "task-kiro-no-auto",
-			agentId: "kiro",
-			binary: "kiro-cli",
-			args: ["chat", "--trust-all-tools"],
-			autonomousModeEnabled: false,
-			cwd: "/tmp",
-			prompt: "",
-		});
-		expect(kiroLaunch.args).toContain("--trust-all-tools");
 	});
 });

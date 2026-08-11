@@ -18,24 +18,6 @@ export interface RuntimeAgentCatalogEntry {
 
 export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 	{
-		id: "claude",
-		label: "Claude Code",
-		binary: "claude",
-		baseArgs: [],
-		autonomousArgs: ["--permission-mode", "auto"],
-		installUrl: "https://docs.anthropic.com/en/docs/claude-code/quickstart",
-		durableSession: true,
-	},
-	{
-		id: "codex",
-		label: "OpenAI Codex",
-		binary: "codex",
-		baseArgs: [],
-		autonomousArgs: ["--dangerously-bypass-approvals-and-sandbox"],
-		installUrl: "https://github.com/openai/codex",
-		durableSession: true,
-	},
-	{
 		id: "grok",
 		label: "Grok Build",
 		binary: "grok",
@@ -51,6 +33,24 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		baseArgs: [],
 		autonomousArgs: ["--yolo"],
 		installUrl: "https://moonshotai.github.io/kimi-code/",
+		durableSession: true,
+	},
+	{
+		id: "claude",
+		label: "Claude Code",
+		binary: "claude",
+		baseArgs: [],
+		autonomousArgs: ["--permission-mode", "auto"],
+		installUrl: "https://docs.anthropic.com/en/docs/claude-code/quickstart",
+		durableSession: true,
+	},
+	{
+		id: "codex",
+		label: "OpenAI Codex",
+		binary: "codex",
+		baseArgs: [],
+		autonomousArgs: ["--dangerously-bypass-approvals-and-sandbox"],
+		installUrl: "https://github.com/openai/codex",
 		durableSession: true,
 	},
 	{
@@ -93,18 +93,9 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 	},
 ];
 
-// Temporarily keep launch support scoped to the core agent set.
-// Re-enable additional CLIs by uncommenting entries below when ready.
-export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
-	"claude",
-	"codex",
-	"grok",
-	"kimi",
-	// "opencode",
-	// "droid",
-	// "kiro",
-	// "gemini",
-];
+// Catalog entries outside this set exist only to read persisted agent IDs.
+// They must not become executable merely because their binary is installed.
+export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = ["grok", "kimi", "claude", "codex"];
 
 const RUNTIME_LAUNCH_SUPPORTED_AGENT_ID_SET = new Set<RuntimeAgentId>(RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS);
 

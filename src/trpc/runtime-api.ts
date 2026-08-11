@@ -171,6 +171,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						`Task "${taskId}" is in "${record.columnId}" and cannot be ${input.resumeFromTrash ? "resumed" : "started"}.`,
 					);
 				}
+				if (state.board.dependencies.some((dependency) => dependency.fromTaskId === taskId)) {
+					throw new Error(`Task "${taskId}" cannot be started until all of its prerequisites are accepted.`);
+				}
 				if (record.card.removedAgentId === "cline") {
 					throw new Error(
 						`Task "${taskId}" still references the removed Cline worker. Assign a supported worker before starting it.`,
@@ -208,6 +211,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					const latestRecord = findBoardTask(latestState, taskId);
 					if (!latestRecord) {
 						throw new Error(`Task "${taskId}" changed while its execution attempt was being queued.`);
+					}
+					if (!allowedColumns.has(latestRecord.columnId)) {
+						throw new Error(`Task "${taskId}" changed while its execution attempt was being queued.`);
+					}
+					if (latestState.board.dependencies.some((dependency) => dependency.fromTaskId === taskId)) {
+						throw new Error(`Task "${taskId}" cannot be started until all of its prerequisites are accepted.`);
 					}
 					const recorded = recordTaskExecutionAttempt(latestState.board, taskId, attempt);
 					if (!recorded.recorded) {

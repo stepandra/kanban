@@ -19,8 +19,6 @@ function createBoard(): RuntimeBoardData {
 						title: "Task A",
 						prompt: "Implement A",
 						startInPlanMode: true,
-						autoReviewEnabled: true,
-						autoReviewMode: "pr",
 						agentId: "codex",
 						images: [
 							{

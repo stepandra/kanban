@@ -1,4 +1,22 @@
 import * as esbuild from "esbuild";
+import { execFileSync } from "node:child_process";
+
+function resolveBuildRevision() {
+	const configured = process.env.KANBAN_BUILD_REVISION?.trim();
+	if (configured) {
+		return configured;
+	}
+	try {
+		if (execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" }).trim()) {
+			return "development";
+		}
+		return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	} catch {
+		return "unknown";
+	}
+}
+
+const buildRevision = resolveBuildRevision();
 
 /**
  * Runtime externals. `node-pty` is a native addon with a compiled binding
@@ -10,6 +28,7 @@ const external = ["node-pty"];
 /** Bake OTEL telemetry env vars into the bundle at build time. */
 const define = {
 	"process.env.NODE_ENV": '"production"',
+	"process.env.KANBAN_BUILD_REVISION": JSON.stringify(buildRevision),
 	"process.env.OTEL_TELEMETRY_ENABLED": JSON.stringify(process.env.OTEL_TELEMETRY_ENABLED ?? ""),
 	"process.env.OTEL_EXPORTER_OTLP_ENDPOINT": JSON.stringify(process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? ""),
 	"process.env.OTEL_METRICS_EXPORTER": JSON.stringify(process.env.OTEL_METRICS_EXPORTER ?? ""),
@@ -57,4 +76,4 @@ await Promise.all([
 	}),
 ]);
 
-console.log("esbuild: bundled dist/cli.js and dist/index.js");
+console.log(`esbuild: bundled dist/cli.js and dist/index.js at ${buildRevision}`);

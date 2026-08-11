@@ -4,8 +4,6 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeBoardDependency,
-	RuntimeTaskAcceptanceEvidence,
-	RuntimeTaskAutoReviewMode,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
@@ -19,8 +17,6 @@ export interface RuntimeCreateTaskInput {
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
-	autoReviewEnabled?: boolean;
-	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
 	priority?: number;
@@ -32,19 +28,10 @@ export interface RuntimeUpdateTaskInput {
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
-	autoReviewEnabled?: boolean;
-	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
 	priority?: number | null;
 	baseRef: string;
-}
-
-function normalizeTaskAutoReviewMode(value: RuntimeTaskAutoReviewMode | null | undefined): RuntimeTaskAutoReviewMode {
-	if (value === "pr") {
-		return value;
-	}
-	return "commit";
 }
 
 // Copy image metadata so board tasks do not retain caller-owned array or object references.
@@ -123,7 +110,7 @@ export interface RuntimeRecordTaskExecutionAttemptResult extends RuntimeUpdateTa
 export interface RuntimeAddTaskDependencyResult {
 	board: RuntimeBoardData;
 	added: boolean;
-	reason?: "missing_task" | "same_task" | "duplicate" | "trash_task" | "non_backlog" | "cycle";
+	reason?: "missing_task" | "same_task" | "duplicate" | "trash_task" | "non_backlog" | "cycle" | "task_admitted";
 	dependency?: RuntimeBoardDependency;
 }
 
@@ -132,18 +119,11 @@ export interface RuntimeRemoveTaskDependencyResult {
 	removed: boolean;
 }
 
-export interface RuntimeTrashTaskResult extends RuntimeMoveTaskResult {
-	readyTaskIds: string[];
-}
-
-export interface RuntimeAcceptTaskResult extends RuntimeTrashTaskResult {
-	acceptanceEvidence: RuntimeTaskAcceptanceEvidence | null;
-}
-
 export interface RuntimeDeleteTasksResult {
 	board: RuntimeBoardData;
 	deleted: boolean;
 	deletedTaskIds: string[];
+	blockedTaskIds: string[];
 }
 
 function collectExistingTaskIds(board: RuntimeBoardData): Set<string> {
@@ -262,9 +242,6 @@ function resolveDependencyEndpoints(
 	if (!firstColumnId || !secondColumnId) {
 		return { reason: "missing_task" };
 	}
-	if (firstColumnId === "trash" || secondColumnId === "trash") {
-		return { reason: "trash_task" };
-	}
 	const firstIsBacklog = firstColumnId === "backlog";
 	const secondIsBacklog = secondColumnId === "backlog";
 	if (firstIsBacklog && secondIsBacklog) {
@@ -279,37 +256,6 @@ function resolveDependencyEndpoints(
 	return firstIsBacklog
 		? { backlogTaskId: firstTaskId, linkedTaskId: secondTaskId }
 		: { backlogTaskId: secondTaskId, linkedTaskId: firstTaskId };
-}
-
-function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
-	board: RuntimeBoardData,
-	taskId: string,
-	fromColumnId: RuntimeBoardColumnId | null,
-): string[] {
-	// Unblocking semantics: trashing a prerequisite from ANY column (backlog, in_progress, or review)
-	// resolves its dependency edges, because a trashed prerequisite will never be worked on again.
-	// A dependent becomes ready only once ALL of its prerequisite edges are gone. Trashing a task
-	// that is already in the trash (or missing) unblocks nothing.
-	if (!taskId || board.dependencies.length === 0 || !fromColumnId || fromColumnId === "trash") {
-		return [];
-	}
-	const readyTaskIds = new Set<string>();
-	for (const dependency of board.dependencies) {
-		if (dependency.toTaskId !== taskId) {
-			continue;
-		}
-		if (getTaskColumnId(board, dependency.fromTaskId) !== "backlog") {
-			continue;
-		}
-		const hasOtherPendingDependencies = board.dependencies.some(
-			(candidate) => candidate.id !== dependency.id && candidate.fromTaskId === dependency.fromTaskId,
-		);
-		if (hasOtherPendingDependencies) {
-			continue;
-		}
-		readyTaskIds.add(dependency.fromTaskId);
-	}
-	return [...readyTaskIds];
 }
 
 export function updateTaskDependencies(board: RuntimeBoardData): RuntimeBoardData {
@@ -328,19 +274,18 @@ export function updateTaskDependencies(board: RuntimeBoardData): RuntimeBoardDat
 		if (!taskIds.has(firstTaskId) || !taskIds.has(secondTaskId)) {
 			continue;
 		}
-		const resolved = resolveDependencyEndpoints(board, firstTaskId, secondTaskId);
-		if ("reason" in resolved) {
+		const pairKey = createDependencyPairKey(firstTaskId, secondTaskId);
+		if (existingPairs.has(pairKey)) {
 			continue;
 		}
-		const pairKey = createDependencyPairKey(resolved.backlogTaskId, resolved.linkedTaskId);
-		if (existingPairs.has(pairKey)) {
+		if (wouldCreateDependencyCycle({ ...board, dependencies }, firstTaskId, secondTaskId)) {
 			continue;
 		}
 		existingPairs.add(pairKey);
 		dependencies.push({
 			id: dependency.id,
-			fromTaskId: resolved.backlogTaskId,
-			toTaskId: resolved.linkedTaskId,
+			fromTaskId: firstTaskId,
+			toTaskId: secondTaskId,
 			createdAt: dependency.createdAt,
 		});
 	}
@@ -390,8 +335,6 @@ export function addTaskToColumn(
 		title: resolveTaskTitle(input.title, prompt),
 		prompt,
 		startInPlanMode: Boolean(input.startInPlanMode),
-		autoReviewEnabled: Boolean(input.autoReviewEnabled),
-		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.priority !== undefined ? { priority: input.priority } : {}),
@@ -503,9 +446,18 @@ export function addTaskDependency(
 	if (normalizedFirstTaskId === normalizedSecondTaskId) {
 		return { board, added: false, reason: "same_task" };
 	}
+	if (
+		getTaskColumnId(board, normalizedFirstTaskId) === "trash" ||
+		getTaskColumnId(board, normalizedSecondTaskId) === "trash"
+	) {
+		return { board, added: false, reason: "trash_task" };
+	}
 	const resolved = resolveDependencyEndpoints(board, normalizedFirstTaskId, normalizedSecondTaskId);
 	if ("reason" in resolved) {
 		return { board, added: false, reason: resolved.reason };
+	}
+	if (findTaskLocation(board, resolved.backlogTaskId)?.task.execution) {
+		return { board, added: false, reason: "task_admitted" };
 	}
 	if (hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId)) {
 		return { board, added: false, reason: "duplicate" };
@@ -535,11 +487,18 @@ export function canAddTaskDependency(board: RuntimeBoardData, firstTaskId: strin
 	if (!normalizedFirstTaskId || !normalizedSecondTaskId || normalizedFirstTaskId === normalizedSecondTaskId) {
 		return false;
 	}
+	if (
+		getTaskColumnId(board, normalizedFirstTaskId) === "trash" ||
+		getTaskColumnId(board, normalizedSecondTaskId) === "trash"
+	) {
+		return false;
+	}
 	const resolved = resolveDependencyEndpoints(board, normalizedFirstTaskId, normalizedSecondTaskId);
 	if ("reason" in resolved) {
 		return false;
 	}
 	return (
+		!findTaskLocation(board, resolved.backlogTaskId)?.task.execution &&
 		!hasDependencyPair(board, resolved.backlogTaskId, resolved.linkedTaskId) &&
 		!wouldCreateDependencyCycle(board, resolved.backlogTaskId, resolved.linkedTaskId)
 	);
@@ -559,31 +518,8 @@ export function removeTaskDependency(board: RuntimeBoardData, dependencyId: stri
 	};
 }
 
-export function getReadyLinkedTaskIdsForTaskInTrash(board: RuntimeBoardData, taskId: string): string[] {
-	return getLinkedBacklogTaskIdsReadyAfterTaskTrashed(board, taskId, getTaskColumnId(board, taskId));
-}
-
-export function trashTaskAndGetReadyLinkedTaskIds(
-	board: RuntimeBoardData,
-	taskId: string,
-	now: number = Date.now(),
-): RuntimeTrashTaskResult {
-	return trashTaskAndGetReadyLinkedTaskIdsInternal(board, taskId, now, false);
-}
-
-function trashTaskAndGetReadyLinkedTaskIdsInternal(
-	board: RuntimeBoardData,
-	taskId: string,
-	now: number,
-	allowReviewToTrash: boolean,
-): RuntimeTrashTaskResult {
-	const fromColumnId = getTaskColumnId(board, taskId);
-	const readyTaskIds = getLinkedBacklogTaskIdsReadyAfterTaskTrashed(board, taskId, fromColumnId);
-	const movedToTrash = moveTaskToColumnInternal(board, taskId, "trash", now, allowReviewToTrash);
-	return {
-		...movedToTrash,
-		readyTaskIds: movedToTrash.moved ? readyTaskIds : [],
-	};
+export function discardTask(board: RuntimeBoardData, taskId: string, now: number = Date.now()): RuntimeMoveTaskResult {
+	return moveTaskToColumnInternal(board, taskId, "trash", now);
 }
 
 export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<string>): RuntimeDeleteTasksResult {
@@ -595,6 +531,27 @@ export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<
 			board,
 			deleted: false,
 			deletedTaskIds: [],
+			blockedTaskIds: [],
+		};
+	}
+	const blockedTaskIds = Array.from(
+		new Set(
+			board.dependencies.flatMap((dependency) => {
+				const deletesFrom = normalizedTaskIds.has(dependency.fromTaskId);
+				const deletesTo = normalizedTaskIds.has(dependency.toTaskId);
+				if (deletesFrom === deletesTo) {
+					return [];
+				}
+				return deletesFrom ? [dependency.fromTaskId] : [dependency.toTaskId];
+			}),
+		),
+	).sort();
+	if (blockedTaskIds.length > 0) {
+		return {
+			board,
+			deleted: false,
+			deletedTaskIds: [],
+			blockedTaskIds,
 		};
 	}
 
@@ -615,6 +572,7 @@ export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<
 			board,
 			deleted: false,
 			deletedTaskIds: [],
+			blockedTaskIds: [],
 		};
 	}
 
@@ -631,6 +589,7 @@ export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<
 		},
 		deleted: true,
 		deletedTaskIds,
+		blockedTaskIds: [],
 	};
 }
 
@@ -640,7 +599,28 @@ export function moveTaskToColumn(
 	targetColumnId: RuntimeBoardColumnId,
 	now: number = Date.now(),
 ): RuntimeMoveTaskResult {
-	return moveTaskToColumnInternal(board, taskId, targetColumnId, now, false);
+	const found = findTaskLocation(board, taskId.trim());
+	if (
+		found?.columnId === "backlog" &&
+		targetColumnId === "in_progress" &&
+		board.dependencies.some((dependency) => dependency.fromTaskId === found.task.id)
+	) {
+		return {
+			moved: false,
+			board,
+			task: found.task,
+			fromColumnId: found.columnId,
+		};
+	}
+	if (found?.columnId === "review" && targetColumnId === "trash") {
+		return {
+			moved: false,
+			board,
+			task: found.task,
+			fromColumnId: found.columnId,
+		};
+	}
+	return moveTaskToColumnInternal(board, taskId, targetColumnId, now);
 }
 
 function moveTaskToColumnInternal(
@@ -648,7 +628,6 @@ function moveTaskToColumnInternal(
 	taskId: string,
 	targetColumnId: RuntimeBoardColumnId,
 	now: number,
-	allowReviewToTrash: boolean,
 ): RuntimeMoveTaskResult {
 	const normalizedTaskId = taskId.trim();
 	if (!normalizedTaskId) {
@@ -670,14 +649,6 @@ function moveTaskToColumnInternal(
 		};
 	}
 	if (found.columnId === targetColumnId) {
-		return {
-			moved: false,
-			board,
-			task: found.task,
-			fromColumnId: found.columnId,
-		};
-	}
-	if (found.columnId === "review" && targetColumnId === "trash" && !allowReviewToTrash) {
 		return {
 			moved: false,
 			board,
@@ -756,54 +727,6 @@ function moveTaskToColumnInternal(
 	};
 }
 
-export function acceptTaskWithEvidence(
-	board: RuntimeBoardData,
-	taskId: string,
-	acceptanceEvidence: RuntimeTaskAcceptanceEvidence,
-): RuntimeAcceptTaskResult {
-	const found = findTaskLocation(board, taskId);
-	if (!found || found.columnId !== "review") {
-		return {
-			moved: false,
-			board,
-			task: found?.task ?? null,
-			fromColumnId: found?.columnId ?? null,
-			readyTaskIds: [],
-			acceptanceEvidence: found?.task.acceptanceEvidence ?? null,
-		};
-	}
-	const columnsWithEvidence = board.columns.map((column, columnIndex) => {
-		if (columnIndex !== found.columnIndex) {
-			return column;
-		}
-		return {
-			...column,
-			cards: column.cards.map((card, cardIndex) =>
-				cardIndex === found.taskIndex
-					? {
-							...card,
-							acceptanceEvidence,
-							updatedAt: Date.now(),
-						}
-					: card,
-			),
-		};
-	});
-	const moved = trashTaskAndGetReadyLinkedTaskIdsInternal(
-		{
-			...board,
-			columns: columnsWithEvidence,
-		},
-		taskId,
-		Date.now(),
-		true,
-	);
-	return {
-		...moved,
-		acceptanceEvidence: moved.task?.acceptanceEvidence ?? null,
-	};
-}
-
 export function updateTask(
 	board: RuntimeBoardData,
 	taskId: string,
@@ -862,8 +785,6 @@ export function updateTask(
 				title: resolveTaskTitle(input.title, prompt),
 				prompt,
 				startInPlanMode,
-				autoReviewEnabled: Boolean(input.autoReviewEnabled),
-				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 				images,
 				agentId,
 				removedAgentId,

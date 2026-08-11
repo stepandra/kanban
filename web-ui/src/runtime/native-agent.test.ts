@@ -28,10 +28,6 @@ function createRuntimeConfigResponse(
 			},
 		],
 		shortcuts: [],
-		commitPromptTemplate: "",
-		openPrPromptTemplate: "",
-		commitPromptTemplateDefault: "",
-		openPrPromptTemplateDefault: "",
 		taskTemplates: [],
 	};
 	return {

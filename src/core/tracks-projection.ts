@@ -23,11 +23,11 @@ interface LocatedTask {
 }
 
 function createEmptyCounts(): RuntimeTrackTaskCounts {
-	return { backlog: 0, inProgress: 0, review: 0, accepted: 0 };
+	return { backlog: 0, inProgress: 0, review: 0, accepted: 0, discarded: 0 };
 }
 
-function incrementCount(counts: RuntimeTrackTaskCounts, columnId: RuntimeBoardColumnId): void {
-	switch (columnId) {
+function incrementCount(counts: RuntimeTrackTaskCounts, task: LocatedTask): void {
+	switch (task.columnId) {
 		case "backlog":
 			counts.backlog += 1;
 			break;
@@ -38,13 +38,20 @@ function incrementCount(counts: RuntimeTrackTaskCounts, columnId: RuntimeBoardCo
 			counts.review += 1;
 			break;
 		case "trash":
-			counts.accepted += 1;
+			if (task.card.acceptanceEvidence) {
+				counts.accepted += 1;
+			} else {
+				counts.discarded += 1;
+			}
 			break;
 	}
 }
 
-function toProjectionStatus(columnId: RuntimeBoardColumnId): RuntimeTrackTaskRef["status"] {
-	return columnId === "trash" ? "accepted" : columnId;
+function toProjectionStatus(task: LocatedTask): RuntimeTrackTaskRef["status"] {
+	if (task.columnId !== "trash") {
+		return task.columnId;
+	}
+	return task.card.acceptanceEvidence ? "accepted" : "discarded";
 }
 
 function collectLocatedTasks(board: RuntimeBoardData): LocatedTask[] {
@@ -60,7 +67,7 @@ function buildTaskRef(task: LocatedTask, blockedByCount: number): RuntimeTrackTa
 	return {
 		taskId: task.card.id,
 		title: task.card.title,
-		status: toProjectionStatus(task.columnId),
+		status: toProjectionStatus(task),
 		weight: task.card.planning?.weight ?? 1,
 		blockedByCount,
 	};
@@ -73,7 +80,8 @@ function buildProgress(tasks: LocatedTask[]): RuntimeTrackProgress {
 	const hasExplicitWeights = tasks.some((task) => task.card.planning?.weight !== undefined);
 	const totalWeight = tasks.reduce((total, task) => total + (task.card.planning?.weight ?? 1), 0);
 	const acceptedWeight = tasks.reduce(
-		(total, task) => total + (task.columnId === "trash" ? (task.card.planning?.weight ?? 1) : 0),
+		(total, task) =>
+			total + (task.columnId === "trash" && task.card.acceptanceEvidence ? (task.card.planning?.weight ?? 1) : 0),
 		0,
 	);
 	return {
@@ -86,7 +94,7 @@ function buildProgress(tasks: LocatedTask[]): RuntimeTrackProgress {
 
 function buildCounts(tasks: LocatedTask[]): RuntimeTrackTaskCounts {
 	const counts = createEmptyCounts();
-	for (const task of tasks) incrementCount(counts, task.columnId);
+	for (const task of tasks) incrementCount(counts, task);
 	return counts;
 }
 

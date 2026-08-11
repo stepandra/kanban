@@ -1,44 +1,20 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import pLimit from "p-limit";
 import type { Dispatch, SetStateAction } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
-import type { TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-actions";
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
-import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
-import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
-import {
-	applyDragResult,
-	clearColumnTasks,
-	disableTaskAutoReview,
-	findCardSelection,
-	getTaskColumnId,
-	moveTaskToColumn,
-	updateTask,
-} from "@/state/board-state";
-import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
+import type { RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
+import { applyDragResult, findCardSelection, getTaskColumnId, moveTaskToColumn } from "@/state/board-state";
+import { setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
-import { resolveTaskAutoReviewMode } from "@/types";
 import {
 	getBrowserNotificationPermission,
 	hasPromptedForBrowserNotificationPermission,
 	requestBrowserNotificationPermission,
 } from "@/utils/notification-permission";
-
-// Clearing the Done column fires stopTaskSession + cleanupTaskWorkspace per task.
-// The tRPC client batches same-tick calls into one request, so an unbounded
-// Promise.all makes the server run every stop/worktree-delete concurrently —
-// with a large column that means 100+ simultaneous git operations against the
-// shared repo, which can freeze or crash the runtime. Bound the fan-out instead.
-const CLEAR_TRASH_CLEANUP_CONCURRENCY = 4;
-
-interface TaskGitActionLoadingStateLike {
-	commitSource: string | null;
-	prSource: string | null;
-}
 
 interface SelectedBoardCard {
 	card: BoardCard;
@@ -55,16 +31,12 @@ interface PendingProgrammaticStartMoveCompletion {
 interface UseBoardInteractionsInput {
 	board: BoardData;
 	setBoard: Dispatch<SetStateAction<BoardData>>;
-	sessions: Record<string, RuntimeTaskSessionSummary>;
-	setSessions: Dispatch<SetStateAction<Record<string, RuntimeTaskSessionSummary>>>;
 	selectedCard: SelectedBoardCard | null;
 	selectedTaskId: string | null;
 	currentProjectId: string | null;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
-	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
 	stopTaskSession: UseTaskSessionsResult["stopTaskSession"];
-	cleanupTaskWorkspace: UseTaskSessionsResult["cleanupTaskWorkspace"];
 	ensureTaskWorkspace: UseTaskSessionsResult["ensureTaskWorkspace"];
 	startTaskSession: UseTaskSessionsResult["startTaskSession"];
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
@@ -74,8 +46,6 @@ interface UseBoardInteractionsInput {
 		options?: SendTerminalInputOptions,
 	) => Promise<{ ok: boolean; message?: string }>;
 	readyForReviewNotificationsEnabled: boolean;
-	taskGitActionLoadingByTaskId: Record<string, TaskGitActionLoadingStateLike>;
-	runAutoReviewGitAction: (taskId: string, action: TaskGitAction) => Promise<boolean>;
 }
 
 export interface UseBoardInteractionsResult {
@@ -92,34 +62,25 @@ export interface UseBoardInteractionsResult {
 	handleMoveReviewCardToTrash: (taskId: string) => void;
 	handleMoveTasksToColumn: (taskIds: string[], toColumnId: BoardColumnId) => void;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
-	handleCancelAutomaticTaskAction: (taskId: string) => void;
-	handleOpenClearTrash: () => void;
-	handleConfirmClearTrash: () => void;
 	handleAddReviewComments: (taskId: string, text: string) => Promise<void>;
 	handleSendReviewComments: (taskId: string, text: string) => Promise<void>;
 	moveToTrashLoadingById: Record<string, boolean>;
-	trashTaskCount: number;
 }
 
 export function useBoardInteractions({
 	board,
 	setBoard,
-	setSessions,
 	selectedCard,
 	selectedTaskId,
 	currentProjectId,
 	setSelectedTaskId,
-	setIsClearTrashDialogOpen,
 	setIsGitHistoryOpen,
 	stopTaskSession,
-	cleanupTaskWorkspace,
 	ensureTaskWorkspace,
 	startTaskSession,
 	fetchTaskWorkspaceInfo,
 	sendTaskSessionInput,
 	readyForReviewNotificationsEnabled,
-	taskGitActionLoadingByTaskId,
-	runAutoReviewGitAction,
 }: UseBoardInteractionsInput): UseBoardInteractionsResult {
 	const notificationPermissionPromptInFlightRef = useRef(false);
 	const moveToTrashLoadingByIdRef = useRef<Record<string, true>>({});
@@ -266,12 +227,6 @@ export function useBoardInteractions({
 		},
 		[sendTaskSessionInput],
 	);
-
-	const trashTaskIds = useMemo(() => {
-		const trashColumn = board.columns.find((column) => column.id === "trash");
-		return trashColumn ? trashColumn.cards.map((card) => card.id) : [];
-	}, [board.columns]);
-	const trashTaskCount = trashTaskIds.length;
 
 	const maybeRequestNotificationPermissionForTaskStart = useCallback(() => {
 		const shouldPromptForNotificationPermission =
@@ -441,23 +396,11 @@ export function useBoardInteractions({
 			setBoard,
 			setSelectedTaskId,
 			stopTaskSession,
-			cleanupTaskWorkspace,
-			maybeRequestNotificationPermissionForTaskStart,
-			kickoffTaskInProgress,
-			startBacklogTaskWithAnimation,
-			waitForBacklogStartAnimationAvailability: waitForProgrammaticCardMoveAvailability,
 		});
 
 	useEffect(() => {
 		setRequestMoveTaskToTrashHandler(requestMoveTaskToTrash);
 	}, [requestMoveTaskToTrash, setRequestMoveTaskToTrashHandler]);
-
-	useReviewAutoActions({
-		board,
-		taskGitActionLoadingByTaskId,
-		runAutoReviewGitAction,
-		resetKey: currentProjectId,
-	});
 
 	const resumeTaskFromTrash = useCallback(
 		async (task: BoardCard, taskId: string): Promise<void> => {
@@ -499,8 +442,7 @@ export function useBoardInteractions({
 					} else if (currentColumnId !== "review") {
 						return currentBoard;
 					}
-					const disabledAutoReview = disableTaskAutoReview(resumedBoard, taskId);
-					return disabledAutoReview.updated ? disabledAutoReview.board : resumedBoard;
+					return resumedBoard;
 				});
 			} finally {
 				resumeTaskFromTrashInFlightRef.current.delete(taskId);
@@ -713,28 +655,6 @@ export function useBoardInteractions({
 		[board, resumeTaskFromTrash, tryProgrammaticCardMove],
 	);
 
-	const handleCancelAutomaticTaskAction = useCallback(
-		(taskId: string) => {
-			setBoard((currentBoard) => {
-				const selection = findCardSelection(currentBoard, taskId);
-				if (!selection || selection.card.autoReviewEnabled !== true) {
-					return currentBoard;
-				}
-				const updated = updateTask(currentBoard, taskId, {
-					prompt: selection.card.prompt,
-					startInPlanMode: selection.card.startInPlanMode,
-					autoReviewEnabled: false,
-					autoReviewMode: resolveTaskAutoReviewMode(selection.card.autoReviewMode),
-					images: selection.card.images,
-					agentId: selection.card.agentId,
-					baseRef: selection.card.baseRef,
-				});
-				return updated.updated ? updated.board : currentBoard;
-			});
-		},
-		[setBoard],
-	);
-
 	const handleMoveTasksToTrash = useCallback(
 		(taskIds: string[]) => {
 			for (const taskId of taskIds) {
@@ -767,62 +687,6 @@ export function useBoardInteractions({
 		[handleMoveTasksToTrash, handleRestoreTaskFromTrash, handleStartAllBacklogTasks],
 	);
 
-	const handleOpenClearTrash = useCallback(() => {
-		if (trashTaskCount === 0) {
-			return;
-		}
-		setIsClearTrashDialogOpen(true);
-	}, [setIsClearTrashDialogOpen, trashTaskCount]);
-
-	const handleConfirmClearTrash = useCallback(() => {
-		const cleanupTargets =
-			board.columns
-				.find((column) => column.id === "trash")
-				?.cards.map((task) => ({
-					taskId: task.id,
-					executionAttemptId: task.execution?.attemptId ?? null,
-				})) ?? [];
-		const taskIds = cleanupTargets.map((target) => target.taskId);
-		setIsClearTrashDialogOpen(false);
-		if (taskIds.length === 0) {
-			return;
-		}
-
-		setBoard((currentBoard) => clearColumnTasks(currentBoard, "trash").board);
-		setSessions((currentSessions) => {
-			const nextSessions = { ...currentSessions };
-			for (const taskId of taskIds) {
-				delete nextSessions[taskId];
-			}
-			return nextSessions;
-		});
-		if (selectedTaskId && taskIds.includes(selectedTaskId)) {
-			setSelectedTaskId(null);
-			clearTaskWorkspaceInfo(selectedTaskId);
-		}
-
-		const limitCleanup = pLimit(CLEAR_TRASH_CLEANUP_CONCURRENCY);
-		void (async () => {
-			await Promise.all(
-				cleanupTargets.map(({ taskId, executionAttemptId }) =>
-					limitCleanup(async () => {
-						await stopTaskSession(taskId, executionAttemptId);
-						await cleanupTaskWorkspace(taskId, null);
-					}),
-				),
-			);
-		})();
-	}, [
-		cleanupTaskWorkspace,
-		board.columns,
-		selectedTaskId,
-		setBoard,
-		setIsClearTrashDialogOpen,
-		setSelectedTaskId,
-		setSessions,
-		stopTaskSession,
-	]);
-
 	const resetBoardInteractionsState = useCallback(() => {
 		moveToTrashLoadingByIdRef.current = {};
 		resumeTaskFromTrashInFlightRef.current.clear();
@@ -831,8 +695,7 @@ export function useBoardInteractions({
 			resolvePendingProgrammaticStartMove(taskId, false);
 		}
 		resetProgrammaticCardMoves();
-		setIsClearTrashDialogOpen(false);
-	}, [resetProgrammaticCardMoves, resolvePendingProgrammaticStartMove, setIsClearTrashDialogOpen]);
+	}, [resetProgrammaticCardMoves, resolvePendingProgrammaticStartMove]);
 
 	useEffect(() => {
 		resetBoardInteractionsState();
@@ -852,12 +715,8 @@ export function useBoardInteractions({
 		handleMoveReviewCardToTrash,
 		handleMoveTasksToColumn,
 		handleRestoreTaskFromTrash,
-		handleCancelAutomaticTaskAction,
-		handleOpenClearTrash,
-		handleConfirmClearTrash,
 		handleAddReviewComments,
 		handleSendReviewComments,
 		moveToTrashLoadingById,
-		trashTaskCount,
 	};
 }

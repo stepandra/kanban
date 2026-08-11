@@ -146,8 +146,7 @@ const KANBAN_SUBCOMMAND_LABELS: Record<string, string> = {
 	create: "Creating task",
 	link: "Linking tasks",
 	unlink: "Unlinking tasks",
-	trash: "Moving task to done",
-	done: "Moving task to done",
+	trash: "Discarding task",
 	delete: "Deleting task",
 	start: "Starting task",
 	update: "Updating task",
@@ -164,7 +163,7 @@ function resolveKanbanCommandDisplay(command: string): ToolCallDisplay | null {
 	if (!/kanban/i.test(command)) {
 		return null;
 	}
-	const taskSubcommandMatch = command.match(/\btask\s+(create|link|unlink|trash|done|delete|start|update|list)\b/);
+	const taskSubcommandMatch = command.match(/\btask\s+(create|link|unlink|trash|delete|start|update|list)\b/);
 	if (!taskSubcommandMatch?.[1]) {
 		return null;
 	}

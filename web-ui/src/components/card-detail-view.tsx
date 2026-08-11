@@ -16,8 +16,6 @@ import { ResizeHandle } from "@/resize/resize-handle";
 import { useCardDetailLayout } from "@/resize/use-card-detail-layout";
 import { useResizeDrag } from "@/resize/use-resize-drag";
 import type {
-	RuntimeAgentId,
-	RuntimeConfigResponse,
 	RuntimeTaskExecutionProjection,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceChangesMode,
@@ -25,7 +23,7 @@ import type {
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import { type BoardCard, type BoardDependency, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
+import type { BoardCard, BoardDependency, CardSelection } from "@/types";
 import { useWindowEvent } from "@/utils/react-use";
 
 // We still poll the open detail diff because line content can change without changing
@@ -309,8 +307,6 @@ export function CardDetailView({
 	currentProjectId,
 	workspacePath,
 	gitFeaturesEnabled = true,
-	selectedAgentId = null,
-	runtimeConfig = null,
 	sessionSummary,
 	executionProjection,
 	dependencies = [],
@@ -321,22 +317,12 @@ export function CardDetailView({
 	onCreateTask,
 	onStartTask,
 	onStartAllTasks,
-	onClearTrash,
 	editingTaskId,
 	inlineTaskEditor,
 	onEditTask,
 	onSaveTaskTitle,
-	onCommitTask,
-	onOpenPrTask,
-	onAgentCommitTask,
-	onAgentOpenPrTask,
 	onMoveReviewCardToTrash,
 	onRestoreTaskFromTrash,
-	onCancelAutomaticTaskAction,
-	commitTaskLoadingById,
-	openPrTaskLoadingById,
-	agentCommitTaskLoadingById,
-	agentOpenPrTaskLoadingById,
 	moveToTrashLoadingById,
 	onAddReviewComments,
 	onSendReviewComments,
@@ -364,8 +350,6 @@ export function CardDetailView({
 	currentProjectId: string | null;
 	workspacePath?: string | null;
 	gitFeaturesEnabled?: boolean;
-	selectedAgentId?: RuntimeAgentId | null;
-	runtimeConfig?: RuntimeConfigResponse | null;
 	sessionSummary: RuntimeTaskSessionSummary | null;
 	executionProjection?: RuntimeTaskExecutionProjection | null;
 	dependencies?: BoardDependency[];
@@ -376,22 +360,12 @@ export function CardDetailView({
 	onCreateTask?: () => void;
 	onStartTask?: (taskId: string) => void;
 	onStartAllTasks?: () => void;
-	onClearTrash?: () => void;
 	editingTaskId?: string | null;
 	inlineTaskEditor?: ReactNode;
 	onEditTask?: (card: BoardCard) => void;
 	onSaveTaskTitle?: (taskId: string, title: string) => void;
-	onCommitTask?: (taskId: string) => void;
-	onOpenPrTask?: (taskId: string) => void;
-	onAgentCommitTask?: (taskId: string) => void;
-	onAgentOpenPrTask?: (taskId: string) => void;
 	onMoveReviewCardToTrash?: (taskId: string) => void;
 	onRestoreTaskFromTrash?: (taskId: string) => void;
-	onCancelAutomaticTaskAction?: (taskId: string) => void;
-	commitTaskLoadingById?: Record<string, boolean>;
-	openPrTaskLoadingById?: Record<string, boolean>;
-	agentCommitTaskLoadingById?: Record<string, boolean>;
-	agentOpenPrTaskLoadingById?: Record<string, boolean>;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	onAddReviewComments?: (taskId: string, text: string) => void;
 	onSendReviewComments?: (taskId: string, text: string) => void;
@@ -611,29 +585,14 @@ export function CardDetailView({
 			terminalEnabled={isTaskTerminalEnabled}
 			summary={sessionSummary}
 			onSummary={onSessionSummary}
-			onCommit={onAgentCommitTask ? () => onAgentCommitTask(selection.card.id) : undefined}
-			onOpenPr={onAgentOpenPrTask ? () => onAgentOpenPrTask(selection.card.id) : undefined}
-			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
-			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
 			showSessionToolbar={false}
 			autoFocus
 			showMoveToTrash={showMoveToTrashActions}
 			onMoveToTrash={onMoveToTrash}
 			isMoveToTrashLoading={isMoveToTrashLoading}
-			onCancelAutomaticAction={
-				selection.card.autoReviewEnabled === true && onCancelAutomaticTaskAction
-					? () => onCancelAutomaticTaskAction(selection.card.id)
-					: undefined
-			}
-			cancelAutomaticActionLabel={
-				selection.card.autoReviewEnabled === true
-					? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
-					: null
-			}
 			panelBackgroundColor="var(--color-surface-0)"
 			terminalBackgroundColor={terminalThemeColors.surfacePrimary}
 			cursorColor={terminalThemeColors.textPrimary}
-			taskColumnId={selection.column.id}
 		/>
 	);
 
@@ -746,17 +705,12 @@ export function CardDetailView({
 							onCreateTask={onCreateTask}
 							onStartTask={onStartTask}
 							onStartAllTasks={onStartAllTasks}
-							onClearTrash={onClearTrash}
 							editingTaskId={editingTaskId}
 							inlineTaskEditor={inlineTaskEditor}
 							onEditTask={onEditTask}
 							onSaveTaskTitle={onSaveTaskTitle}
-							onCommitTask={onCommitTask}
-							onOpenPrTask={onOpenPrTask}
 							onMoveToTrashTask={onMoveReviewCardToTrash}
 							onRestoreFromTrashTask={onRestoreTaskFromTrash}
-							commitTaskLoadingById={commitTaskLoadingById}
-							openPrTaskLoadingById={openPrTaskLoadingById}
 							moveToTrashLoadingById={moveToTrashLoadingById}
 							panelWidth="100%"
 						/>

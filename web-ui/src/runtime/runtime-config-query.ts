@@ -25,8 +25,6 @@ export async function saveRuntimeConfig(
 		agentAutonomousModeEnabled?: boolean;
 		shortcuts?: RuntimeProjectShortcut[];
 		readyForReviewNotificationsEnabled?: boolean;
-		commitPromptTemplate?: string;
-		openPrPromptTemplate?: string;
 		taskTemplates?: RuntimeTaskTemplate[];
 	},
 ): Promise<RuntimeConfigResponse> {

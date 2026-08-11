@@ -2,7 +2,6 @@ import posthog from "posthog-js";
 
 import type { RuntimeAgentId } from "@/runtime/types";
 import { isTelemetryEnabled } from "@/telemetry/posthog-config";
-import type { TaskAutoReviewMode } from "@/types";
 
 export type TelemetrySelectedAgentId = RuntimeAgentId | "unknown";
 
@@ -10,13 +9,9 @@ interface TelemetryEventMap {
 	task_created: {
 		selected_agent_id: TelemetrySelectedAgentId;
 		start_in_plan_mode: boolean;
-		auto_review_mode?: TaskAutoReviewMode;
 		prompt_character_count: number;
 	};
 	task_dependency_created: Record<string, never>;
-	tasks_auto_started_from_dependency: {
-		started_task_count: number;
-	};
 	task_resumed_from_trash: Record<string, never>;
 }
 
@@ -45,12 +40,6 @@ export function trackTaskCreated(properties: TelemetryEventMap["task_created"]):
 
 export function trackTaskDependencyCreated(): void {
 	captureTelemetryEvent("task_dependency_created", {});
-}
-
-export function trackTasksAutoStartedFromDependency(startedTaskCount: number): void {
-	captureTelemetryEvent("tasks_auto_started_from_dependency", {
-		started_task_count: startedTaskCount,
-	});
 }
 
 export function trackTaskResumedFromTrash(): void {

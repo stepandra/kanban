@@ -359,16 +359,16 @@ campaign in the Zellij Focus Cockpit, but pane presence is never workflow truth.
    release-intent receipts, execution workspaces/uses, and a local host identity.
    Backfill current local workspaces under one writer and expose a reconciliation
    report between old projections and new records.
-2. Make submit candidate-backed under the new single writer. Retain legacy
-   per-task acceptance as the sole active compatibility mutation path while
-   contract tests prove candidate identity, stale-fence rejection, and recovery;
-   candidates accepted by that path cannot be enrolled in campaigns.
+2. Make submit candidate-backed under the new single writer. Keep acceptance
+   fail-closed while contract tests prove candidate identity, stale-fence
+   rejection, and recovery; no per-task compatibility mutation remains.
 3. Implement one-host campaigns using the final workspace records, campaign
    fencing, repository lease, VCS release receipts, and atomic Kanban batch
    acceptance, but keep campaign dispatch and acceptance dark/test-only.
-4. Perform one cutover that enables campaign dispatch/acceptance while disabling
-   post-submit Fixer dispatch, Amp task Orbs, and every per-task acceptance entry
-   point together.
+4. Enable campaign dispatch and acceptance only after its fences and receipts
+   are complete. The post-submit Fixer, Amp task Orbs, and per-task acceptance
+   entrypoints were removed ahead of this cutover so they cannot become interim
+   authorities.
 5. Add remote Grok Build host placement, ACP reconnect, and explicit workspace
    replacement under the same final identities.
 6. Expose the workspace inventory, global Tracks, and candidate/campaign detail

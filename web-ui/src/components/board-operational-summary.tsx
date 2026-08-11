@@ -104,7 +104,7 @@ export function BoardOperationalSummary({
 					{workspaceVcs === "jj" ? "Jujutsu" : "Git"}
 				</span>
 			) : null}
-			<span className="flex items-center gap-1.5 px-2" title="Tasks outside Done">
+			<span className="flex items-center gap-1.5 px-2" title="Tasks outside the archive">
 				<CircleDot size={12} className="text-status-blue" />
 				<span className="font-semibold text-text-primary">{counts.open}</span>
 				<span>open</span>

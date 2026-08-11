@@ -1,11 +1,16 @@
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
 import type { PluginAPI } from "@ampcode/plugin";
 
 const KANBAN_TOOL_NAME = "kanban_tasks";
 const KANBAN_BIN_ENV = "KANBAN_BIN";
+const KANBAN_EXPECTED_REVISION_ENV = "KANBAN_EXPECTED_REVISION";
 const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
+const KANBAN_PROVENANCE_SCHEMA = "stepandra-kanban-provenance/v1";
+const KANBAN_PLUGIN_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXACT_GIT_REVISION_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
 type ProcessResult = {
 	exitCode: number;
@@ -13,6 +18,13 @@ type ProcessResult = {
 	stderr: string;
 	notFound: boolean;
 };
+
+interface KanbanProvenance {
+	schema: typeof KANBAN_PROVENANCE_SCHEMA;
+	repository: typeof KANBAN_REPOSITORY;
+	version: string;
+	revision: string;
+}
 
 export default function (amp: PluginAPI): void {
 	const mediumAgent = amp.getBuiltinAgent("medium");
@@ -26,20 +38,12 @@ export default function (amp: PluginAPI): void {
 			properties: {
 				action: {
 					type: "string",
-					enum: ["list", "create", "update", "claim", "submit", "accept", "trash", "delete", "link", "unlink", "start"],
+					enum: ["list", "create", "update", "claim", "submit", "trash", "link", "unlink", "start"],
 					description: "Kanban task operation to perform.",
 				},
 				taskId: {
 					type: "string",
-					description: "Task ID for update, claim, submit, accept, trash, delete, link, or start.",
-				},
-				acceptedRevision: {
-					type: "string",
-					description: "Full verified commit ID required for reviewer-only accept.",
-				},
-				remoteRef: {
-					type: "string",
-					description: "Exact task-specific refs/heads/kanban/<task-id>-* ref required for reviewer-only accept.",
+					description: "Task ID for update, claim, submit, trash, link, or start.",
 				},
 				linkedTaskId: {
 					type: "string",
@@ -48,8 +52,8 @@ export default function (amp: PluginAPI): void {
 				dependencyId: { type: "string", description: "Dependency ID for unlink." },
 				column: {
 					type: "string",
-					enum: ["backlog", "in_progress", "review", "done", "trash"],
-					description: "Optional list filter, or bulk target for trash/delete.",
+					enum: ["backlog", "in_progress", "review", "trash"],
+					description: "Optional list filter, or bulk target for trash.",
 				},
 				title: { type: "string", description: "Optional task title for create/update." },
 				prompt: { type: "string", description: "Task instructions for create/update." },
@@ -157,13 +161,7 @@ export function buildTaskArgs(
 		case "submit":
 			args.push("--task-id", requiredString(input, "taskId"));
 			break;
-		case "accept":
-			args.push("--task-id", requiredString(input, "taskId"));
-			args.push("--accepted-revision", requiredString(input, "acceptedRevision"));
-			args.push("--remote-ref", requiredString(input, "remoteRef"));
-			break;
 		case "trash":
-		case "delete":
 			appendExactlyOneTarget(args, input);
 			break;
 		case "link":
@@ -229,11 +227,82 @@ function optionalString(value: unknown): string | null {
 }
 
 async function runKanbanChecked(args: string[], cwd: string): Promise<ProcessResult> {
+	const provenanceResult = await runKanban(["provenance", "--json"], cwd);
+	if (provenanceResult.exitCode !== 0) {
+		throw new Error(
+			provenanceResult.stderr.trim() ||
+				provenanceResult.stdout.trim() ||
+				"Kanban executable does not implement the required provenance contract.",
+		);
+	}
+	const provenance = parseKanbanProvenance(provenanceResult.stdout);
+	const expectedRevision = await resolveExpectedKanbanRevision();
+	assertExpectedKanbanRevision(provenance, expectedRevision);
 	const result = await runKanban(args, cwd);
 	if (result.exitCode !== 0) {
 		throw new Error(result.stderr.trim() || result.stdout.trim() || `Kanban exited with code ${result.exitCode}.`);
 	}
 	return result;
+}
+
+export function assertExpectedKanbanRevision(provenance: KanbanProvenance, expectedRevision: string): void {
+	if (provenance.revision !== expectedRevision) {
+		throw new Error(
+			`Refusing Kanban executable built from ${provenance.revision}; this plugin requires ${expectedRevision}. Rebuild and reinstall the exact checked-out revision.`,
+		);
+	}
+}
+
+async function resolveExpectedKanbanRevision(): Promise<string> {
+	const configuredRevision = process.env[KANBAN_EXPECTED_REVISION_ENV]?.trim().toLowerCase();
+	if (configuredRevision) {
+		if (!EXACT_GIT_REVISION_PATTERN.test(configuredRevision)) {
+			throw new Error(`${KANBAN_EXPECTED_REVISION_ENV} must be a full 40- or 64-character Git revision.`);
+		}
+		return configuredRevision;
+	}
+	const sourceRevision = await runProcess("git", ["rev-parse", "HEAD"], KANBAN_PLUGIN_REPOSITORY_ROOT);
+	const normalizedRevision = sourceRevision.stdout.trim().toLowerCase();
+	if (sourceRevision.exitCode === 0 && EXACT_GIT_REVISION_PATTERN.test(normalizedRevision)) {
+		return normalizedRevision;
+	}
+	throw new Error(
+		`Cannot determine the exact Kanban revision required by this plugin. Set ${KANBAN_EXPECTED_REVISION_ENV} to the published revision.`,
+	);
+}
+
+export function parseKanbanProvenance(stdout: string): KanbanProvenance {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(stdout);
+	} catch {
+		throw new Error("Kanban executable returned malformed provenance JSON.");
+	}
+	if (!payload || typeof payload !== "object") {
+		throw new Error("Kanban executable returned invalid provenance data.");
+	}
+	const candidate = payload as Record<string, unknown>;
+	if (candidate.schema !== KANBAN_PROVENANCE_SCHEMA || candidate.repository !== KANBAN_REPOSITORY) {
+		throw new Error(
+			`Refusing Kanban executable with provenance ${String(candidate.repository ?? "unknown")} / ${String(candidate.schema ?? "unknown")}; expected ${KANBAN_REPOSITORY} / ${KANBAN_PROVENANCE_SCHEMA}.`,
+		);
+	}
+	if (
+		typeof candidate.version !== "string" ||
+		!candidate.version.trim() ||
+		typeof candidate.revision !== "string" ||
+		!candidate.revision.trim() ||
+		candidate.revision === "unknown" ||
+		candidate.revision === "development"
+	) {
+		throw new Error("Kanban executable provenance must include an exact release version and build revision.");
+	}
+	return {
+		schema: KANBAN_PROVENANCE_SCHEMA,
+		repository: KANBAN_REPOSITORY,
+		version: candidate.version,
+		revision: candidate.revision,
+	};
 }
 
 async function runKanban(args: string[], cwd: string): Promise<ProcessResult> {

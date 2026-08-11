@@ -137,10 +137,6 @@ const savedRuntimeConfig = {
 	effectiveCommand: "claude",
 	detectedCommands: [],
 	shortcuts: [],
-	commitPromptTemplate: "",
-	openPrPromptTemplate: "",
-	commitPromptTemplateDefault: "",
-	openPrPromptTemplateDefault: "",
 	taskTemplates: [],
 	globalConfigPath: null,
 	projectConfigPath: null,
@@ -202,6 +198,8 @@ describe("RuntimeSettingsDialog", () => {
 
 		expect(findButtonByText(document.body, "Send feedback")).toBeNull();
 		expect(findButtonByText(document.body, "Report issue")).toBeNull();
+		expect(document.body.textContent).not.toContain("Review automation");
+		expect(document.body.textContent).not.toContain("Commit prompt template");
 	});
 
 	it("calls the layout reset callback when reset layout is clicked", async () => {

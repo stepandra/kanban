@@ -10,7 +10,6 @@ import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceInfoResponse,
-	RuntimeWorktreeDeleteResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "@/runtime/types";
 import { trackTaskResumedFromTrash } from "@/telemetry/events";
@@ -53,10 +52,6 @@ export interface UseTaskSessionsResult {
 		text: string,
 		options?: SendTerminalInputOptions,
 	) => Promise<SendTaskSessionInputResult>;
-	cleanupTaskWorkspace: (
-		taskId: string,
-		expectedExecutionAttemptId?: string | null,
-	) => Promise<RuntimeWorktreeDeleteResponse | null>;
 	fetchTaskWorkspaceInfo: (task: BoardCard) => Promise<RuntimeTaskWorkspaceInfoResponse | null>;
 }
 
@@ -216,35 +211,6 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId, upsertSession],
 	);
 
-	const cleanupTaskWorkspace = useCallback(
-		async (
-			taskId: string,
-			expectedExecutionAttemptId?: string | null,
-		): Promise<RuntimeWorktreeDeleteResponse | null> => {
-			if (!currentProjectId) {
-				return null;
-			}
-			try {
-				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				const payload = await trpcClient.workspace.deleteWorktree.mutate({
-					taskId,
-					...(expectedExecutionAttemptId !== undefined ? { expectedExecutionAttemptId } : {}),
-				});
-				if (!payload.ok) {
-					const message = payload.error ?? "Could not clean up task workspace.";
-					console.error(`[cleanupTaskWorkspace] ${message}`);
-					return null;
-				}
-				return payload;
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				console.error(`[cleanupTaskWorkspace] ${message}`);
-				return null;
-			}
-		},
-		[currentProjectId],
-	);
-
 	const fetchTaskWorkspaceInfo = useCallback(
 		async (task: BoardCard): Promise<RuntimeTaskWorkspaceInfoResponse | null> => {
 			if (!currentProjectId) {
@@ -271,7 +237,6 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		startTaskSession,
 		stopTaskSession,
 		sendTaskSessionInput,
-		cleanupTaskWorkspace,
 		fetchTaskWorkspaceInfo,
 	};
 }
