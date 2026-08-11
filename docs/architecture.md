@@ -4,9 +4,10 @@ Kanban is a local Node runtime plus a React app for running many coding-agent ta
 
 ## Accepted target and migration status
 
-The current checkout still implements local PTY/zmx workers, a special per-task
-Amp Orb path, and a per-task Amp Fixer. Those paths describe the implementation
-below, but they are no longer target architecture and must not be deepened.
+The current checkout still implements local PTY/zmx workers and a per-task Amp
+Fixer. Those paths describe the implementation below, but they are no longer
+target architecture and must not be deepened. The per-task Amp Orb path has
+already been removed from the Amp plugin.
 
 The accepted target is recorded in
 [`decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md`](./decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md):
@@ -100,7 +101,6 @@ flowchart LR
     subgraph execution["Execution surfaces"]
         zmx["zmx durable sessions"]
         cliWorkers["Claude / Codex / Grok / Kimi"]
-        ampTaskOrb["Amp task Orb"]
         ampFixer["Amp Fixer / Integrator"]
     end
 
@@ -124,8 +124,6 @@ flowchart LR
     hooks -.-> runtime
     cliWorkers -->|"explicit task submit"| runtime
 
-    ampPlugin -->|"allocate idle Orb,<br/>prepare / claim, then start turn"| ampTaskOrb
-    ampTaskOrb -->|"submit via plugin"| runtime
     runtime -->|"post-Review handoff<br/>(not atomic with board write)"| reviewQueue
     reviewQueue --> ampFixer
     ampFixer -->|"verified accept"| runtime
@@ -146,7 +144,7 @@ flowchart LR
     class browser,ampPlugin,trpc,runtime,workspace,terminal,hooks,reviewQueue kanbanNode
     class juja,absurdWorker,zellij scheduler
     class state,absurd data
-    class zmx,cliWorkers,ampTaskOrb,ampFixer executionNode
+    class zmx,cliWorkers,ampFixer executionNode
 ```
 
 ## Accepted target orchestration
@@ -275,10 +273,10 @@ is made that Kanban storage and Git participate in one cross-system transaction.
 The most important non-obvious split is that `juja` is the adapter into
 Absurd, while Absurd owns durable execution attempts. `zmx` keeps an admitted
 worker process alive, and Zellij only observes or focuses it. The Amp plugin is
-the Architect/task-tool boundary. Its special task-Orb and per-task Fixer paths
-are legacy migration code, not future extension points. A worker report,
-terminal process, pane, Orb thread, ACP stream, Rhai workflow, or Absurd attempt
-can never accept a card by itself.
+the Architect/task-tool boundary. Its former task-Orb path has been removed;
+the runtime's remaining per-task Fixer is legacy migration code, not a future
+extension point. A worker report, terminal process, pane, Orb thread, ACP
+stream, Rhai workflow, or Absurd attempt can never accept a card by itself.
 
 The target cockpit replaces the current harness-shaped zmx lookup. It keeps the
 Amp Architect thread on the left and projects an explicit bounded working set of
@@ -453,15 +451,15 @@ Task decomposition lives in Amp through the self-contained `amp/kanban.ts`
 plugin. The plugin exposes typed Kanban task operations to the active Amp thread
 and a command-palette action that opens a native `medium` thread for focused
 decomposition. Kanban does not embed a separate planning agent in the project
-sidebar. The plugin currently also starts per-task Amp Orbs and watches them for
-submission; that behavior is superseded. Amp's execution role moves to one
-`a1.xxlarge` integration/QA/production Orb per frozen campaign.
+sidebar. The plugin does not start implementation Orbs or watch worker threads.
+Amp's execution role is one `a1.xxlarge` integration/QA/production Orb per
+frozen campaign.
 
 When that plugin creates a task, it captures the active Architect thread as
-immutable `origin.kind = "amp_architect"` metadata. Worker/Orb threads remain
-separate execution context. The board renders a compact human label and the
-detail view exposes the supported `amp threads continue <thread-id>` command;
-neither surface can update task lifecycle from Amp thread state.
+immutable `origin.kind = "amp_architect"` metadata. Worker execution remains a
+separate context. The board renders a compact human label and the detail view
+exposes the supported `amp threads continue <thread-id>` command; neither
+surface can update task lifecycle from Amp thread state.
 
 The current completion path moves in-progress work to Review and hands the task
 to a per-task Fixer. That is a temporary safety boundary, not the target.

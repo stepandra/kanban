@@ -651,7 +651,9 @@ const kimiAdapter: AgentSessionAdapter = {
 
 const ampAdapter: AgentSessionAdapter = {
 	async prepare() {
-		throw new Error("Amp tasks must be started through the Amp plugin so they can run in an Orb.");
+		throw new Error(
+			"Amp is no longer supported as a per-task executor. Reassign this task to grok, kimi, claude, or codex before starting it.",
+		);
 	},
 };
 

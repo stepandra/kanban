@@ -52,9 +52,9 @@ Create a task card manually, or install the Amp plugin once:
 amp plugins add https://raw.githubusercontent.com/stepandra/kanban/main/amp/kanban.ts --auto-update
 ```
 
-Then ask Amp to add, assign, link, or start Kanban tasks from any thread. Assign `amp` to run a task in a background Orb with Amp's built-in `medium` agent, or assign a local CLI such as Claude, Codex, Grok, or Kimi. For a dedicated planning thread, run **Kanban: Decompose into tasks** from Amp's command palette. It opens a native Amp `medium` thread rather than embedding another agent runtime in Kanban.
+Then ask Amp to add, assign, link, or start Kanban tasks from any thread. Prefer Grok Build for implementation; Claude, Codex, and Kimi remain compatibility harnesses. Amp itself plans and decomposes work rather than running individual tasks. For a dedicated planning thread, run **Kanban: Decompose into tasks** from Amp's command palette. It opens a native Amp `medium` thread rather than embedding another agent runtime in Kanban.
 
-Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. The Amp plugin watches Orb threads and submits only when the worker reports successful implementation and validation. After review, `done` remains the acceptance step that cleans up the task workspace and unblocks dependencies.
+Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. Review acceptance and trash cleanup are distinct operations: `accept` verifies the task-specific remote revision, while `trash` is cleanup rather than acceptance and may remove the task workspace and start newly ready dependants.
 
 ### 3. Link and automate
 <kbd>⌘</kbd> + click a card to link it to another task. When a card is completed and moved to trash, linked tasks auto-start. Combine with auto-commit for fully autonomous dependency chains: one task completes → commits → kicks off the next → repeat. It’s a pretty magical experience asking your agent to decompose a big task into subtasks that auto-commit - he’ll cleverly do it in a way that parallelizes for maximum efficiency and links tasks together for end-to-end autonomy.

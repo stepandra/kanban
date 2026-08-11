@@ -55,4 +55,16 @@ describe("Amp Kanban task provenance", () => {
 			"/workspace",
 		]);
 	});
+
+	it("uses the explicit trash command instead of the legacy done alias", () => {
+		expect(
+			buildTaskArgs(
+				{
+					action: "trash",
+					taskId: "task-1",
+				},
+				"/workspace",
+			),
+		).toEqual(["task", "trash", "--task-id", "task-1", "--project-path", "/workspace"]);
+	});
 });
