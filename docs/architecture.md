@@ -2,16 +2,42 @@
 
 Kanban is a local Node runtime plus a React app for running many coding-agent tasks in parallel.
 
+## Accepted target and migration status
+
+The current checkout still implements local PTY/zmx workers, a special per-task
+Amp Orb path, and a per-task Amp Fixer. Those paths describe the implementation
+below, but they are no longer target architecture and must not be deepened.
+
+The accepted target is recorded in
+[`decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md`](./decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md):
+
+- Grok Build is the primary implementation harness; model routing and Rhai
+  workflows stay internal to Grok Build;
+- remote workers are addressed through fenced host placement and Grok ACP
+  sessions rather than a new central PTY protocol;
+- Amp owns Architecture, Product, UI/UX planning, and one `a1.xxlarge` Orb per
+  QA/production campaign, not per-task implementation;
+- Review contains immutable task candidates; one frozen campaign integrates,
+  tests, fixes, and verifies, after which Kanban requests fenced VCS publication
+  and atomically accepts the batch from its receipt; and
+- every non-deleted task or campaign workspace is a durable, host-qualified
+  object visible in a global workspace inventory;
+- Tracks is the primary cross-project delivery and operations view; QA campaigns
+  are explicit frozen candidate sets that may span tracks and milestones; and
+- Zellij remains a supported Focus Cockpit with Amp Architect on the left and a
+  bounded identity-driven stack of task executions and QA campaigns on the
+  right. It is never task or campaign authority.
+
 There are three big ideas to hold in your head:
 
-1. The browser is mostly a control surface. It renders state, sends commands, and reacts to live updates.
-2. The local runtime is the source of truth for projects, worktrees, sessions, git operations, and streaming state.
-3. Every agent runs the same way: as a PTY-backed CLI process in a task worktree.
+1. Kanban is the durable authority; Browser and Zellij are clients and projections.
+2. Tracks provides the zoomed-out delivery/operations view, while Board remains a tactical project task editor.
+3. Grok Build runs implementation through fenced ACP sessions; Amp Architect plans, and one Amp Orb completes each frozen QA campaign.
 
 If you remember nothing else, remember this:
 
-- agents are process-oriented
-- the backend coordinates everything through one runtime API and one state stream
+- execution is attempt-, candidate-, and workspace-oriented rather than pane-oriented
+- only typed Kanban operations may mutate task, campaign, workspace, or acceptance state
 
 ## Decision record: Cline was removed as a Kanban worker
 
@@ -40,11 +66,12 @@ host can no longer be started accidentally, e.g. on trash-restore probes), and
 the removal of an entire settings/OAuth/MCP stack and an unused worker
 integration.
 
-## High-level dependency map
+## Current implemented dependency map
 
-This diagram shows the runtime dependencies and authority boundaries around
-Kanban. Solid arrows are commands or authoritative writes. Dashed arrows are
-read-only projections, telemetry, or navigation.
+This diagram shows the current runtime dependencies and authority boundaries,
+including legacy paths that the accepted target removes. Solid arrows are
+commands or authoritative writes. Dashed arrows are read-only projections,
+telemetry, or navigation.
 
 ```mermaid
 flowchart LR
@@ -122,12 +149,142 @@ flowchart LR
     class zmx,cliWorkers,ampTaskOrb,ampFixer executionNode
 ```
 
+## Accepted target orchestration
+
+This is the replacement flow. A solid arrow into Kanban is an authenticated,
+typed command that is validated against the current fence. Dashed arrows are
+identity-routed attachment, observation, or projection; they never infer a
+lifecycle transition.
+
+```mermaid
+flowchart LR
+    operator["Operator"]
+    architect["Amp Architect<br/>Architecture · Product · UI/UX"]
+
+    subgraph surfaces["Operating surfaces — clients, not workflow authority"]
+        tracks["Browser: global Tracks"]
+        board["Browser: project Board"]
+        inventory["Browser: Workspaces"]
+        cockpit["Zellij Focus Cockpit<br/>Architect left · selected work right"]
+    end
+
+    subgraph kanban["Kanban — durable workflow authority"]
+        api["Typed API / kanban_tasks"]
+        taskState[("Tasks · dependencies<br/>placement · generation/fence")]
+        candidates[("Immutable candidates")]
+        campaigns[("Frozen QA campaigns<br/>attempt fence · acceptance · release")]
+        releaseIntents[("Immutable release intents<br/>+ publication receipts")]
+        focus[("Desired FocusSelection")]
+        workspaceRegistry[("ProjectRoots · ExecutionWorkspaces<br/>WorkspaceUse history")]
+    end
+
+    subgraph delivery["Absurd — durable delivery authority"]
+        taskAttempts[("Task delivery attempts")]
+        campaignAttempts[("Campaign delivery attempts")]
+        releaseAttempts[("Release delivery attempts")]
+    end
+
+    subgraph adapters["Delivery executors — not lifecycle authority"]
+        hostAdapter["Narrow host adapter"]
+        campaignAdapter["Amp campaign adapter"]
+        releaseAdapter["VCS release adapter"]
+    end
+
+    subgraph implementation["Remote implementation host"]
+        grok["Grok Build harness<br/>LLM Gateway · Rhai · subagents"]
+        acp["Exact fenced ACP session"]
+        taskWorkspace["Task ExecutionWorkspace"]
+    end
+
+    subgraph qa["One frozen campaign = one owning Amp execution"]
+        ampOrb["One a1.xxlarge Amp Orb thread"]
+        campaignWorkspace["One writable campaign ExecutionWorkspace"]
+        qaLanes["Read-only QA fan-out"]
+        manifest["Verified revision<br/>+ evidence manifest"]
+    end
+
+    vcs[("Execution hosts + VCS<br/>physical files, refs, history")]
+
+    operator --> tracks
+    operator --> board
+    operator --> inventory
+    architect --> api
+    tracks --> api
+    board --> api
+    inventory --> api
+
+    api --> taskState
+    api --> candidates
+    api --> campaigns
+    api --> releaseIntents
+    api --> focus
+    api --> workspaceRegistry
+
+    taskState -->|"fenced task assignment"| taskAttempts
+    workspaceRegistry -->|"pre-recorded workspaceId<br/>+ placement"| taskAttempts
+    taskAttempts --> hostAdapter
+    hostAdapter -->|"materialize exact identity"| taskWorkspace
+    hostAdapter --> acp
+    acp --> grok
+    grok --> taskWorkspace
+    taskWorkspace --> vcs
+    grok -->|"candidate artifact + evidence"| hostAdapter
+    hostAdapter -->|"candidate receipt + task fence"| api
+
+    candidates -->|"atomic frozen set<br/>one project/repository"| campaigns
+    campaigns -->|"fenced campaign assignment"| campaignAttempts
+    workspaceRegistry -->|"pre-recorded campaign workspaceId"| campaignAttempts
+    campaignAttempts --> campaignAdapter
+    campaignAdapter -->|"resume exact Amp owner"| ampOrb
+    campaignAdapter -->|"materialize exact identity"| campaignWorkspace
+    ampOrb --> campaignWorkspace
+    campaignWorkspace --> vcs
+    ampOrb -->|"immutable checkpoint"| qaLanes
+    qaLanes -->|"findings only"| ampOrb
+    ampOrb -->|"fix + retest"| campaignWorkspace
+    ampOrb --> manifest
+    manifest -->|"verification receipt + campaign fence"| api
+
+    releaseIntents --> releaseAttempts
+    releaseAttempts --> releaseAdapter
+    releaseAdapter -->|"idempotent compare-and-set<br/>publish exact SHA"| vcs
+    vcs -->|"publication receipt"| releaseAdapter
+    releaseAdapter -->|"durable delivery result"| releaseAttempts
+    releaseAttempts -->|"VCS receipt + release fence<br/>atomic Kanban batch accept"| api
+
+    vcs -.->|"present / missing / revision"| workspaceRegistry
+    focus -.-> cockpit
+    cockpit -.->|"exact ACP attach/input"| acp
+    cockpit -.->|"exact Amp thread attach<br/>or read-only deep link"| ampOrb
+    taskState -.-> tracks
+    candidates -.-> tracks
+    campaigns -.-> tracks
+    workspaceRegistry -.-> inventory
+```
+
+The target deliberately has no Amp task worker, per-task Fixer, fixed
+agent-named pane, newest-session discovery, or terminal-to-lifecycle arrow.
+`ProjectRoot` means a registered host-qualified repository checkout;
+`ExecutionWorkspace` means a physical task or campaign directory derived from
+one selected `ProjectRoot`. Absurd retry records, ACP events, Rhai progress, Amp
+thread state, and Zellij panes are operational evidence around the relevant
+Kanban identity, never substitutes for it. Campaign acceptance is one atomic
+Kanban transaction after a fenced, idempotent VCS publication receipt; no claim
+is made that Kanban storage and Git participate in one cross-system transaction.
+
 The most important non-obvious split is that `zj-agent` is the adapter into
 Absurd, while Absurd owns durable execution attempts. `zmx` keeps an admitted
 worker process alive, and Zellij only observes or focuses it. The Amp plugin is
-the Architect/task-tool boundary and owns the special Amp Orb path; it does not
-replace Kanban task truth. A worker report, terminal process, pane, Orb thread,
-or Absurd attempt can therefore never accept a card by itself.
+the Architect/task-tool boundary. Its special task-Orb and per-task Fixer paths
+are legacy migration code, not future extension points. A worker report,
+terminal process, pane, Orb thread, ACP stream, Rhai workflow, or Absurd attempt
+can never accept a card by itself.
+
+The target cockpit replaces the current harness-shaped zmx lookup. It keeps the
+Amp Architect thread on the left and projects an explicit bounded working set of
+exact task execution/ACP and campaign/Amp-thread identities on the right. The
+browser selects or opens that working set from Tracks, Task, and Campaign
+views; closing a pane does not change lifecycle.
 
 ## Request and Stream Diagram
 
@@ -169,7 +326,7 @@ browser runtime state hooks
 board, detail view, and terminal panels
 ```
 
-## The Mental Model
+## Current implementation mental model
 
 Kanban is easiest to understand if you separate it into three layers of responsibility.
 
@@ -188,14 +345,17 @@ That split explains a lot of the architecture:
 - the runtime should coordinate work, not render UI
 - agent differences belong in the agent catalog and per-agent launch adapters, not in parallel runtime stacks
 
-## Runtime Modes
+## Current runtime modes
 
 Kanban currently supports two runtime modes.
 
 | Runtime mode | Used for | Scope | Backing implementation | Why it exists |
 | --- | --- | --- | --- | --- |
-| CLI-backed task terminal | Claude Code, Codex, Grok, Kimi, Gemini, OpenCode, Droid, Kiro, and similar agents | task-scoped | PTY-backed process runtime | these agents are command-driven CLIs and already fit the terminal model well |
+| CLI-backed task terminal | Claude Code, Codex, Grok, and Kimi | task-scoped | PTY-backed process runtime | these are the current launch-supported local workers; Grok Build over ACP is the accepted remote target |
 | Workspace shell terminal | the bottom shell panel | workspace-scoped | PTY-backed shell process | this is for manual commands in the repo, not task execution |
+
+Older Droid, Kiro, Gemini, and OpenCode values remain parseable migration input
+but are not launch-supported worker choices.
 
 ## Core Concepts
 
@@ -203,7 +363,10 @@ These terms come up everywhere in the codebase.
 
 | Concept | Meaning | Why it matters |
 | --- | --- | --- |
-| Workspace | an indexed git repository that Kanban has opened | most browser and runtime state is scoped to a workspace |
+| Workspace (current API) | an indexed git repository that Kanban has opened | this overloaded local name migrates to the explicit Project and ProjectRoot concepts |
+| Project (target) | the logical Kanban scope for one repository | Tracks and campaigns use this boundary independent of checkout location |
+| ProjectRoot (target) | one registered host-qualified checkout for a Project | placement selects it before creating an ExecutionWorkspace |
+| ExecutionWorkspace (target) | one host-qualified task or campaign directory derived from a ProjectRoot | its durable lifecycle and usage history are not inferred from path presence |
 | Task card | a board item with a prompt, base ref, and review settings | a task is the unit of work the board cares about |
 | Worktree | a per-task git worktree | most task agents run inside one |
 | Task session | the local runtime attachment associated with a task card | it is not proof that an Absurd attempt is queued or running |
@@ -286,7 +449,13 @@ Different state lives in different places on purpose.
 
 ## Amp Task Planning
 
-Task decomposition lives in Amp through the self-contained `amp/kanban.ts` plugin. The plugin exposes typed Kanban task operations to the active Amp thread and a command-palette action that opens a native `medium` thread for focused decomposition. It can also start cards assigned to `amp` in an Orb and watches the native thread response before submitting successful work to review. Kanban does not embed a separate planning agent in the project sidebar.
+Task decomposition lives in Amp through the self-contained `amp/kanban.ts`
+plugin. The plugin exposes typed Kanban task operations to the active Amp thread
+and a command-palette action that opens a native `medium` thread for focused
+decomposition. Kanban does not embed a separate planning agent in the project
+sidebar. The plugin currently also starts per-task Amp Orbs and watches them for
+submission; that behavior is superseded. Amp's execution role moves to one
+`a1.xxlarge` integration/QA/production Orb per frozen campaign.
 
 When that plugin creates a task, it captures the active Architect thread as
 immutable `origin.kind = "amp_architect"` metadata. Worker/Orb threads remain
@@ -294,7 +463,12 @@ separate execution context. The board renders a compact human label and the
 detail view exposes the supported `amp threads continue <thread-id>` command;
 neither surface can update task lifecycle from Amp thread state.
 
-Task completion has two deliberately separate operations. `submit` moves in-progress work to Review and hands the task to the Fixer without accepting it. Only the reviewer-only `accept` operation can move Review to Done, and it requires verified task-specific remote revision evidence. `done`/`trash` can retire non-Review work but cannot bypass acceptance. Moving a task to Done invalidates its execution receipt; delayed stop and workspace cleanup remain fenced to the retired attempt so a concurrent restore cannot be killed.
+The current completion path moves in-progress work to Review and hands the task
+to a per-task Fixer. That is a temporary safety boundary, not the target.
+Candidate-backed submit will atomically publish immutable task evidence without
+starting a Fixer. Only the owning QA campaign will accept its exact frozen
+member set after publishing one verified campaign revision. Generic
+`done`/`trash` and UI movement remain unable to bypass acceptance.
 
 ## Main Flows
 
@@ -328,10 +502,15 @@ When a session starts (and when a hook moves a task to review), the runtime capt
 These are the architectural rules that are most important to preserve.
 
 - one concern should have one clear source of truth
-- one agent execution path: PTY-backed CLI processes, parameterized by the agent catalog and launch adapters — do not add a second runtime stack
+- do not add another central remote PTY stack; the target remote worker boundary
+  is Grok ACP, while local PTY/zmx support is migration code and an optional
+  host-local implementation detail
 - keep `runtime-api.ts` as a coordinator, not a god file
 - treat the browser as a client of streamed runtime state, not the source of truth for long-running sessions
-- when adding new agent behavior, prefer capability-oriented reasoning over sprinkling agent-id string checks
+- assign harness profiles and capabilities, not model-provider identities
+- treat Grok workflows, ACP streams, terminals, hooks, and Zellij as telemetry
+- use Tracks for cross-project delivery and operations; do not add a parallel
+  generic dashboard or mix physical workspaces into the task Board
 - because this feature area currently has zero users to migrate, prefer clean replacement over backward-compatibility scaffolding
 
 ## Enforced Boundaries
@@ -358,8 +537,11 @@ When you are making a change, this table is often more useful than a file list.
 
 | If you are changing... | Think about this first | Common mistake to avoid |
 | --- | --- | --- |
-| task startup for any agent | the PTY runtime and agent launch path | adding a second, agent-specific runtime path |
-| Amp Orb task startup | the Amp plugin and its native thread watcher | inventing a second worker runtime or letting the worker accept its own card |
+| task startup during migration | the generation/attempt fence and selected harness boundary | extending model-specific local launch code instead of moving toward Grok ACP |
+| Amp Orb execution | the frozen QA campaign and its one writable workspace | starting Amp as a task worker or recreating per-task Fixers |
+| Tracks or campaign UI | Track is planning/rollup; Campaign is an explicit frozen candidate set that may cross Tracks | creating a second Operations object or nesting every Campaign under one Track |
+| Zellij cockpit | exact execution/campaign focus identities from Kanban | fixed per-harness panes, newest-session discovery, or lifecycle inferred from panes |
+| workspace visibility | durable workspace identity plus host observation | deriving history from task IDs or treating `missing` as deletion |
 | live board updates | the runtime state hub and browser stream consumers | falling back to polling or duplicating summary logic |
 | new architectural boundaries | the existing lint rules and ownership model | adding a rule that is too broad and becomes a nuisance |
 
@@ -370,7 +552,8 @@ A new engineer opening this repo will probably notice a few things quickly:
 - the backend is long-lived and stateful, not a thin stateless API server
 - the browser is closer to a local control client than a traditional web app
 - the task system, review system, and runtime system are tightly connected
-- every supported task agent runs through the same PTY-backed terminal runtime
+- every currently supported local task agent runs through the PTY-backed
+  terminal runtime, but the accepted remote target is Grok Build over ACP
 - the architecture now favors clean ownership over compatibility glue because this area did not have legacy users to preserve
 
 If you approach the code with those assumptions, the rest of the system starts to make sense much faster.

@@ -6,14 +6,18 @@ should point back to the decision it replaces.
 
 ## D-001 — Kanban is an operational projection, not a second workflow authority
 
-- **Status:** Accepted; implemented 2026-07-31
+- **Status:** Authority wording superseded by D-020 and D-021; projection rule retained
 - **Date:** 2026-07-31
 
-Absurd remains the durable execution scheduler and Kanban remains the operator
-surface for task intent and lifecycle. jj owns repository history and workspace
-state. Browser views may request existing task operations, but summaries,
-visualizations, and links are read-only projections derived from those
-authoritative sources.
+The original local-stage wording assigned scheduler authority broadly to Absurd
+and “workspace state” broadly to jj. D-020 and D-021 replace that ambiguous
+split: Kanban owns task/campaign lifecycle, placement, fences, candidates,
+execution-workspace identity/lifecycle, and acceptance; Absurd owns durable
+delivery attempts, admission, retries, checkpoints, waits, and results; hosts
+and VCS own physical file presence and repository contents/history. Browser and
+Zellij views may request typed Kanban operations, but summaries,
+visualizations, terminal/session state, and links are projections rather than
+workflow authority.
 
 **Consequence:** UI-only state must never advance a task, manufacture an
 execution receipt, or repair scheduler state.
@@ -241,7 +245,7 @@ second source of workflow truth. See
 
 ## D-015 — Tracks is a read-only operational map
 
-- **Status:** Accepted; Phase 1 implemented 2026-07-31
+- **Status:** Accepted; Phase 1 implemented 2026-07-31; target expanded 2026-08-11
 - **Date:** 2026-07-31
 
 Kanban exposes Tracks as a first-class zoomed-out screen. Each track shows its
@@ -263,7 +267,7 @@ than being mistaken for proof of promotion.
 
 ## D-016 — Review acceptance fails closed on verified remote revision evidence
 
-- **Status:** Accepted; safety boundary implemented 2026-07-31
+- **Status:** Implemented migration safety boundary; target acceptance superseded by D-020
 - **Date:** 2026-07-31
 
 Moving a task from Review to Done is no longer a generic board move. The
@@ -289,7 +293,9 @@ revision” rather than claiming a complete promotion receipt.
 **Consequence:** A worker exit, clean diff, UI gesture, runtime shutdown, or
 reviewer assertion cannot silently become acceptance. Existing review
 publication continues to work, while the remaining receipt migration stays
-explicit instead of being approximated in the data model.
+explicit instead of being approximated in the data model. In the accepted
+target, campaign-level verified evidence and atomic frozen-set acceptance
+replace the isolated per-task Fixer credential and task-scoped remote ref.
 
 ## D-017 — Worker command history is bounded runtime telemetry
 
@@ -363,3 +369,104 @@ dirty workspace state and are not deleted as part of this cleanup.
 **Consequence:** `main` remains the sole implementation authority, unique work
 is not lost during cleanup, and old jj workspace protection no longer keeps
 superseded local heads alive indefinitely.
+
+## D-020 — Grok Build is the primary worker harness; Amp owns planning and QA campaigns
+
+- **Status:** Accepted target; implementation pending
+- **Date:** 2026-08-11
+
+Kanban assigns implementation work to a Grok Build harness/profile rather than
+to an LLM provider. Grok Build owns LLM Gateway routing, model roles, subagents,
+and Rhai workflows. Remote execution uses Grok ACP sessions over authenticated
+WebSocket, relay, or host-local stdio; SSH is an operator/tunnel surface. ACP,
+workflow, terminal, and hook state remain telemetry around a fenced Kanban
+execution attempt. Absurd attempt state is authoritative delivery state and is
+projected into Kanban without becoming Kanban lifecycle truth.
+
+Amp owns Architecture, Product, UI/UX planning, and one `a1.xxlarge` Orb per QA
+campaign. A campaign is limited to one project/repository, though its explicit
+frozen candidate set may span Tracks and milestones. Kanban freezes that set
+before dispatch; the Orb integrates it, runs read-only QA fan-out, fixes all
+in-scope findings in its one writable campaign workspace, retests, produces
+one verified campaign revision, and submits a fenced verification receipt.
+Kanban records an immutable release intent, Absurd delivers it, and Kanban then
+atomically accepts the frozen members only after validating the idempotent VCS
+publication receipt.
+Campaign delivery retries advance a Kanban-owned fence and reconnect the same
+Amp thread/workspace; a stale campaign attempt cannot submit verification or
+request acceptance. A stale release attempt cannot overwrite a divergent ref or
+authorize acceptance, but may idempotently publish the same immutable intent;
+a current retry must recover a current-fenced receipt. Per-task Amp workers,
+Promoters, Fixers, and acceptance are superseded.
+
+**Consequence:** `agentId=amp`, the per-task review-Fixer queue, and model-centric
+worker catalogs are migration code, not extension points. See
+`docs/decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md`.
+
+## D-021 — Workspaces are durable, host-qualified operational objects
+
+- **Status:** Accepted target; implementation pending
+- **Date:** 2026-08-11
+
+Kanban must inventory every task or campaign workspace whose lifecycle is not
+deleted. In target vocabulary, Project is the logical scope for one repository;
+ProjectRoot is a registered host-qualified checkout of that Project; and
+ExecutionWorkspace is a physical task or campaign directory materialized from
+one selected ProjectRoot. Its durable identity includes `projectRootId`, host,
+and path and is independent of a task ID. Append-only usage records associate it
+with task generations, campaigns, execution attempts, and Grok ACP sessions.
+Host reports of `present`, `missing`, or `host_unreachable` are observations and
+cannot silently mutate the durable workspace lifecycle.
+
+**Consequence:** the UI exposes a global Workspaces surface led by a
+host-qualified path, with task IDs, campaign ID, revision, lifecycle, observed
+presence, and last observation. The current task-keyed, current-project-only
+workspace metadata stream becomes a projection of this inventory rather than
+its source of truth.
+
+## D-022 — Zellij is an identity-driven Focus Cockpit
+
+- **Status:** Accepted target; implementation pending
+- **Date:** 2026-08-11
+
+The supported Zellij cockpit always keeps the Amp Architect thread on the left.
+Its right-hand stack contains a bounded working set, normally three or four
+selected In Progress task executions and one or two active Amp QA campaigns.
+Kanban persists a revisioned desired `FocusSelection` with exact execution, ACP
+session, and campaign identities. Zellij separately observes realized pane IDs,
+layout, and attachment health; those facts do not become Kanban selection or
+lifecycle state. Panes are not fixed by harness and do not discover work by
+parsing the newest zmx session.
+
+The cockpit may observe and interact with the referenced Grok ACP or Amp Orb
+thread, but pane state is presentation state. It cannot launch a second worker,
+infer submit or acceptance from terminal output, mutate campaign membership, or
+delete a workspace.
+
+**Consequence:** the fixed Codex/Claude/Kimi/Grok slots and zmx-name scanner are
+legacy. Browser and Zellij can share one explicit focus selection without
+becoming competing control planes.
+
+## D-023 — Tracks is the global delivery and operations place
+
+- **Status:** Accepted target; implementation pending
+- **Date:** 2026-08-11
+
+Tracks, rather than a new generic Operations dashboard, becomes the primary
+cross-project browser view. It rolls up active milestone scope, task lifecycle,
+fenced remote executions, immutable Review candidates, QA campaign status,
+unassigned work, and cross-track blockers. The project Board remains the
+tactical task planning and editing view; Workspaces remains a separate global
+physical-resource inventory.
+
+A QA campaign is a frozen verification run, not a track or milestone. Its
+explicit immutable candidate set may span several tracks and milestones inside
+one project/repository. Each affected Track projects campaign status, while
+Campaign Detail presents the authoritative Kanban campaign record and exposes
+authenticated typed operations for membership, integration evidence, verified
+revision, acceptance, and release.
+
+**Consequence:** Kanban reuses its existing delivery primitive instead of
+creating a mega-board or a second dashboard object. Task and Campaign details
+drill down to structured ACP activity and workspace history; raw terminals are
+contextual access, not the primary operational model.

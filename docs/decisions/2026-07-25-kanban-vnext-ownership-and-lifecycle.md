@@ -1,8 +1,16 @@
 # Kanban vNext ownership and lifecycle
 
 Date: 2026-07-25  
-Status: accepted, stage 1 contracts  
+Status: superseded in part on 2026-08-11
 Scope: stepandra/kanban development-task orchestration
+
+> The abstract generation, attempt-fencing, immutable-submission, guarded
+> cleanup, and projection boundaries in this record remain valid. The per-task
+> Amp Promoter/Fixer model, Amp task-worker role, per-task acceptance flow,
+> deterministic zmx identity, and one-exact-path-per-generation rules are local
+> migration behavior superseded in the remote target by execution-workspace
+> records, explicit replacement, and persisted Grok ACP connection identity. See
+> [`2026-08-11-grok-build-workers-and-qa-campaigns.md`](./2026-08-11-grok-build-workers-and-qa-campaigns.md).
 
 ## Decision
 
@@ -22,6 +30,11 @@ Kanban owns deterministic zmx process identity and lifecycle for task
 execution. A generation's task-workspace path and executor zmx identity inputs
 are fixed when the generation is created and are reused by retries and
 reconnects. zmx is a durable process mechanism, not a task-state owner.
+
+This zmx/path rule describes the current local implementation only. The remote
+target preserves “new retry attempt, exact reconnect identity, stale fences fail
+closed” while allowing an explicit replacement execution workspace and using
+ACP connection/session identity instead of zmx identity.
 
 Amp Promoter Orbs are isolated executors. Their output is recorded as a
 promoter-derived revision and promotion receipt; it does not mutate task state
@@ -122,6 +135,10 @@ inferred timeout flags.
 
 ## Retry, reconnect, dispatch, and fencing invariants
 
+Items that name an exact path, zmx identity, Promoter, or per-task promotion are
+historical local-stage rules. The 2026-08-11 target preserves their abstract
+fencing and immutable-provenance intent but replaces those concrete mechanisms.
+
 1. Every execution retry remains in the same generation and therefore reuses
    the exact task-workspace path and deterministic zmx identity inputs.
 2. Reconnect targets the existing Absurd attempt reference and current
@@ -200,7 +217,9 @@ Credentials and management keys are not Kanban domain data.
 
 ## Staged migration
 
-This is not a big-bang migration.
+This historical stage sequence is superseded by the repository-first campaign
+migration in the 2026-08-11 ADR. It remains here to explain how the current
+local zmx and per-task Fixer boundary was reached.
 
 1. **Stage 1 (this record):** add the durable decision, reusable contracts, and
    focused contract tests. Do not change persistence or runtime behavior.

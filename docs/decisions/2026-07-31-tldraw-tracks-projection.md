@@ -1,6 +1,6 @@
 # Kanban Tracks projection for tldraw Offline
 
-Status: accepted for Phase 1  
+Status: accepted for Phase 1; product role expanded 2026-08-11
 Date: 2026-07-31
 
 ## Context
@@ -77,3 +77,19 @@ approximation, not an acceptance receipt.
   pipeline summaries, unassigned scope, and cross-track blockers.
 - Receipt-backed acceptance progress replacing the legacy `trash`/Done
   approximation.
+
+## 2026-08-11 target expansion
+
+Tracks is now the accepted primary browser place for cross-project delivery and
+operations, not only a project-scoped Phase 1 screen. It will roll up remote
+task executions, immutable Review candidates, and QA campaigns in addition to
+the existing milestone scope, progress, unassigned work, and cross-track
+blockers.
+
+A QA campaign is not a track or milestone. It freezes an explicit candidate
+set and may span several tracks or milestones inside one Kanban project and one
+repository. Global Tracks aggregates those repository-local campaigns; it does
+not turn one campaign into a cross-repository transaction. Tracks projects each
+campaign relationship back into affected scope while campaign membership and
+acceptance remain authoritative Kanban records. See
+`2026-08-11-grok-build-workers-and-qa-campaigns.md`.
