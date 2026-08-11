@@ -121,7 +121,7 @@ function describeWorkerStatus(check: { ok: boolean; detail: string }): {
 			return { status: "stopped", detail: "Worker is stopped. No tasks will execute." };
 		}
 	} catch {
-		// Fall back to the textual status returned by older zj-agent versions.
+		// Fall back to the textual status returned by older Juja versions.
 	}
 	return /running/iu.test(check.detail)
 		? { status: "ready", detail: check.detail }
@@ -130,16 +130,18 @@ function describeWorkerStatus(check: { ok: boolean; detail: string }): {
 
 export async function getSystemReadiness(workspacePath: string): Promise<RuntimeSystemReadinessCheck[]> {
 	const absurdctl = process.env.ABSURDCTL_BIN ?? "absurdctl";
-	const zjAgent = process.env.ZJ_AGENT_BIN ?? "zj-agent";
+	const juja = process.env.JUJA_BIN ?? "juja";
 	const [queue, worker, jj, amp, workers] = await Promise.all([
 		commandCheck(absurdctl, ["list-tasks", "--limit", "1"]),
-		commandCheck(zjAgent, ["absurd", "worker", "status"]),
+		commandCheck(juja, ["absurd", "worker", "status"]),
 		commandCheck("jj", ["--no-pager", "root"]),
 		commandCheck("amp", ["--version"]),
-		Promise.all(["claude", "codex", "grok", "kimi"].map(async (binary) => {
-			const check = await commandCheck("which", [binary]);
-			return check.ok ? binary : null;
-		})),
+		Promise.all(
+			["claude", "codex", "grok", "kimi"].map(async (binary) => {
+				const check = await commandCheck("which", [binary]);
+				return check.ok ? binary : null;
+			}),
+		),
 	]);
 	const availableWorkers = workers.filter((workerName): workerName is string => workerName !== null);
 	const workerStatus = describeWorkerStatus(worker);

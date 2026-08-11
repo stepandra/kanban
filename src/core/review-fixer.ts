@@ -8,10 +8,7 @@ import { lockedFileSystem } from "../fs/locked-file-system";
 import { isBinaryAvailableOnPath } from "../terminal/command-discovery";
 import { buildKanbanCommandParts } from "./kanban-command";
 
-// First-party replacement for the external `zj-agent review-handoff` bash
-// entrypoint. The on-disk state schema intentionally stays byte-compatible
-// with the harness (schema 1, snake_case fields, same directory layout) so a
-// shared review-fixers state dir remains interoperable during migration.
+// Kanban-owned review handoff. Its on-disk schema is private to Kanban.
 const REVIEW_FIXER_STATE_SCHEMA = 1;
 const REVIEW_FIXER_QUEUE_DIR = "queue";
 const REVIEW_FIXER_RUNNING_DIR = "running";

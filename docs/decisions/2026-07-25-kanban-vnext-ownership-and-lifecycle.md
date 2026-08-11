@@ -43,9 +43,8 @@ directly and never replaces submitted provenance.
 Zellij is a view-only telemetry and focus surface. Pane existence, pane text,
 exit status, or inferred activity never mutates a card or proves completion.
 
-This record narrows and extends the accepted harness decision at
-`/Users/jerryjohnson/dev/zj-agent-harness/docs/decisions/2026-07-24-absurd-orchestration-and-kanban-tui.md`.
-That decision establishes the Kanban/Absurd/zmx/Zellij ownership split. This
+This record narrows and extends Juja's Kanban/Absurd/zmx/Zellij ownership
+split. This
 record defines the Kanban-side generation, submission, fencing, promotion, and
 acceptance contracts that later storage and execution slices must preserve.
 

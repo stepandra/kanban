@@ -15,20 +15,20 @@ vi.mock("node:child_process", () => ({
 
 import { enqueueAbsurdTaskStart } from "../../../src/orchestration/absurd-task-start";
 
-const previousZjAgentBin = process.env.ZJ_AGENT_BIN;
+const previousJujaBin = process.env.JUJA_BIN;
 
 describe("enqueueAbsurdTaskStart", () => {
 	beforeEach(() => {
 		childProcessMocks.execFile.mockReset();
 		childProcessMocks.execFilePromise.mockReset();
-		process.env.ZJ_AGENT_BIN = "/tmp/zj-agent";
+		process.env.JUJA_BIN = "/tmp/juja";
 	});
 
 	afterEach(() => {
-		if (previousZjAgentBin === undefined) {
-			delete process.env.ZJ_AGENT_BIN;
+		if (previousJujaBin === undefined) {
+			delete process.env.JUJA_BIN;
 		} else {
-			process.env.ZJ_AGENT_BIN = previousZjAgentBin;
+			process.env.JUJA_BIN = previousJujaBin;
 		}
 	});
 
@@ -46,7 +46,7 @@ describe("enqueueAbsurdTaskStart", () => {
 			}),
 		).resolves.toEqual({ attemptId: "absurd-1", raw: { task_id: "absurd-1" } });
 		expect(childProcessMocks.execFilePromise).toHaveBeenCalledWith(
-			"/tmp/zj-agent",
+			"/tmp/juja",
 			["kanban-enqueue", "--task-id", "task-1~g4~q123~resume", "--project-path", "/tmp/repo", "--agent", "codex"],
 			{ encoding: "utf8", timeout: 10_000 },
 		);

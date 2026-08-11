@@ -5,7 +5,7 @@ import { isDurableAgentSessionEligible } from "../core/agent-catalog";
 import type { RuntimeAgentId } from "../core/api-contract";
 
 // zmx session-name contract (canonical documentation: docs/zmx-session-names.md).
-// Consumers outside this repo (e.g. zj-agent-harness/zellij/bin/kanban-zmx-view)
+// Consumers outside this repo (e.g. juja/zellij/bin/kanban-zmx-view)
 // parse these names; any change here must update that doc and the loud-failure
 // format test in test/runtime/terminal/zmx-agent-session.test.ts.
 //

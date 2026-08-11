@@ -5,7 +5,7 @@ wrapped in durable [zmx](https://zmx.dev) sessions. This page is the **single
 canonical specification** of the session-name format. It is referenced by:
 
 - `src/terminal/zmx-agent-session.ts` — the generator (implementation of record).
-- `zj-agent-harness/zellij/bin/kanban-zmx-view` — the external viewer that parses
+- `juja/zellij/bin/kanban-zmx-view` — the external viewer that parses
   session names to find attachable sessions.
 - `test/runtime/terminal/zmx-agent-session.test.ts` — loud-failure fixture tests
   pinning the exact format.
@@ -91,4 +91,3 @@ durable sessions entirely:
 - `kanban.*` sessions for the same workspace that match no known task are
   treated as orphans and **killed automatically** (with a logged warning).
   Sessions owned by other workspaces are never touched.
-

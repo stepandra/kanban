@@ -35,7 +35,7 @@ describe("prepareZmxAgentSession", () => {
 	});
 
 	// Pins the exact session-name format documented in docs/zmx-session-names.md.
-	// External parsers (zj-agent-harness/zellij/bin/kanban-zmx-view) depend on it:
+	// External parsers (juja/zellij/bin/kanban-zmx-view) depend on it:
 	// any change here is a breaking contract change, not a test update.
 	it("generates the exact documented session-name format", () => {
 		const launch = prepareZmxAgentSession({

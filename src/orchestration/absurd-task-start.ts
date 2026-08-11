@@ -37,11 +37,11 @@ function readAttemptId(value: unknown): string | null {
 }
 
 export async function enqueueAbsurdTaskStart(input: EnqueueAbsurdTaskStartInput): Promise<AbsurdTaskStartReceipt> {
-	const zjAgent = process.env.ZJ_AGENT_BIN ?? "zj-agent";
+	const juja = process.env.JUJA_BIN ?? "juja";
 	let stdout: string;
 	try {
 		({ stdout } = await execFileAsync(
-			zjAgent,
+			juja,
 			[
 				"kanban-enqueue",
 				"--task-id",

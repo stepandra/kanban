@@ -90,10 +90,10 @@ flowchart LR
         reviewQueue["Per-task review Fixer queue"]
     end
 
-    subgraph orchestration["zj-agent harness — execution orchestration"]
-        zjAgent["zj-agent CLI"]
+    subgraph orchestration["Juja — execution adapter and cockpit"]
+        juja["juja CLI"]
         absurd[("Absurd + Postgres<br/>attempts, admission, retries")]
-        absurdWorker["zj-agent Absurd worker"]
+        absurdWorker["Juja Absurd worker"]
         zellij["Zellij cockpit"]
     end
 
@@ -112,9 +112,9 @@ flowchart LR
     runtime --> state
     runtime --> workspace
 
-    runtime -->|"enqueue generation + unique queue fence"| zjAgent
-    zjAgent --> absurd
-    zjAgent -->|"attempt receipt"| runtime
+    runtime -->|"enqueue generation + unique queue fence"| juja
+    juja --> absurd
+    juja -->|"attempt receipt"| runtime
     absurd --> absurdWorker
     absurdWorker -->|"internal direct-start"| runtime
     runtime --> terminal
@@ -144,7 +144,7 @@ flowchart LR
 
     class operator,architect human
     class browser,ampPlugin,trpc,runtime,workspace,terminal,hooks,reviewQueue kanbanNode
-    class zjAgent,absurdWorker,zellij scheduler
+    class juja,absurdWorker,zellij scheduler
     class state,absurd data
     class zmx,cliWorkers,ampTaskOrb,ampFixer executionNode
 ```
@@ -272,7 +272,7 @@ Kanban identity, never substitutes for it. Campaign acceptance is one atomic
 Kanban transaction after a fenced, idempotent VCS publication receipt; no claim
 is made that Kanban storage and Git participate in one cross-system transaction.
 
-The most important non-obvious split is that `zj-agent` is the adapter into
+The most important non-obvious split is that `juja` is the adapter into
 Absurd, while Absurd owns durable execution attempts. `zmx` keeps an admitted
 worker process alive, and Zellij only observes or focuses it. The Amp plugin is
 the Architect/task-tool boundary. Its special task-Orb and per-task Fixer paths
