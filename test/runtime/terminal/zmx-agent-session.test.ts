@@ -5,7 +5,7 @@ import { buildZmxWorkspaceSessionPrefix, prepareZmxAgentSession } from "../../..
 
 describe("prepareZmxAgentSession", () => {
 	it("builds a deterministic workspace prefix for reconciliation", () => {
-		expect(buildZmxWorkspaceSessionPrefix("Workspace One")).toBe("kanban.workspace-one.");
+		expect(buildZmxWorkspaceSessionPrefix("Workspace One")).toBe("kanban.workspace.");
 		expect(buildZmxWorkspaceSessionPrefix("  ")).toBeNull();
 	});
 
@@ -31,7 +31,7 @@ describe("prepareZmxAgentSession", () => {
 		expect(first?.binary).toBe("zmx");
 		expect(first?.args.slice(0, 2)).toEqual(["attach", first?.sessionName]);
 		expect(first?.args.slice(2)).toEqual(["codex", "--model", "gpt-5"]);
-		expect(first?.sessionName).toMatch(/^kanban\.workspace-one\.codex\.task-with-spaces\.[a-f0-9]{12}$/);
+		expect(first?.sessionName).toMatch(/^kanban\.workspace\.codex\.task-with\.[a-f0-9]{12}$/);
 	});
 
 	// Pins the exact session-name format documented in docs/zmx-session-names.md.
@@ -48,7 +48,7 @@ describe("prepareZmxAgentSession", () => {
 		});
 
 		// sha256("workspace-one\0task/with spaces")[:12] over the raw values.
-		expect(launch?.sessionName).toBe("kanban.workspace-one.codex.task-with-spaces.8e64aaa3ecb1");
+		expect(launch?.sessionName).toBe("kanban.workspace.codex.task-with.8e64aaa3ecb1");
 	});
 
 	it("applies the documented safeSegment sanitization rules", () => {
@@ -63,7 +63,20 @@ describe("prepareZmxAgentSession", () => {
 
 		// Lowercased; runs of [^a-z0-9._-] collapse to a single "-"; dots are kept;
 		// leading/trailing "-" trimmed. Digest is over raw values: sha256("WS\0Task / With   CAPS..dots!")[:12].
-		expect(launch?.sessionName).toMatch(/^kanban\.ws\.kimi\.task-with-caps\.\.dots\.[a-f0-9]{12}$/);
+		expect(launch?.sessionName).toMatch(/^kanban\.ws\.kimi\.task-with\.[a-f0-9]{12}$/);
+	});
+
+	it("fits the strictest supported local zmx session-name limit", () => {
+		const launch = prepareZmxAgentSession({
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			taskId: "a-very-long-task-identifier",
+			workspaceId: "a-very-long-workspace-identifier",
+			zmxAvailable: true,
+		});
+
+		expect(Buffer.byteLength(launch?.sessionName ?? "", "utf8")).toBeLessThanOrEqual(46);
 	});
 
 	it("leaves unsupported or unavailable sessions on the existing PTY path", () => {

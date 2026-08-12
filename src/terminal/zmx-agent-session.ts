@@ -15,8 +15,9 @@ import type { RuntimeAgentId } from "../core/api-contract";
 // Segment rules:
 // - <workspace> and <task> are sanitized by safeSegment: lowercased, every run
 //   of characters outside [a-z0-9._-] replaced with a single "-", leading and
-//   trailing "-" trimmed, truncated to 36 chars, falling back to "unknown"
-//   when nothing remains. Segments MAY contain dots, so positional splitting
+//   trailing "-" trimmed, truncated to 9 chars, falling back to "unknown"
+//   when nothing remains. The 9-char cap keeps the complete name within zmx's
+//   strictest supported 46-byte socket-derived limit. Segments MAY contain dots, so positional splitting
 //   on "." is unsafe — parse with the fixed "kanban." prefix, the exact
 //   ".<agent>." marker, and the trailing digest instead.
 // - <agent> is the RuntimeAgentId, emitted verbatim (all ids are [a-z] only).
@@ -44,7 +45,7 @@ function safeSegment(value: string): string {
 		.toLowerCase()
 		.replace(/[^a-z0-9._-]+/g, "-")
 		.replace(/^-+|-+$/g, "")
-		.slice(0, 36);
+		.slice(0, 9);
 	return normalized || "unknown";
 }
 

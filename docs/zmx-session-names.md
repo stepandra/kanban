@@ -37,7 +37,9 @@ Applied to `<workspace>` and `<task>`:
 1. Lowercase the value.
 2. Replace every run of characters outside `[a-z0-9._-]` with a single `-`.
 3. Trim leading and trailing `-`.
-4. Truncate to 36 characters.
+4. Truncate to 9 characters. This keeps the complete session name within the
+   strictest supported zmx limit of 46 UTF-8 bytes, even for the longest
+   durable agent ID.
 5. If nothing remains, use the literal `unknown`.
 
 Consequences parsers must respect:
@@ -64,7 +66,7 @@ For `workspaceId = "workspace-one"`, `agentId = "codex"`,
 `taskId = "task/with spaces"`:
 
 ```
-kanban.workspace-one.codex.task-with-spaces.<sha256("workspace-one\0task/with spaces")[:12]>
+kanban.workspace.codex.task-with.<sha256("workspace-one\0task/with spaces")[:12]>
 ```
 
 The exact digest value is pinned in
