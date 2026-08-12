@@ -327,6 +327,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					rows: body.rows,
 					workspaceId: workspaceScope.workspaceId,
 					projectPath: workspaceScope.workspacePath,
+					deliverableKind: body.deliverableKind,
 					executionAttempt: body.executionAttempt,
 				});
 

@@ -1,4 +1,9 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import {
+	runtimeTaskAcceptanceEvidenceSchema,
+	runtimeTaskDeliverableKindSchema,
+	runtimeTaskReviewSubmissionSchema,
+} from "@runtime-contract";
 import { createShortTaskId } from "@runtime-task-id";
 import * as runtimeTaskState from "@runtime-task-state";
 
@@ -124,6 +129,18 @@ function normalizeTaskAcceptanceEvidence(
 		acceptedRevision?: unknown;
 		verifiedAt?: unknown;
 	};
+	if (evidence.kind === "verified_no_change_report") {
+		const parsed = runtimeTaskAcceptanceEvidenceSchema.safeParse(rawEvidence);
+		if (
+			parsed.success &&
+			parsed.data.kind === "verified_no_change_report" &&
+			parsed.data.taskId === taskId &&
+			parsed.data.generation === generation
+		) {
+			return parsed.data;
+		}
+		return undefined;
+	}
 	if (!evidence.acceptedRevision || typeof evidence.acceptedRevision !== "object") {
 		return undefined;
 	}
@@ -175,6 +192,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		origin?: unknown;
 		execution?: unknown;
 		planning?: unknown;
+		deliverableKind?: unknown;
+		submission?: unknown;
 		acceptanceEvidence?: unknown;
 		createdAt?: unknown;
 		updatedAt?: unknown;
@@ -228,7 +247,26 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 						: {}),
 				}
 			: undefined;
-	const acceptanceEvidence = normalizeTaskAcceptanceEvidence(card.acceptanceEvidence, id, generation);
+	const parsedDeliverableKind = runtimeTaskDeliverableKindSchema.safeParse(card.deliverableKind);
+	const deliverableKind = parsedDeliverableKind.success ? parsedDeliverableKind.data : undefined;
+	const parsedSubmission = runtimeTaskReviewSubmissionSchema.safeParse(card.submission);
+	const submission =
+		parsedSubmission.success &&
+		parsedSubmission.data.taskId === id &&
+		parsedSubmission.data.workspace.taskId === id &&
+		parsedSubmission.data.generation === generation &&
+		parsedSubmission.data.deliverableKind === deliverableKind
+			? parsedSubmission.data
+			: undefined;
+	let acceptanceEvidence = normalizeTaskAcceptanceEvidence(card.acceptanceEvidence, id, generation);
+	if (
+		acceptanceEvidence?.kind === "verified_no_change_report" &&
+		(!submission ||
+			acceptanceEvidence.reportDigest !== submission.reportDigest ||
+			JSON.stringify(acceptanceEvidence.receipt) !== JSON.stringify(submission.receipt))
+	) {
+		acceptanceEvidence = undefined;
+	}
 
 	return {
 		id,
@@ -245,6 +283,8 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		...(origin ? { origin } : {}),
 		...(execution ? { execution } : {}),
 		...(planning ? { planning } : {}),
+		...(deliverableKind ? { deliverableKind } : {}),
+		...(submission ? { submission } : {}),
 		...(acceptanceEvidence ? { acceptanceEvidence } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
 		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
@@ -479,6 +519,7 @@ export function applyDragResult(
 	}
 	if (sourceColumn.id === "trash" && destinationColumn.id === "review") {
 		delete destinationTask.acceptanceEvidence;
+		delete destinationTask.submission;
 	}
 	destinationCards.splice(destinationInsertIndex, 0, destinationTask);
 
@@ -580,6 +621,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				images,
 				agentId: draft.agentId,
 				removedAgentId: draft.agentId === undefined ? card.removedAgentId : undefined,
+				deliverableKind: card.deliverableKind,
 				baseRef,
 			});
 			columnUpdated = true;
@@ -594,6 +636,8 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				removedAgentId: draft.agentId === undefined ? card.removedAgentId : undefined,
 				generation,
 				execution: generation === (card.generation ?? 1) ? card.execution : undefined,
+				submission: generation === (card.generation ?? 1) ? card.submission : undefined,
+				acceptanceEvidence: generation === (card.generation ?? 1) ? card.acceptanceEvidence : undefined,
 				baseRef,
 				updatedAt: Date.now(),
 			};

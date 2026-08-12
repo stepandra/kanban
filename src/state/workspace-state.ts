@@ -630,9 +630,19 @@ function getTaskColumnIds(board: RuntimeBoardData): Map<string, RuntimeBoardColu
 	return new Map(board.columns.flatMap((column) => column.cards.map((card) => [card.id, column.id])));
 }
 
+function getTasksById(board: RuntimeBoardData): Map<string, RuntimeBoardData["columns"][number]["cards"][number]> {
+	return new Map(board.columns.flatMap((column) => column.cards.map((card) => [card.id, card])));
+}
+
+function persistedValuesEqual(left: unknown, right: unknown): boolean {
+	return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function assertAuthorizedBoardSnapshotTransitions(currentBoard: RuntimeBoardData, nextBoard: RuntimeBoardData): void {
 	const currentTaskColumns = getTaskColumnIds(currentBoard);
 	const nextTaskColumns = getTaskColumnIds(nextBoard);
+	const currentTasks = getTasksById(currentBoard);
+	const nextTasks = getTasksById(nextBoard);
 	const deletedTaskId = Array.from(currentTaskColumns.keys()).find((taskId) => !nextTaskColumns.has(taskId));
 	if (deletedTaskId) {
 		throw new Error(
@@ -647,8 +657,71 @@ function assertAuthorizedBoardSnapshotTransitions(currentBoard: RuntimeBoardData
 		?.cards.find((card) => reviewTaskIds.has(card.id));
 	if (acceptedThroughSnapshot) {
 		throw new Error(
-			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to the archive through a board snapshot save. Acceptance is unavailable until campaign-scoped receipts are implemented.`,
+			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to the archive through a board snapshot save. Per-task acceptance is disabled until Kanban has a verifiable actor capability.`,
 		);
+	}
+	for (const [taskId, nextTask] of nextTasks) {
+		if (currentTasks.has(taskId)) continue;
+		if (nextTask.submission !== undefined) {
+			throw new Error(
+				`Task "${taskId}" cannot create a task with a durable Review submission through a board snapshot save. Use the explicit task submit command.`,
+			);
+		}
+		if (nextTask.acceptanceEvidence !== undefined) {
+			throw new Error(
+				`Task "${taskId}" cannot create a task with acceptance evidence through a board snapshot save. Per-task acceptance is disabled until Kanban has a verifiable actor capability.`,
+			);
+		}
+		if (nextTask.origin !== undefined) {
+			throw new Error(
+				`Task "${taskId}" cannot establish Amp Architect origin through a board snapshot save. Use the trusted task creation boundary.`,
+			);
+		}
+	}
+	for (const [taskId, currentTask] of currentTasks) {
+		const nextTask = nextTasks.get(taskId);
+		if (!nextTask) continue;
+		if (!persistedValuesEqual(currentTask.origin, nextTask.origin)) {
+			throw new Error(
+				`Task "${taskId}" cannot change its Amp Architect origin through a board snapshot save. Use the trusted task creation boundary.`,
+			);
+		}
+		const currentGeneration = currentTask.generation ?? 1;
+		const nextGeneration = nextTask.generation ?? 1;
+		const reopened = currentTaskColumns.get(taskId) === "trash" && nextTaskColumns.get(taskId) === "review";
+		const submissionChanged = !persistedValuesEqual(currentTask.submission, nextTask.submission);
+		const submissionClearedByFence =
+			currentTask.submission !== undefined &&
+			nextTask.submission === undefined &&
+			(nextGeneration !== currentGeneration || reopened);
+		if (submissionChanged && !submissionClearedByFence) {
+			throw new Error(
+				`Task "${taskId}" cannot attach or replace a durable Review submission through a board snapshot save. Use the explicit task submit command.`,
+			);
+		}
+		if (nextGeneration !== currentGeneration && nextTask.submission !== undefined) {
+			throw new Error(`Task "${taskId}" must clear its durable Review submission when its generation changes.`);
+		}
+		if (currentTask.deliverableKind !== nextTask.deliverableKind) {
+			if (
+				nextGeneration === currentGeneration ||
+				nextTask.execution !== undefined ||
+				nextTask.submission !== undefined ||
+				nextTask.acceptanceEvidence !== undefined
+			) {
+				throw new Error(`Task "${taskId}" must fence a deliverable-kind change with a fresh generation.`);
+			}
+		}
+		const acceptanceChanged = !persistedValuesEqual(currentTask.acceptanceEvidence, nextTask.acceptanceEvidence);
+		const acceptanceCleared =
+			currentTask.acceptanceEvidence !== undefined &&
+			nextTask.acceptanceEvidence === undefined &&
+			(reopened || nextGeneration !== currentGeneration);
+		if (acceptanceChanged && !acceptanceCleared) {
+			throw new Error(
+				`Task "${taskId}" cannot attach or replace acceptance evidence through a board snapshot save. Per-task acceptance is disabled until Kanban has a verifiable actor capability.`,
+			);
+		}
 	}
 	const blockedStartTaskId = nextBoard.dependencies
 		.map((dependency) => dependency.fromTaskId)

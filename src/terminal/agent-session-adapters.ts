@@ -1,8 +1,10 @@
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
+	RuntimeTaskDeliverableKind,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
@@ -30,6 +32,7 @@ export interface AgentAdapterLaunchInput {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	projectPath?: string;
+	deliverableKind?: RuntimeTaskDeliverableKind;
 }
 
 export type AgentOutputTransitionDetector = (
@@ -141,11 +144,24 @@ function withReviewSubmission(prompt: string, input: AgentAdapterLaunchInput): s
 	if (!projectPath) {
 		return prompt;
 	}
-	const command = buildKanbanCommandParts(["task", "submit", "--task-id", input.taskId, "--project-path", projectPath])
+	const reportPath = join(tmpdir(), "kanban-review-reports", `${input.taskId.replace(/[^A-Za-z0-9._-]/gu, "_")}.md`);
+	const submissionParts = ["task", "submit", "--task-id", input.taskId, "--project-path", projectPath];
+	if (input.deliverableKind === "read_only_report") {
+		submissionParts.push("--report-file", reportPath);
+	}
+	const command = buildKanbanCommandParts(submissionParts)
 		.map((part) => quoteShellArg(part))
 		.join(" ");
+	const readOnlyInstructions =
+		input.deliverableKind === "read_only_report"
+			? [
+					"This is a read-only deliverable. Do not modify repository files.",
+					`Write a non-empty Markdown audit report of at most 262144 bytes to this exact outside-repository path: ${reportPath}`,
+				]
+			: [];
 	return [
 		prompt.trim(),
+		...readOnlyInstructions,
 		"When implementation and validation are complete, you are authorized to run this exact command before your final response:",
 		command,
 		"This submits the task to Review. Do not accept, discard, commit, or push it yourself.",

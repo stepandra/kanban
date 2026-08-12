@@ -4,10 +4,14 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeBoardDependency,
+	RuntimeTaskAcceptanceEvidence,
+	RuntimeTaskDeliverableKind,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
+	RuntimeTaskReviewSubmission,
 } from "./api-contract";
+import { runtimeTaskAcceptanceEvidenceSchema, runtimeTaskReviewSubmissionSchema } from "./api-contract";
 import { incrementTaskGeneration, resolveTaskGeneration } from "./task-execution-reference";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
@@ -21,6 +25,7 @@ export interface RuntimeCreateTaskInput {
 	agentId?: RuntimeAgentId;
 	priority?: number;
 	origin?: RuntimeTaskOrigin;
+	deliverableKind?: RuntimeTaskDeliverableKind;
 	baseRef: string;
 }
 
@@ -31,6 +36,7 @@ export interface RuntimeUpdateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
 	priority?: number | null;
+	deliverableKind?: RuntimeTaskDeliverableKind;
 	baseRef: string;
 }
 
@@ -64,13 +70,21 @@ export interface RuntimeTaskExecutionContract {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
 	removedAgentId?: "cline";
+	deliverableKind?: RuntimeTaskDeliverableKind;
 	baseRef: string;
 }
 
 export function resolveUpdatedTaskGeneration(
 	task: Pick<
 		RuntimeBoardCard,
-		"generation" | "prompt" | "startInPlanMode" | "images" | "agentId" | "removedAgentId" | "baseRef"
+		| "generation"
+		| "prompt"
+		| "startInPlanMode"
+		| "images"
+		| "agentId"
+		| "removedAgentId"
+		| "deliverableKind"
+		| "baseRef"
 	>,
 	nextContract: RuntimeTaskExecutionContract,
 ): number {
@@ -80,6 +94,7 @@ export function resolveUpdatedTaskGeneration(
 		!areTaskImagesEqual(task.images, nextContract.images) ||
 		task.agentId !== nextContract.agentId ||
 		task.removedAgentId !== nextContract.removedAgentId ||
+		task.deliverableKind !== nextContract.deliverableKind ||
 		task.baseRef !== nextContract.baseRef;
 	return executionContractChanged ? incrementTaskGeneration(task.generation) : resolveTaskGeneration(task.generation);
 }
@@ -338,6 +353,7 @@ export function addTaskToColumn(
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.priority !== undefined ? { priority: input.priority } : {}),
+		...(input.deliverableKind ? { deliverableKind: input.deliverableKind } : {}),
 		generation: 1,
 		...(input.origin ? { origin: { ...input.origin } } : {}),
 		baseRef,
@@ -519,7 +535,203 @@ export function removeTaskDependency(board: RuntimeBoardData, dependencyId: stri
 }
 
 export function discardTask(board: RuntimeBoardData, taskId: string, now: number = Date.now()): RuntimeMoveTaskResult {
+	const found = findTaskLocation(board, taskId.trim());
+	if (found?.columnId === "review" && found.task.deliverableKind === "read_only_report") {
+		return {
+			moved: false,
+			board,
+			task: found.task,
+			fromColumnId: found.columnId,
+		};
+	}
 	return moveTaskToColumnInternal(board, taskId, "trash", now);
+}
+
+function assertReadOnlyReceiptIsClean(submission: RuntimeTaskReviewSubmission): void {
+	if (submission.deliverableKind !== "read_only_report") {
+		return;
+	}
+	const receipt = submission.receipt;
+	if (!receipt.clean || receipt.hasConflicts || receipt.divergent || (receipt.vcs === "git" && receipt.hasUntracked)) {
+		throw new Error("Read-only Review submission requires a verified-clean workspace receipt.");
+	}
+}
+
+export function submitTaskReview(
+	board: RuntimeBoardData,
+	taskId: string,
+	submissionInput: RuntimeTaskReviewSubmission,
+	verification: { reportDigest: string },
+	now: number = Date.now(),
+): RuntimeMoveTaskResult {
+	const normalizedTaskId = taskId.trim();
+	const found = normalizedTaskId ? findTaskLocation(board, normalizedTaskId) : null;
+	if (!found) {
+		throw new Error(`Task "${normalizedTaskId}" was not found.`);
+	}
+	if (found.columnId !== "in_progress" && found.columnId !== "review") {
+		throw new Error(`Task "${normalizedTaskId}" cannot be submitted from ${found.columnId}.`);
+	}
+
+	const submission = runtimeTaskReviewSubmissionSchema.parse(submissionInput);
+	const generation = resolveTaskGeneration(found.task.generation);
+	const executionAttemptId = found.task.execution?.attemptId ?? null;
+	const effectiveDeliverableKind = found.task.deliverableKind ?? "change";
+	if (submission.taskId !== found.task.id || submission.workspace.taskId !== found.task.id) {
+		throw new Error("Review submission task identity does not match the board task.");
+	}
+	if (
+		submission.generation !== generation ||
+		(found.task.execution !== undefined && found.task.execution.generation !== submission.generation)
+	) {
+		throw new Error("Review submission generation does not match the current task generation.");
+	}
+	if (submission.executionAttemptId !== executionAttemptId) {
+		throw new Error("Review submission attempt does not match the current execution attempt.");
+	}
+	if (submission.deliverableKind !== effectiveDeliverableKind) {
+		throw new Error("Review submission deliverable does not match the current task deliverable.");
+	}
+	if (submission.workspace.baseRef !== found.task.baseRef || submission.workspace.vcs !== submission.receipt.vcs) {
+		throw new Error("Review submission workspace snapshot does not match the task receipt.");
+	}
+	if (!submission.reportMarkdown.trim()) {
+		throw new Error("Review submission report must contain non-empty Markdown.");
+	}
+	if (verification.reportDigest !== submission.reportDigest) {
+		throw new Error("Review submission report digest does not match its Markdown payload.");
+	}
+	assertReadOnlyReceiptIsClean(submission);
+
+	if (found.task.submission) {
+		const existing = runtimeTaskReviewSubmissionSchema.parse(found.task.submission);
+		if (JSON.stringify(existing) !== JSON.stringify(submission)) {
+			throw new Error("Review submission is immutable for the current task generation and attempt.");
+		}
+		if (found.columnId === "review") {
+			return {
+				moved: false,
+				board,
+				task: found.task,
+				fromColumnId: found.columnId,
+			};
+		}
+	}
+
+	const movement =
+		found.columnId === "review" ? null : moveTaskToColumnInternal(board, normalizedTaskId, "review", now);
+	const reviewBoard = movement?.board ?? board;
+	const reviewLocation = findTaskLocation(reviewBoard, normalizedTaskId);
+	if (!reviewLocation || reviewLocation.columnId !== "review") {
+		throw new Error(`Task "${normalizedTaskId}" could not be moved to Review.`);
+	}
+	const submittedTask: RuntimeBoardCard = {
+		...reviewLocation.task,
+		submission,
+		updatedAt: now,
+	};
+	const columns = reviewBoard.columns.map((column, columnIndex) =>
+		columnIndex === reviewLocation.columnIndex
+			? {
+					...column,
+					cards: column.cards.map((card, taskIndex) =>
+						taskIndex === reviewLocation.taskIndex ? submittedTask : card,
+					),
+				}
+			: column,
+	);
+	return {
+		moved: movement?.moved ?? false,
+		board: { ...reviewBoard, columns },
+		task: submittedTask,
+		fromColumnId: found.columnId,
+	};
+}
+
+export function acceptReadOnlyTask(
+	board: RuntimeBoardData,
+	taskId: string,
+	evidenceInput: Extract<RuntimeTaskAcceptanceEvidence, { kind: "verified_no_change_report" }>,
+	now: number = Date.now(),
+): RuntimeMoveTaskResult {
+	const normalizedTaskId = taskId.trim();
+	const found = normalizedTaskId ? findTaskLocation(board, normalizedTaskId) : null;
+	if (!found) {
+		throw new Error(`Task "${normalizedTaskId}" was not found.`);
+	}
+	if (found.columnId !== "review") {
+		throw new Error(`Task "${normalizedTaskId}" must be in Review before read-only acceptance.`);
+	}
+	if (found.task.deliverableKind !== "read_only_report") {
+		throw new Error(`Task "${normalizedTaskId}" is not an explicit read-only report deliverable.`);
+	}
+	if (!found.task.submission) {
+		throw new Error(`Task "${normalizedTaskId}" has no durable Review submission.`);
+	}
+	if (!found.task.origin) {
+		throw new Error(`Task "${normalizedTaskId}" has no Amp Architect origin and cannot be accepted read-only.`);
+	}
+
+	const parsedEvidence = runtimeTaskAcceptanceEvidenceSchema.parse(evidenceInput);
+	if (parsedEvidence.kind !== "verified_no_change_report") {
+		throw new Error("Read-only acceptance requires verified no-change report evidence.");
+	}
+	const submission = runtimeTaskReviewSubmissionSchema.parse(found.task.submission);
+	assertReadOnlyReceiptIsClean(submission);
+	if (
+		parsedEvidence.taskId !== found.task.id ||
+		parsedEvidence.generation !== resolveTaskGeneration(found.task.generation) ||
+		parsedEvidence.executionAttemptId !== (found.task.execution?.attemptId ?? null) ||
+		parsedEvidence.generation !== submission.generation ||
+		parsedEvidence.executionAttemptId !== submission.executionAttemptId
+	) {
+		throw new Error("Read-only acceptance evidence is stale for the current task generation or attempt.");
+	}
+	if (
+		parsedEvidence.reportDigest !== submission.reportDigest ||
+		JSON.stringify(parsedEvidence.receipt) !== JSON.stringify(submission.receipt)
+	) {
+		throw new Error("Read-only acceptance evidence does not match the immutable Review submission.");
+	}
+	if (parsedEvidence.architectThreadId !== found.task.origin.threadId) {
+		throw new Error("Read-only acceptance must come from the task's Amp Architect origin thread.");
+	}
+
+	const moved = moveTaskToColumnInternal(board, normalizedTaskId, "trash", now);
+	if (!moved.moved || !moved.task) {
+		throw new Error(`Task "${normalizedTaskId}" could not be archived after read-only acceptance.`);
+	}
+	const acceptedTask: RuntimeBoardCard = {
+		...moved.task,
+		acceptanceEvidence: parsedEvidence,
+		updatedAt: now,
+	};
+	const acceptedLocation = findTaskLocation(moved.board, normalizedTaskId);
+	if (!acceptedLocation) {
+		throw new Error(`Task "${normalizedTaskId}" disappeared during read-only acceptance.`);
+	}
+	const columns = moved.board.columns.map((column, columnIndex) =>
+		columnIndex === acceptedLocation.columnIndex
+			? {
+					...column,
+					cards: column.cards.map((card, taskIndex) =>
+						taskIndex === acceptedLocation.taskIndex ? acceptedTask : card,
+					),
+				}
+			: column,
+	);
+	return {
+		moved: true,
+		board: {
+			...moved.board,
+			columns,
+			dependencies: moved.board.dependencies.filter(
+				(dependency) => dependency.fromTaskId !== normalizedTaskId && dependency.toTaskId !== normalizedTaskId,
+			),
+		},
+		task: acceptedTask,
+		fromColumnId: "review",
+	};
 }
 
 export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<string>): RuntimeDeleteTasksResult {
@@ -696,6 +908,7 @@ function moveTaskToColumnInternal(
 	}
 	if (found.columnId === "trash" && targetColumnId === "review") {
 		delete movedTask.acceptanceEvidence;
+		delete movedTask.submission;
 	}
 	const targetCards =
 		targetColumnId === "trash" ? [movedTask, ...targetColumn.cards] : [...targetColumn.cards, movedTask];
@@ -770,6 +983,7 @@ export function updateTask(
 			const images = input.images === undefined ? card.images : cloneTaskImages(input.images);
 			const agentId = input.agentId === undefined ? card.agentId : (input.agentId ?? undefined);
 			const removedAgentId = input.agentId === undefined ? card.removedAgentId : undefined;
+			const deliverableKind = input.deliverableKind ?? card.deliverableKind;
 			const startInPlanMode = Boolean(input.startInPlanMode);
 			const generation = resolveUpdatedTaskGeneration(card, {
 				prompt,
@@ -777,6 +991,7 @@ export function updateTask(
 				images,
 				agentId,
 				removedAgentId,
+				deliverableKind,
 				baseRef,
 			});
 			columnUpdated = true;
@@ -788,9 +1003,13 @@ export function updateTask(
 				images,
 				agentId,
 				removedAgentId,
+				deliverableKind,
 				priority: input.priority === undefined ? card.priority : (input.priority ?? undefined),
 				generation,
 				execution: generation === resolveTaskGeneration(card.generation) ? card.execution : undefined,
+				submission: generation === resolveTaskGeneration(card.generation) ? card.submission : undefined,
+				acceptanceEvidence:
+					generation === resolveTaskGeneration(card.generation) ? card.acceptanceEvidence : undefined,
 				baseRef,
 				updatedAt: now,
 			};

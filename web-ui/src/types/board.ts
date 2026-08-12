@@ -3,10 +3,12 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeMilestone,
 	RuntimeTaskAcceptanceEvidence,
+	RuntimeTaskDeliverableKind,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskImage,
 	RuntimeTaskOrigin,
 	RuntimeTaskPlanningContext,
+	RuntimeTaskReviewSubmission,
 	RuntimeTrack,
 } from "@/runtime/types";
 
@@ -26,6 +28,8 @@ export interface BoardCard {
 	origin?: RuntimeTaskOrigin;
 	execution?: RuntimeTaskExecutionAttemptReference;
 	planning?: RuntimeTaskPlanningContext;
+	deliverableKind?: RuntimeTaskDeliverableKind;
+	submission?: RuntimeTaskReviewSubmission;
 	acceptanceEvidence?: RuntimeTaskAcceptanceEvidence;
 	baseRef: string;
 	createdAt: number;

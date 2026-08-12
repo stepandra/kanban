@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
 
@@ -6,10 +9,12 @@ import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
+	RuntimeTaskDeliverableKind,
 	RuntimeTaskOrigin,
+	RuntimeTaskReviewSubmission,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
-import { runtimeAgentIdSchema, runtimeAmpThreadIdSchema } from "../core/api-contract";
+import { runtimeAgentIdSchema, runtimeAmpThreadIdSchema, runtimeTaskDeliverableKindSchema } from "../core/api-contract";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
 	addTaskDependency,
@@ -20,6 +25,7 @@ import {
 	moveTaskToColumn,
 	type RuntimeAddTaskDependencyResult,
 	removeTaskDependency,
+	submitTaskReview,
 	updateTask,
 } from "../core/task-board-mutations";
 import {
@@ -32,6 +38,7 @@ import {
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
+import { inspectReviewWorkspace } from "../workspace/review-workspace-receipt";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
@@ -77,6 +84,9 @@ function parseListColumn(value: string | undefined): ListTaskColumn | undefined 
 }
 
 const VALID_AGENT_IDS = runtimeAgentIdSchema.options;
+const VALID_DELIVERABLE_KINDS = runtimeTaskDeliverableKindSchema.options;
+const READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE =
+	"Read-only acceptance is disabled: an authenticated Amp Architect actor capability must be opaque, bound to the current tool invocation and thread, and Kanban-verifiable; the current Amp/Kanban boundary provides no such capability. The task remains in Review.";
 
 function parseAgentId(value: string | undefined): RuntimeAgentId | null | undefined {
 	if (value === undefined) {
@@ -90,6 +100,13 @@ function parseAgentId(value: string | undefined): RuntimeAgentId | null | undefi
 		return result.data;
 	}
 	throw new Error(`Invalid agent ID "${value}". Expected one of: ${VALID_AGENT_IDS.join(", ")}, default.`);
+}
+
+function parseDeliverableKind(value: string | undefined): RuntimeTaskDeliverableKind | undefined {
+	if (value === undefined) return undefined;
+	const parsed = runtimeTaskDeliverableKindSchema.safeParse(value.trim());
+	if (parsed.success) return parsed.data;
+	throw new Error(`Invalid deliverable kind "${value}". Expected one of: ${VALID_DELIVERABLE_KINDS.join(", ")}.`);
 }
 
 function parseAmpArchitectOrigin(threadId: string | undefined): RuntimeTaskOrigin | undefined {
@@ -234,6 +251,8 @@ function formatTaskRecord(
 		startInPlanMode: task.startInPlanMode,
 		...(task.agentId ? { agentId: task.agentId } : {}),
 		...(task.origin ? { origin: task.origin } : {}),
+		...(task.deliverableKind ? { deliverableKind: task.deliverableKind } : {}),
+		...(task.submission ? { submission: task.submission } : {}),
 		...(task.acceptanceEvidence ? { acceptanceEvidence: task.acceptanceEvidence } : {}),
 		generation: resolveTaskGeneration(task.generation),
 		createdAt: task.createdAt,
@@ -388,6 +407,7 @@ async function createTask(input: {
 	startInPlanMode?: boolean;
 	agentId?: RuntimeAgentId;
 	origin?: RuntimeTaskOrigin;
+	deliverableKind?: RuntimeTaskDeliverableKind;
 }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -406,6 +426,7 @@ async function createTask(input: {
 				startInPlanMode: input.startInPlanMode,
 				agentId: input.agentId,
 				origin: input.origin,
+				deliverableKind: input.deliverableKind,
 				baseRef: resolvedBaseRef,
 			},
 			() => globalThis.crypto.randomUUID(),
@@ -428,6 +449,7 @@ async function createTask(input: {
 			startInPlanMode: created.startInPlanMode,
 			...(created.agentId ? { agentId: created.agentId } : {}),
 			...(created.origin ? { origin: created.origin } : {}),
+			...(created.deliverableKind ? { deliverableKind: created.deliverableKind } : {}),
 			generation: resolveTaskGeneration(created.generation),
 		},
 	};
@@ -442,13 +464,15 @@ async function updateTaskCommand(input: {
 	baseRef?: string;
 	startInPlanMode?: boolean;
 	agentId?: RuntimeAgentId | null;
+	deliverableKind?: RuntimeTaskDeliverableKind;
 }): Promise<JsonRecord> {
 	if (
 		input.title === undefined &&
 		input.prompt === undefined &&
 		input.baseRef === undefined &&
 		input.startInPlanMode === undefined &&
-		input.agentId === undefined
+		input.agentId === undefined &&
+		input.deliverableKind === undefined
 	) {
 		throw new Error("task update requires at least one field to change.");
 	}
@@ -467,6 +491,7 @@ async function updateTaskCommand(input: {
 			baseRef: input.baseRef ?? taskRecord.task.baseRef,
 			startInPlanMode: input.startInPlanMode ?? taskRecord.task.startInPlanMode,
 			agentId: input.agentId,
+			deliverableKind: input.deliverableKind,
 		});
 		if (!updatedTask.updated || !updatedTask.task) {
 			throw new Error(`Task "${input.taskId}" could not be updated.`);
@@ -670,6 +695,7 @@ async function startTaskDirect(input: {
 			resumeFromTrash: executionReference.resumeFromTrash || undefined,
 			baseRef: task.baseRef,
 			agentId: task.agentId,
+			deliverableKind: task.deliverableKind,
 			executionAttempt: task.execution,
 		});
 		if (!started.ok || !started.summary) {
@@ -774,6 +800,118 @@ async function prepareExternalTask(input: { cwd: string; taskId: string; project
 			taskWorkspacePath: ensured.path,
 		},
 		claim: claimed.task,
+	};
+}
+
+function isPathWithin(parentPath: string, candidatePath: string): boolean {
+	const pathFromParent = relative(parentPath, candidatePath);
+	return (
+		pathFromParent === "" ||
+		(pathFromParent !== ".." && !pathFromParent.startsWith(`..${sep}`) && !isAbsolute(pathFromParent))
+	);
+}
+
+async function readBoundedExternalReport(input: {
+	reportFile: string;
+	cwd: string;
+	workspaceRepoPath: string;
+	taskWorkspacePath: string;
+}): Promise<{ path: string; markdown: string }> {
+	const requestedPath = resolve(input.cwd, input.reportFile);
+	const reportPath = await realpath(requestedPath).catch(() => {
+		throw new Error(`Review report file does not exist: ${requestedPath}`);
+	});
+	const reportStat = await stat(reportPath);
+	if (!reportStat.isFile()) throw new Error(`Review report path is not a file: ${reportPath}`);
+	if (reportStat.size > 262_144) throw new Error("Review report exceeds the 262144-byte limit.");
+	const [projectRoot, taskRoot] = await Promise.all([
+		realpath(input.workspaceRepoPath),
+		realpath(input.taskWorkspacePath),
+	]);
+	if (isPathWithin(projectRoot, reportPath) || isPathWithin(taskRoot, reportPath)) {
+		throw new Error("Review report must be written outside both the project and task repositories.");
+	}
+	const markdown = await readFile(reportPath, "utf8");
+	if (!markdown.trim()) throw new Error("Review report must contain non-empty Markdown.");
+	return { path: reportPath, markdown };
+}
+
+async function submitExternalTask(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	reportFile?: string;
+}): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const initialState = await runtimeClient.workspace.getState.query();
+	const record = findTaskRecord(initialState, input.taskId);
+	if (!record) throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+	const deliverableKind = record.task.deliverableKind ?? "change";
+	if (!input.reportFile) {
+		if (deliverableKind === "read_only_report") {
+			throw new Error("Read-only task submission requires --report-file with a bounded Markdown report.");
+		}
+		return transitionExternalTask({ ...input, action: "submit" });
+	}
+	if (record.columnId !== "in_progress" && record.columnId !== "review") {
+		throw new Error(`Task "${input.taskId}" cannot be submitted from ${record.columnId}.`);
+	}
+	const taskWorkspace = await getTaskWorkspacePathInfo({
+		cwd: workspaceRepoPath,
+		taskId: record.task.id,
+		baseRef: record.task.baseRef,
+	});
+	if (!taskWorkspace.exists) throw new Error(`Task workspace is missing: ${taskWorkspace.path}`);
+	const report = await readBoundedExternalReport({
+		reportFile: input.reportFile,
+		cwd: input.cwd,
+		workspaceRepoPath,
+		taskWorkspacePath: taskWorkspace.path,
+	});
+	const inspection = await inspectReviewWorkspace({
+		cwd: taskWorkspace.path,
+		baseRef: record.task.baseRef,
+		baseResolutionCwd: workspaceRepoPath,
+	});
+	const submission: RuntimeTaskReviewSubmission = {
+		taskId: record.task.id,
+		generation: resolveTaskGeneration(record.task.generation),
+		executionAttemptId: record.task.execution?.attemptId ?? null,
+		deliverableKind,
+		reportMarkdown: report.markdown,
+		reportDigest: createHash("sha256").update(report.markdown).digest("hex"),
+		submittedAt: Date.now(),
+		workspace: {
+			taskId: record.task.id,
+			path: taskWorkspace.path,
+			vcs: inspection.vcs,
+			baseRef: record.task.baseRef,
+		},
+		receipt: inspection.receipt,
+	};
+	const mutation = await mutateWorkspaceState(workspaceRepoPath, (latestState) => {
+		const submitted = submitTaskReview(latestState.board, record.task.id, submission, {
+			reportDigest: createHash("sha256").update(submission.reportMarkdown).digest("hex"),
+		});
+		if (!submitted.task) throw new Error(`Task "${record.task.id}" could not be submitted.`);
+		const nextState: RuntimeWorkspaceStateResponse = { ...latestState, board: submitted.board };
+		return {
+			board: submitted.board,
+			value: formatTaskRecord(nextState, submitted.task, "review"),
+		};
+	});
+	if (mutation.saved) await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
+	return {
+		ok: true,
+		task: {
+			...mutation.value,
+			taskWorkspacePath: taskWorkspace.path,
+			taskWorkspaceExists: true,
+		},
+		workspacePath: workspaceRepoPath,
+		reportFile: report.path,
 	};
 }
 
@@ -1175,6 +1313,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--base-ref <branch>", "Task base branch/ref.")
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")} | default.`)
+		.option("--deliverable-kind <kind>", `Deliverable contract: ${VALID_DELIVERABLE_KINDS.join(" | ")}.`)
 		.option("--origin-amp-thread-id <thread-id>", "Amp Architect provenance supplied by the Amp plugin.")
 		.action(
 			async (options: {
@@ -1184,6 +1323,7 @@ export function registerTaskCommand(program: Command): void {
 				baseRef?: string;
 				startInPlanMode?: unknown;
 				agentId?: string;
+				deliverableKind?: string;
 				originAmpThreadId?: string;
 			}) => {
 				await runTaskCommand(
@@ -1196,6 +1336,7 @@ export function registerTaskCommand(program: Command): void {
 							baseRef: options.baseRef,
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
 							agentId: parseAgentId(options.agentId) ?? undefined,
+							deliverableKind: parseDeliverableKind(options.deliverableKind),
 							origin: parseAmpArchitectOrigin(options.originAmpThreadId),
 						}),
 				);
@@ -1212,6 +1353,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--base-ref <branch>", "Replacement base branch/ref.")
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
 		.option("--agent-id <id>", `Agent override: ${VALID_AGENT_IDS.join(" | ")}. Use "default" to clear.`)
+		.option("--deliverable-kind <kind>", `Replacement deliverable contract: ${VALID_DELIVERABLE_KINDS.join(" | ")}.`)
 		.action(
 			async (options: {
 				taskId: string;
@@ -1221,6 +1363,7 @@ export function registerTaskCommand(program: Command): void {
 				baseRef?: string;
 				startInPlanMode?: unknown;
 				agentId?: string;
+				deliverableKind?: string;
 			}) => {
 				await runTaskCommand(
 					async () =>
@@ -1233,6 +1376,7 @@ export function registerTaskCommand(program: Command): void {
 							baseRef: options.baseRef,
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
 							agentId: parseAgentId(options.agentId),
+							deliverableKind: parseDeliverableKind(options.deliverableKind),
 						}),
 				);
 			},
@@ -1346,16 +1490,31 @@ export function registerTaskCommand(program: Command): void {
 		.description("Submit an in-progress task for review without accepting or cleaning it up.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { taskId: string; projectPath?: string }) => {
+		.option("--report-file <path>", "Bounded Markdown report file outside the project and task repositories.")
+		.action(async (options: { taskId: string; projectPath?: string; reportFile?: string }) => {
 			await runTaskCommand(
 				async () =>
-					await transitionExternalTask({
+					await submitExternalTask({
 						cwd: process.cwd(),
 						taskId: options.taskId,
 						projectPath: options.projectPath,
-						action: "submit",
+						reportFile: options.reportFile,
 					}),
 			);
+		});
+
+	task
+		.command("accept-read-only")
+		.description("Fail closed because Kanban has no verifiable Amp Architect actor capability.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--origin-amp-thread-id <thread-id>", "Current Amp Architect thread provenance.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { taskId: string; originAmpThreadId: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				const origin = parseAmpArchitectOrigin(options.originAmpThreadId);
+				if (!origin) throw new Error("Amp Architect origin thread is required.");
+				throw new Error(READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE);
+			});
 		});
 
 	task

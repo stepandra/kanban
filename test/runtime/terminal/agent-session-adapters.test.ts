@@ -260,6 +260,27 @@ enabled = true
 		expect(kimiLaunch.env.KANBAN_HOOK_TASK_ID).toBe("task-kimi");
 	});
 
+	it("directs read-only workers to an outside-repository report and fenced submit command", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "audit-1",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-workspace",
+			prompt: "Audit the implementation",
+			deliverableKind: "read_only_report",
+			workspaceId: "workspace-1",
+			projectPath: "/tmp/project",
+		});
+
+		const workerPrompt = launch.args.at(-1) ?? "";
+		expect(workerPrompt).toContain("This is a read-only deliverable. Do not modify repository files.");
+		expect(workerPrompt).toContain("at most 262144 bytes");
+		expect(workerPrompt).toContain(`'--report-file' '${join(tmpdir(), "kanban-review-reports", "audit-1.md")}'`);
+		expect(workerPrompt).not.toContain("scrape");
+	});
+
 	it("starts Grok plan mode through its supported slash command", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({

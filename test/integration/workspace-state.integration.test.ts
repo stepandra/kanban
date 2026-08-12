@@ -13,6 +13,7 @@ import {
 	loadWorkspaceContext,
 	loadWorkspaceContextById,
 	loadWorkspaceState,
+	mutateWorkspaceState,
 	removeWorkspaceIndexEntry,
 	saveWorkspaceSessionSummary,
 	saveWorkspaceState,
@@ -187,6 +188,269 @@ describe.sequential("workspace-state integration", () => {
 						expectedRevision: saved.revision,
 					}),
 				).rejects.toThrow("cannot move from Review to the archive through a board snapshot save");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("rejects fabricated acceptance fields on a newly added task while preserving plain task creation", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-new-task-acceptance-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-new-task-acceptance");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const initial = await loadWorkspaceState(workspacePath);
+				const attackBoard = createBoard("Fabricated accepted task");
+				const task = attackBoard.columns[0]?.cards[0];
+				const backlogColumn = attackBoard.columns.find((column) => column.id === "backlog");
+				const trashColumn = attackBoard.columns.find((column) => column.id === "trash");
+				if (!task || !backlogColumn || !trashColumn) {
+					throw new Error("Expected fabricated task and authority columns.");
+				}
+				const receipt = {
+					vcs: "git" as const,
+					clean: true,
+					headCommit: "1".repeat(40),
+					baseCommit: "1".repeat(40),
+					hasConflicts: false,
+					hasUntracked: false,
+					divergent: false,
+					stateDigest: "b".repeat(64),
+				};
+				const submission = {
+					taskId: task.id,
+					generation: 1,
+					executionAttemptId: null,
+					deliverableKind: "read_only_report" as const,
+					reportMarkdown: "# Fabricated report\n\nNo changes required.\n",
+					reportDigest: "a".repeat(64),
+					submittedAt: 10,
+					workspace: {
+						taskId: task.id,
+						path: "/tmp/fabricated-task",
+						vcs: "git" as const,
+						baseRef: "main",
+					},
+					receipt,
+				};
+				task.deliverableKind = "read_only_report";
+				task.origin = { kind: "amp_architect", threadId: "T-attacker-chosen" };
+				task.submission = submission;
+				task.acceptanceEvidence = {
+					kind: "verified_no_change_report",
+					taskId: task.id,
+					generation: 1,
+					executionAttemptId: null,
+					reportDigest: submission.reportDigest,
+					receipt,
+					architectThreadId: "T-attacker-chosen",
+					verifiedAt: 11,
+				};
+				backlogColumn.cards = [];
+				trashColumn.cards = [task];
+
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: attackBoard,
+						sessions: {},
+						expectedRevision: initial.revision,
+					}),
+				).rejects.toThrow("cannot create a task with a durable Review submission through a board snapshot save");
+
+				const evidenceOnlyBoard = createBoard("Fabricated evidence-only task");
+				const evidenceOnlyTask = evidenceOnlyBoard.columns[0]?.cards[0];
+				if (!evidenceOnlyTask) throw new Error("Expected fabricated evidence-only task.");
+				evidenceOnlyTask.acceptanceEvidence = {
+					kind: "verified_no_change_report",
+					taskId: evidenceOnlyTask.id,
+					generation: 1,
+					executionAttemptId: null,
+					reportDigest: submission.reportDigest,
+					receipt,
+					architectThreadId: "T-attacker-chosen",
+					verifiedAt: 11,
+				};
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: evidenceOnlyBoard,
+						sessions: {},
+						expectedRevision: initial.revision,
+					}),
+				).rejects.toThrow("cannot create a task with acceptance evidence through a board snapshot save");
+
+				const originOnlyBoard = createBoard("Fabricated origin-only task");
+				const originOnlyTask = originOnlyBoard.columns[0]?.cards[0];
+				if (!originOnlyTask) throw new Error("Expected fabricated origin-only task.");
+				originOnlyTask.origin = { kind: "amp_architect", threadId: "T-attacker-chosen" };
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: originOnlyBoard,
+						sessions: {},
+						expectedRevision: initial.revision,
+					}),
+				).rejects.toThrow("cannot establish Amp Architect origin through a board snapshot save");
+
+				const legitimate = await saveWorkspaceState(workspacePath, {
+					board: createBoard("Legitimate new task"),
+					sessions: {},
+					expectedRevision: initial.revision,
+				});
+				expect(legitimate.board.columns[0]?.cards[0]?.title).toBe("Legitimate new task");
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("rejects changing, adding, or removing an existing task origin through a whole-board snapshot save", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-origin-change-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-origin-change");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const seeded = await mutateWorkspaceState(workspacePath, () => {
+					const board = createBoard("Origin-bound task");
+					const task = board.columns[0]?.cards[0];
+					if (!task) throw new Error("Expected origin-bound task.");
+					task.origin = { kind: "amp_architect", threadId: "T-real-origin" };
+					board.columns[0]?.cards.push({
+						id: "task-without-origin",
+						title: "Originless task",
+						prompt: "Originless task",
+						startInPlanMode: false,
+						baseRef: "main",
+						createdAt: 1,
+						updatedAt: 1,
+					});
+					return { board, value: null };
+				});
+				const attacks = [
+					{
+						name: "change",
+						apply(board: RuntimeBoardData): void {
+							const task = board.columns[0]?.cards.find((card) => card.id === "task-1");
+							if (!task) throw new Error("Expected origin-bound task.");
+							task.origin = { kind: "amp_architect", threadId: "T-attacker-chosen" };
+						},
+					},
+					{
+						name: "add",
+						apply(board: RuntimeBoardData): void {
+							const task = board.columns[0]?.cards.find((card) => card.id === "task-without-origin");
+							if (!task) throw new Error("Expected originless task.");
+							task.origin = { kind: "amp_architect", threadId: "T-attacker-chosen" };
+						},
+					},
+					{
+						name: "remove",
+						apply(board: RuntimeBoardData): void {
+							const task = board.columns[0]?.cards.find((card) => card.id === "task-1");
+							if (!task) throw new Error("Expected origin-bound task.");
+							delete task.origin;
+						},
+					},
+				];
+				for (const attack of attacks) {
+					const attackBoard: RuntimeBoardData = structuredClone(seeded.state.board);
+					attack.apply(attackBoard);
+					await expect(
+						saveWorkspaceState(workspacePath, {
+							board: attackBoard,
+							sessions: {},
+							expectedRevision: seeded.state.revision,
+						}),
+						attack.name,
+					).rejects.toThrow("cannot change its Amp Architect origin through a board snapshot save");
+				}
+			} finally {
+				cleanup();
+			}
+		});
+	});
+
+	it("rejects durable Review submission attachment or mutation through whole-board snapshot saves", async () => {
+		await withTemporaryHome(async () => {
+			const { path: sandboxRoot, cleanup } = createTempDir("kanban-workspace-submission-authority-");
+			try {
+				const workspacePath = join(sandboxRoot, "project-submission-authority");
+				mkdirSync(workspacePath, { recursive: true });
+				initGitRepository(workspacePath);
+				const initial = await loadWorkspaceState(workspacePath);
+				const reviewBoard = createBoard("Read-only Review task");
+				const task = reviewBoard.columns[0]?.cards[0];
+				const backlogColumn = reviewBoard.columns.find((column) => column.id === "backlog");
+				const reviewColumn = reviewBoard.columns.find((column) => column.id === "review");
+				if (!task || !backlogColumn || !reviewColumn) throw new Error("Expected Review task and columns.");
+				backlogColumn.cards = [];
+				task.deliverableKind = "read_only_report";
+				reviewColumn.cards = [task];
+				const saved = await saveWorkspaceState(workspacePath, {
+					board: reviewBoard,
+					sessions: {},
+					expectedRevision: initial.revision,
+				});
+				const submission = {
+					taskId: task.id,
+					generation: 1,
+					executionAttemptId: null,
+					deliverableKind: "read_only_report" as const,
+					reportMarkdown: "# Audit\n\nNo changes required.\n",
+					reportDigest: "a".repeat(64),
+					submittedAt: 10,
+					workspace: {
+						taskId: task.id,
+						path: "/tmp/task-1",
+						vcs: "git" as const,
+						baseRef: "main",
+					},
+					receipt: {
+						vcs: "git" as const,
+						clean: true,
+						headCommit: "1".repeat(40),
+						baseCommit: "1".repeat(40),
+						hasConflicts: false,
+						hasUntracked: false,
+						divergent: false,
+						stateDigest: "b".repeat(64),
+					},
+				};
+				const attachedThroughSnapshot: RuntimeBoardData = structuredClone(saved.board);
+				const attachedTask = attachedThroughSnapshot.columns.find((column) => column.id === "review")?.cards[0];
+				if (!attachedTask) throw new Error("Expected attached Review task.");
+				attachedTask.submission = submission;
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: attachedThroughSnapshot,
+						sessions: {},
+						expectedRevision: saved.revision,
+					}),
+				).rejects.toThrow("cannot attach or replace a durable Review submission through a board snapshot save");
+
+				const seeded = await mutateWorkspaceState(workspacePath, (state) => {
+					const board = structuredClone(state.board);
+					const seededTask = board.columns.find((column) => column.id === "review")?.cards[0];
+					if (!seededTask) throw new Error("Expected seeded Review task.");
+					seededTask.submission = submission;
+					return { board, value: null };
+				});
+				const rewritten: RuntimeBoardData = structuredClone(seeded.state.board);
+				const rewrittenTask = rewritten.columns.find((column) => column.id === "review")?.cards[0];
+				if (!rewrittenTask) throw new Error("Expected rewritten Review task.");
+				rewrittenTask.submission = {
+					...submission,
+					reportMarkdown: "# Rewritten report\n",
+					reportDigest: "c".repeat(64),
+				};
+				await expect(
+					saveWorkspaceState(workspacePath, {
+						board: rewritten,
+						sessions: {},
+						expectedRevision: seeded.state.revision,
+					}),
+				).rejects.toThrow("cannot attach or replace a durable Review submission through a board snapshot save");
 			} finally {
 				cleanup();
 			}

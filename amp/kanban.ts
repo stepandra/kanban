@@ -11,6 +11,8 @@ const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
 const KANBAN_PROVENANCE_SCHEMA = "stepandra-kanban-provenance/v1";
 const KANBAN_PLUGIN_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EXACT_GIT_REVISION_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+const READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE =
+	"Read-only acceptance is disabled: an authenticated Amp Architect actor capability must be opaque, bound to the current tool invocation and thread, and Kanban-verifiable; the current Amp PluginToolContext provides no such capability. The task remains in Review.";
 
 type ProcessResult = {
 	exitCode: number;
@@ -38,7 +40,18 @@ export default function (amp: PluginAPI): void {
 			properties: {
 				action: {
 					type: "string",
-					enum: ["list", "create", "update", "claim", "submit", "trash", "link", "unlink", "start"],
+					enum: [
+						"list",
+						"create",
+						"update",
+						"claim",
+						"submit",
+						"accept_read_only",
+						"trash",
+						"link",
+						"unlink",
+						"start",
+					],
 					description: "Kanban task operation to perform.",
 				},
 				taskId: {
@@ -63,6 +76,15 @@ export default function (amp: PluginAPI): void {
 					description: "Kanban implementation harness for create/update; prefer grok.",
 				},
 				baseRef: { type: "string", description: "Optional base revision for create/update." },
+				deliverableKind: {
+					type: "string",
+					enum: ["change", "read_only_report"],
+					description: "Explicit task deliverable contract for create/update.",
+				},
+				reportFile: {
+					type: "string",
+					description: "Outside-repository Markdown report path for submit.",
+				},
 				startInPlanMode: { type: "boolean", description: "Whether the task agent starts in plan mode." },
 				projectPath: {
 					type: "string",
@@ -75,7 +97,11 @@ export default function (amp: PluginAPI): void {
 		async execute(input, ctx) {
 			const workspacePath = getProjectPath(input, getWorkspacePath(amp));
 			const action = requiredString(input, "action");
-			const args = buildTaskArgs(input, workspacePath, action === "create" ? ctx.thread.id : undefined);
+			const args = buildTaskArgs(
+				input,
+				workspacePath,
+				action === "create" || action === "accept_read_only" ? ctx.thread.id : undefined,
+			);
 			const result = await runKanbanChecked(args, workspacePath);
 			return result.stdout.trim() || "Kanban command completed.";
 		},
@@ -137,7 +163,7 @@ export function buildTaskArgs(
 	ampArchitectThreadId?: string,
 ): string[] {
 	const action = requiredString(input, "action");
-	const args = ["task", action];
+	const args = ["task", action === "accept_read_only" ? "accept-read-only" : action];
 
 	switch (action) {
 		case "list":
@@ -158,9 +184,18 @@ export function buildTaskArgs(
 			appendTaskOptions(args, input);
 			break;
 		case "claim":
-		case "submit":
 			args.push("--task-id", requiredString(input, "taskId"));
 			break;
+		case "submit":
+			args.push("--task-id", requiredString(input, "taskId"));
+			appendStringOption(args, "--report-file", input.reportFile);
+			break;
+		case "accept_read_only":
+			args.push("--task-id", requiredString(input, "taskId"));
+			if (!ampArchitectThreadId) {
+				throw new Error("Read-only acceptance requires the current Amp Architect thread context.");
+			}
+			throw new Error(READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE);
 		case "trash":
 			appendExactlyOneTarget(args, input);
 			break;
@@ -185,6 +220,7 @@ export function buildTaskArgs(
 function appendTaskOptions(args: string[], input: Record<string, unknown>): void {
 	appendStringOption(args, "--base-ref", input.baseRef);
 	appendStringOption(args, "--agent-id", input.agentId);
+	appendStringOption(args, "--deliverable-kind", input.deliverableKind);
 	appendBooleanOption(args, "--start-in-plan-mode", input.startInPlanMode);
 }
 

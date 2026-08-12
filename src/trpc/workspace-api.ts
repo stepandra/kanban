@@ -15,7 +15,7 @@ import {
 	parseWorktreeDeleteRequest,
 	parseWorktreeEnsureRequest,
 } from "../core/api-validation";
-import { saveWorkspaceState, WorkspaceStateConflictError } from "../state/workspace-state";
+import { detectRepositoryKind, saveWorkspaceState, WorkspaceStateConflictError } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
 	createEmptyWorkspaceChangesResponse,
@@ -258,6 +258,13 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				return await createEmptyWorkspaceChangesResponse(workspaceScope.workspacePath);
 			}
 			if (normalizedInput.mode === "last_turn") {
+				if (detectRepositoryKind(taskCwd) === "jj") {
+					const empty = await createEmptyWorkspaceChangesResponse(taskCwd);
+					return {
+						...empty,
+						error: "Last-turn changes are unavailable for jj because turn checkpoints are Git-only.",
+					};
+				}
 				const terminalManager = await deps.ensureTerminalManagerForWorkspace(
 					workspaceScope.workspaceId,
 					workspaceScope.workspacePath,

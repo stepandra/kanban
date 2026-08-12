@@ -14,6 +14,15 @@ function compactId(value: string | null | undefined): string {
 	return value.length > 12 ? value.slice(0, 12) : value;
 }
 
+function hasValidNoChangeReceipt(selection: CardSelection): boolean {
+	const submission = selection.card.submission;
+	if (!submission || submission.deliverableKind !== "read_only_report") return false;
+	const receipt = submission.receipt;
+	return (
+		receipt.clean && !receipt.hasConflicts && !receipt.divergent && (receipt.vcs !== "git" || !receipt.hasUntracked)
+	);
+}
+
 export function TaskOperationalOverview({
 	selection,
 	execution,
@@ -42,9 +51,20 @@ export function TaskOperationalOverview({
 		getRuntimeAgentCatalogEntry(selection.card.agentId ?? "codex")?.label ??
 		selection.card.agentId ??
 		"Default worker";
-	const status = isStaleAttempt
-		? "stale"
-		: (execution?.status ?? (selection.card.execution ? "checking" : "not queued"));
+	const isReview = selection.column.id === "review";
+	const isReadOnlyReview = isReview && selection.card.deliverableKind === "read_only_report";
+	const reviewReceiptValid = hasValidNoChangeReceipt(selection);
+	const status = isReview
+		? !isReadOnlyReview
+			? "Ready for review"
+			: selection.card.submission
+				? reviewReceiptValid
+					? "Ready for review"
+					: "Receipt invalid"
+				: "Submission required"
+		: isStaleAttempt
+			? "stale"
+			: (execution?.status ?? (selection.card.execution ? "checking" : "not queued"));
 	const acceptanceEvidence = selection.card.acceptanceEvidence;
 
 	return (
@@ -67,12 +87,25 @@ export function TaskOperationalOverview({
 				<div
 					className={cn(
 						"shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide",
-						status === "running" && "border-status-green/50 bg-status-green/10 text-status-green",
+						(status === "running" || status === "Ready for review") &&
+							"border-status-green/50 bg-status-green/10 text-status-green",
 						status === "pending" && "border-status-blue/50 bg-status-blue/10 text-status-blue",
-						(status === "failed" || status === "cancelled" || status === "stale") &&
+						(status === "failed" ||
+							status === "cancelled" ||
+							status === "stale" ||
+							status === "Receipt invalid" ||
+							status === "Submission required") &&
 							"border-status-orange/50 bg-status-orange/10 text-status-orange",
-						!["running", "pending", "failed", "cancelled", "stale"].includes(status) &&
-							"border-border-bright bg-surface-2 text-text-secondary",
+						![
+							"running",
+							"pending",
+							"failed",
+							"cancelled",
+							"stale",
+							"Ready for review",
+							"Receipt invalid",
+							"Submission required",
+						].includes(status) && "border-border-bright bg-surface-2 text-text-secondary",
 					)}
 				>
 					{status}
@@ -113,16 +146,33 @@ export function TaskOperationalOverview({
 					<div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-text-tertiary">
 						{selection.column.id === "review" ? <ShieldCheck size={12} /> : <AlertTriangle size={12} />} Review
 					</div>
-					<div className="mt-1 text-xs text-text-primary" title={acceptanceEvidence?.acceptedRevision.remoteRef}>
-						{acceptanceEvidence
-							? `${compactId(acceptanceEvidence.acceptedRevision.sha)} verified`
-							: selection.column.id === "review"
-								? "Remote proof required"
-								: "Not accepted"}
+					<div
+						className="mt-1 text-xs text-text-primary"
+						title={
+							acceptanceEvidence?.kind === "verified_remote_revision"
+								? acceptanceEvidence.acceptedRevision.remoteRef
+								: undefined
+						}
+					>
+						{acceptanceEvidence?.kind === "verified_no_change_report"
+							? "No-change receipt verified"
+							: acceptanceEvidence?.kind === "verified_remote_revision"
+								? `${compactId(acceptanceEvidence.acceptedRevision.sha)} verified`
+								: isReview && selection.card.deliverableKind === "read_only_report"
+									? reviewReceiptValid
+										? "No-change receipt verified"
+										: "No-change receipt required"
+									: isReview
+										? "Remote proof required"
+										: "Not accepted"}
 					</div>
-					{acceptanceEvidence ? (
+					{acceptanceEvidence?.kind === "verified_remote_revision" ? (
 						<div className="mt-0.5 truncate font-mono text-[10px] text-text-tertiary">
 							{acceptanceEvidence.acceptedRevision.remoteRef.replace("refs/heads/", "")}
+						</div>
+					) : isReview && selection.card.deliverableKind === "read_only_report" && reviewReceiptValid ? (
+						<div className="mt-0.5 text-[10px] text-text-tertiary">
+							Acceptance unavailable — remains in Review
 						</div>
 					) : null}
 				</div>

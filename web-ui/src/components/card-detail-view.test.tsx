@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailView } from "@/components/card-detail-view";
+import type { RuntimeTaskExecutionProjection } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, CardSelection } from "@/types";
@@ -98,6 +99,54 @@ function createSelection(): CardSelection {
 		column: columns[0]!,
 		allColumns: columns,
 	};
+}
+
+function createReviewSelection(withSubmission = true): CardSelection {
+	const selection = createSelection();
+	selection.column.cards = [];
+	selection.column = selection.allColumns.find((column) => column.id === "review")!;
+	selection.column.cards = [selection.card];
+	selection.card.deliverableKind = "read_only_report";
+	selection.card.origin = { kind: "amp_architect", threadId: "T-architect-1" };
+	selection.card.execution = { attemptId: "attempt-1", generation: 1, queuedAt: 2 };
+	if (withSubmission) {
+		selection.card.submission = {
+			taskId: selection.card.id,
+			generation: 1,
+			executionAttemptId: "attempt-1",
+			deliverableKind: "read_only_report",
+			reportMarkdown: "# Audit result\n\nNo changes were required.",
+			reportDigest: "a".repeat(64),
+			submittedAt: 1_700_000_000_000,
+			workspace: {
+				taskId: selection.card.id,
+				path: "/tmp/task-1",
+				vcs: "jj",
+				baseRef: "main",
+			},
+			receipt: {
+				vcs: "jj",
+				clean: true,
+				changeId: "change-id",
+				commitId: "1".repeat(40),
+				parentCommitIds: ["2".repeat(40)],
+				baseCommit: "2".repeat(40),
+				hasConflicts: false,
+				divergent: false,
+				stateDigest: "b".repeat(64),
+			},
+		};
+	}
+	return selection;
+}
+
+function createChangeReviewSelection(): CardSelection {
+	const selection = createSelection();
+	selection.column.cards = [];
+	selection.column = selection.allColumns.find((column) => column.id === "review")!;
+	selection.column.cards = [selection.card];
+	selection.card.deliverableKind = "change";
+	return selection;
 }
 
 type MockedDiffViewerProps = {
@@ -646,4 +695,170 @@ describe("CardDetailView", () => {
 		expect(container.textContent).toContain("amp threads continue T-019fb3aa-000b-752a-a88e-337592dae657");
 		expect(container.querySelector('button[title^="amp threads continue T-"]')).toBeInstanceOf(HTMLButtonElement);
 	});
+
+	it("renders a durable report as the primary Review content even when execution is unknown", async () => {
+		const unknownExecution: RuntimeTaskExecutionProjection = {
+			attemptId: "attempt-1",
+			generation: 1,
+			queuedAt: 2,
+			status: "unknown",
+			runId: null,
+			currentAttempt: null,
+			maxAttempts: null,
+			createdAt: null,
+			updatedAt: null,
+		};
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createReviewSelection()}
+					currentProjectId="workspace-1"
+					workspaceVcs="jj"
+					sessionSummary={{
+						taskId: "task-1",
+						state: "idle",
+						agentId: "codex",
+						workspacePath: "/tmp/task-1",
+						pid: null,
+						startedAt: 1,
+						updatedAt: 2,
+						lastOutputAt: 2,
+						reviewReason: "exit",
+						exitCode: 0,
+						lastHookAt: null,
+						latestHookActivity: null,
+					}}
+					executionProjection={unknownExecution}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Audit result");
+		expect(container.textContent).toContain("Ready for review");
+		expect(container.textContent).toContain("No-change receipt verified");
+		expect(container.textContent).toContain("Acceptance unavailable — remains in Review");
+		expect(container.textContent).not.toContain("Accept read-only report");
+		expect(container.textContent).not.toContain("unknown");
+		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
+		expect(document.body.textContent).not.toContain("Accept read-only report?");
+	}, 20_000);
+
+	it("keeps a change task without a durable submission ready for normal Review", async () => {
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createChangeReviewSelection()}
+					currentProjectId="workspace-1"
+					workspaceVcs="jj"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Ready for review");
+		expect(container.textContent).toContain("Remote proof required");
+		expect(container.textContent).toContain("Change ready for review");
+		expect(container.textContent).toContain("Inspect the workspace changes and verify the remote revision");
+		expect(container.textContent).not.toContain("Submission required");
+		expect(container.textContent).not.toContain("Durable submission missing — resubmit required");
+		expect(container.textContent).not.toContain("Accept read-only report");
+		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
+		expect(mockDiffViewerPanel).toHaveBeenCalled();
+	});
+
+	it("fails closed for an explicit read-only Review card without a durable submission", async () => {
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createReviewSelection(false)}
+					currentProjectId="workspace-1"
+					workspaceVcs="git"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("Durable submission missing — resubmit required");
+		expect(container.textContent).toContain("Submission required");
+		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
+	});
+
+	it("shows JJ changes and the verified no-change empty state without disabling the panel", async () => {
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createReviewSelection()}
+					currentProjectId="workspace-1"
+					workspaceVcs="jj"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+		expect(container.textContent).not.toContain("Git diff is unavailable");
+		const lastTurnButton = Array.from(container.querySelectorAll("button")).find(
+			(button) => button.textContent?.trim() === "Last Turn",
+		);
+		expect(lastTurnButton?.disabled).toBe(true);
+
+		mockUseRuntimeWorkspaceChanges.mockReturnValue({
+			changes: { vcs: "jj", files: [], stateKey: "c".repeat(64), conflicts: [], error: null },
+			isRuntimeAvailable: true,
+		});
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createReviewSelection()}
+					currentProjectId="workspace-1"
+					workspaceVcs="jj"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+		expect(container.textContent).toContain("Verified no-change submission");
+	}, 20_000);
 });

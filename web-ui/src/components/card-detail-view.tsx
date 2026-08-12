@@ -1,5 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import { Files, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
+import { Files, FileText, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
@@ -7,6 +7,7 @@ import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-pa
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { ReviewSubmissionPanel } from "@/components/review-submission-panel";
 import { TaskOperationalOverview } from "@/components/task-operational-overview";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -18,6 +19,7 @@ import { useResizeDrag } from "@/resize/use-resize-drag";
 import type {
 	RuntimeTaskExecutionProjection,
 	RuntimeTaskSessionSummary,
+	RuntimeVcsMode,
 	RuntimeWorkspaceChangesMode,
 } from "@/runtime/types";
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
@@ -190,20 +192,26 @@ function WorkspaceChangesEmptyPanel({ title }: { title: string }): React.ReactEl
 
 type MobileTab = "chat" | "diff" | "files";
 
-const MOBILE_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
-	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
-	{ id: "diff", label: "Diff", icon: <GitCompareArrows size={14} /> },
-	{ id: "files", label: "Files", icon: <Files size={14} /> },
-];
-
 function MobileDetailTabBar({
 	activeTab,
 	onTabChange,
+	isReview,
+	isReadOnlyReview,
 }: {
 	activeTab: MobileTab;
 	onTabChange: (tab: MobileTab) => void;
+	isReview: boolean;
+	isReadOnlyReview: boolean;
 }): React.ReactElement {
-	const tabs = MOBILE_TABS;
+	const tabs: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
+		{
+			id: "chat",
+			label: isReadOnlyReview ? "Report" : isReview ? "Review" : "Chat",
+			icon: isReview ? <FileText size={14} /> : <MessageSquare size={14} />,
+		},
+		{ id: "diff", label: "Diff", icon: <GitCompareArrows size={14} /> },
+		{ id: "files", label: "Files", icon: <Files size={14} /> },
+	];
 	return (
 		<div className="flex items-center border-b border-border" style={{ minHeight: 36 }}>
 			{tabs.map((tab) => (
@@ -229,16 +237,22 @@ function DiffModeButton({
 	active,
 	onClick,
 	children,
+	disabled,
+	title,
 }: {
 	active: boolean;
 	onClick: () => void;
 	children: React.ReactNode;
+	disabled?: boolean;
+	title?: string;
 }): React.ReactElement {
 	return (
 		<Button
 			variant="ghost"
 			size="sm"
 			onClick={onClick}
+			disabled={disabled}
+			title={title}
 			aria-pressed={active}
 			className="h-5 rounded-sm text-xs"
 			style={
@@ -261,12 +275,14 @@ function DiffToolbar({
 	isExpanded,
 	onToggleExpand,
 	hideExpand,
+	lastTurnDisabled,
 }: {
 	mode: RuntimeWorkspaceChangesMode;
 	onModeChange: (mode: RuntimeWorkspaceChangesMode) => void;
 	isExpanded: boolean;
 	onToggleExpand: () => void;
 	hideExpand?: boolean;
+	lastTurnDisabled?: boolean;
 }): React.ReactElement {
 	return (
 		<div className="flex items-center gap-1 border-b border-divider px-2 py-1">
@@ -284,7 +300,16 @@ function DiffToolbar({
 				<DiffModeButton active={mode === "working_copy"} onClick={() => onModeChange("working_copy")}>
 					All Changes
 				</DiffModeButton>
-				<DiffModeButton active={mode === "last_turn"} onClick={() => onModeChange("last_turn")}>
+				<DiffModeButton
+					active={mode === "last_turn"}
+					onClick={() => onModeChange("last_turn")}
+					disabled={lastTurnDisabled}
+					title={
+						lastTurnDisabled
+							? "Last-turn changes are unavailable for jj because checkpoints are Git-only."
+							: undefined
+					}
+				>
 					Last Turn
 				</DiffModeButton>
 			</div>
@@ -307,6 +332,7 @@ export function CardDetailView({
 	currentProjectId,
 	workspacePath,
 	gitFeaturesEnabled = true,
+	workspaceVcs,
 	sessionSummary,
 	executionProjection,
 	dependencies = [],
@@ -350,6 +376,7 @@ export function CardDetailView({
 	currentProjectId: string | null;
 	workspacePath?: string | null;
 	gitFeaturesEnabled?: boolean;
+	workspaceVcs?: RuntimeVcsMode | null;
 	sessionSummary: RuntimeTaskSessionSummary | null;
 	executionProjection?: RuntimeTaskExecutionProjection | null;
 	dependencies?: BoardDependency[];
@@ -396,6 +423,9 @@ export function CardDetailView({
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
+	const effectiveWorkspaceVcs = workspaceVcs === undefined ? (gitFeaturesEnabled ? "git" : "jj") : workspaceVcs;
+	const isJjWorkspace = effectiveWorkspaceVcs === "jj";
+	const workspaceChangesEnabled = effectiveWorkspaceVcs !== null && !(isJjWorkspace && diffMode === "last_turn");
 	const {
 		taskCardsPanelRatio,
 		setTaskCardsPanelRatio,
@@ -450,18 +480,23 @@ export function CardDetailView({
 		isDocumentVisible && !gitHistoryPanel && selection.column.id !== "trash" ? DETAIL_DIFF_POLL_INTERVAL_MS : null,
 		lastTurnViewKey,
 		true,
-		gitFeaturesEnabled,
+		workspaceChangesEnabled,
 	);
 	const runtimeFiles = workspaceChanges?.files ?? null;
 	const isWorkspaceChangesPending = isRuntimeAvailable && workspaceChanges === null;
 	const hasNoWorkspaceFileChanges =
-		!gitFeaturesEnabled ||
-		(isRuntimeAvailable && workspaceChanges !== null && runtimeFiles !== null && runtimeFiles.length === 0);
-	const emptyDiffTitle = !gitFeaturesEnabled
-		? "Git diff is unavailable in jj workspaces"
-		: diffMode === "last_turn"
-			? "No changes since last turn"
-			: "No working changes";
+		isRuntimeAvailable && workspaceChanges !== null && runtimeFiles !== null && runtimeFiles.length === 0;
+	const hasVerifiedNoChangeSubmission =
+		selection.column.id === "review" &&
+		selection.card.submission?.deliverableKind === "read_only_report" &&
+		selection.card.submission.receipt.clean;
+	const emptyDiffTitle = workspaceChanges?.error
+		? workspaceChanges.error
+		: hasVerifiedNoChangeSubmission
+			? "Verified no-change submission"
+			: diffMode === "last_turn"
+				? "No changes since last turn"
+				: "No workspace changes";
 	const taskCardsPanelPercent = `${(taskCardsPanelRatio * 100).toFixed(1)}%`;
 	const detailContentPanelPercent = `${((1 - taskCardsPanelRatio) * 100).toFixed(1)}%`;
 	const agentPanelPercent = `${(agentPanelRatio * 100).toFixed(1)}%`;
@@ -554,6 +589,10 @@ export function CardDetailView({
 		setDiffMode("working_copy");
 	}, [selection.card.id]);
 
+	useEffect(() => {
+		if (isJjWorkspace && diffMode === "last_turn") setDiffMode("working_copy");
+	}, [diffMode, isJjWorkspace]);
+
 	const handleToggleDiffExpand = useCallback(() => {
 		if (!isDiffExpanded && bottomTerminalOpen) {
 			onBottomTerminalClose();
@@ -595,6 +634,8 @@ export function CardDetailView({
 			cursorColor={terminalThemeColors.textPrimary}
 		/>
 	);
+	const primaryPanel =
+		selection.column.id === "review" ? <ReviewSubmissionPanel card={selection.card} /> : agentChatPanel;
 
 	if (isMobile) {
 		return (
@@ -605,7 +646,14 @@ export function CardDetailView({
 					dependencies={dependencies}
 					onOpenJjChange={onOpenJjChange}
 				/>
-				<MobileDetailTabBar activeTab={mobileTab} onTabChange={setMobileTab} />
+				<MobileDetailTabBar
+					activeTab={mobileTab}
+					onTabChange={setMobileTab}
+					isReview={selection.column.id === "review"}
+					isReadOnlyReview={
+						selection.column.id === "review" && selection.card.deliverableKind === "read_only_report"
+					}
+				/>
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
 						{/* Chat panel */}
@@ -613,20 +661,21 @@ export function CardDetailView({
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "chat" ? "flex" : "none" }}
 						>
-							{agentChatPanel}
+							{primaryPanel}
 						</div>
 						{/* Diff panel */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
 							style={{ display: mobileTab === "diff" ? "flex" : "none" }}
 						>
-							{gitFeaturesEnabled && isRuntimeAvailable ? (
+							{effectiveWorkspaceVcs && isRuntimeAvailable ? (
 								<DiffToolbar
 									mode={diffMode}
 									onModeChange={setDiffMode}
 									isExpanded={false}
 									onToggleExpand={handleToggleDiffExpand}
 									hideExpand
+									lastTurnDisabled={isJjWorkspace}
 								/>
 							) : null}
 							<div className="flex min-h-0 flex-1">
@@ -744,7 +793,7 @@ export function CardDetailView({
 								className="min-h-0 min-w-0"
 								style={{ display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }}
 							>
-								{agentChatPanel}
+								{primaryPanel}
 							</div>
 							{!isDiffExpanded ? (
 								<ResizeHandle
@@ -758,12 +807,13 @@ export function CardDetailView({
 								className="flex min-h-0 min-w-0 flex-col"
 								style={{ width: isDiffExpanded ? "100%" : diffPanelPercent }}
 							>
-								{gitFeaturesEnabled && isRuntimeAvailable ? (
+								{effectiveWorkspaceVcs && isRuntimeAvailable ? (
 									<DiffToolbar
 										mode={diffMode}
 										onModeChange={setDiffMode}
 										isExpanded={isDiffExpanded}
 										onToggleExpand={handleToggleDiffExpand}
+										lastTurnDisabled={isJjWorkspace}
 									/>
 								) : null}
 								<div className="flex min-h-0 flex-1">

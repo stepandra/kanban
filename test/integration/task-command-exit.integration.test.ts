@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -14,6 +14,10 @@ const requireFromHere = createRequire(import.meta.url);
 
 function resolveShutdownIpcHookPath(): string {
 	return resolve(process.cwd(), "test/integration/shutdown-ipc-hook.cjs");
+}
+
+function resolveSentryStubHookPath(): string {
+	return resolve(process.cwd(), "test/integration/sentry-stub-hook.mjs");
 }
 
 function resolveTsxLoaderImportSpecifier(): string {
@@ -207,11 +211,15 @@ function spawnSourceCli(
 	options: { cwd: string; env: NodeJS.ProcessEnv; stdio?: ChildProcess["stdio"] },
 ) {
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
-	return spawn(process.execPath, ["--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args], {
-		cwd: options.cwd,
-		env: options.env,
-		stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
-	});
+	return spawn(
+		process.execPath,
+		["--import", resolveSentryStubHookPath(), "--import", resolveTsxLoaderImportSpecifier(), cliEntrypoint, ...args],
+		{
+			cwd: options.cwd,
+			env: options.env,
+			stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
+		},
+	);
 }
 
 async function runCliCommandAndCollectOutput(options: {
@@ -269,6 +277,8 @@ describe("source task commands", () => {
 				[
 					"--require",
 					resolveShutdownIpcHookPath(),
+					"--import",
+					resolveSentryStubHookPath(),
 					"--import",
 					resolveTsxLoaderImportSpecifier(),
 					resolve(process.cwd(), "src/cli.ts"),
@@ -330,6 +340,171 @@ describe("source task commands", () => {
 		}
 	});
 
+	it(
+		"lets a worker submit a clean read-only report but not self-accept with the known Amp origin",
+		{ timeout: 600_000 },
+		async () => {
+			const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-read-only-review-");
+			const { path: projectPath, cleanup: cleanupProject } = createTempDir("kanban-project-read-only-review-");
+			try {
+				initGitRepository(projectPath);
+				writeFileSync(join(projectPath, "README.md"), "# Read-only review\n", "utf8");
+				commitAll(projectPath, "init");
+				const port = String(await getAvailablePort());
+				const env = createGitTestEnv({
+					HOME: homeDir,
+					USERPROFILE: homeDir,
+					KANBAN_RUNTIME_PORT: port,
+				});
+				const serverProcess = spawn(
+					process.execPath,
+					[
+						"--require",
+						resolveShutdownIpcHookPath(),
+						"--import",
+						resolveSentryStubHookPath(),
+						"--import",
+						resolveTsxLoaderImportSpecifier(),
+						resolve(process.cwd(), "src/cli.ts"),
+						"--no-open",
+					],
+					{ cwd: projectPath, env, stdio: ["ignore", "pipe", "pipe", "ipc"] },
+				);
+				try {
+					await waitForServerStart(serverProcess, 120_000);
+					const created = await runCliCommandAndCollectOutput({
+						args: [
+							"task",
+							"create",
+							"--prompt",
+							"Audit without repository changes",
+							"--deliverable-kind",
+							"read_only_report",
+							"--origin-amp-thread-id",
+							"T-read-only-test",
+							"--project-path",
+							projectPath,
+						],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(
+						created.didExit,
+						`task create did not exit in time.\nstdout:\n${created.stdout}\nstderr:\n${created.stderr}`,
+					).toBe(true);
+					expect(created.exitCode, `task create failed.\nstderr:\n${created.stderr}`).toBe(0);
+					const createdPayload = JSON.parse(created.stdout) as { task?: { id?: string } };
+					const taskId = createdPayload.task?.id;
+					if (!taskId) throw new Error("Expected created read-only task ID.");
+					const prepared = await runCliCommandAndCollectOutput({
+						args: ["task", "prepare", "--task-id", taskId, "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(prepared.exitCode).toBe(0);
+					const preparedPayload = JSON.parse(prepared.stdout) as { task?: { taskWorkspacePath?: string } };
+					const taskWorkspacePath = preparedPayload.task?.taskWorkspacePath;
+					if (!taskWorkspacePath) throw new Error("Expected task workspace path.");
+					const reportPath = join(homeDir, "audit-report.md");
+					writeFileSync(reportPath, "# Audit\n\nThe repository already satisfies the requirement.\n", "utf8");
+					const dirtyPath = join(taskWorkspacePath, "unexpected.txt");
+					writeFileSync(dirtyPath, "dirty\n", "utf8");
+					const dirtySubmit = await runCliCommandAndCollectOutput({
+						args: [
+							"task",
+							"submit",
+							"--task-id",
+							taskId,
+							"--report-file",
+							reportPath,
+							"--project-path",
+							projectPath,
+						],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(dirtySubmit.exitCode).toBe(1);
+					expect(dirtySubmit.stdout).toContain("verified-clean");
+					unlinkSync(dirtyPath);
+					const submitted = await runCliCommandAndCollectOutput({
+						args: [
+							"task",
+							"submit",
+							"--task-id",
+							taskId,
+							"--report-file",
+							reportPath,
+							"--project-path",
+							projectPath,
+						],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(
+						submitted.exitCode,
+						`clean read-only submission failed.\nstdout:\n${submitted.stdout}\nstderr:\n${submitted.stderr}`,
+					).toBe(0);
+					expect(submitted.stdout).toContain('"deliverableKind": "read_only_report"');
+					expect(submitted.stdout).toContain('"column": "review"');
+					const exposedReviewTasks = await runCliCommandAndCollectOutput({
+						args: ["task", "list", "--column", "review", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(exposedReviewTasks.exitCode).toBe(0);
+					const exposedReviewPayload = JSON.parse(exposedReviewTasks.stdout) as {
+						tasks?: Array<{ id?: string; origin?: { kind?: string; threadId?: string } }>;
+					};
+					const exposedOriginThreadId = exposedReviewPayload.tasks?.find((task) => task.id === taskId)?.origin
+						?.threadId;
+					expect(exposedOriginThreadId).toBe("T-read-only-test");
+					if (!exposedOriginThreadId) throw new Error("Expected list to expose the task's Amp origin thread ID.");
+					const selfAcceptance = await runCliCommandAndCollectOutput({
+						args: [
+							"task",
+							"accept-read-only",
+							"--task-id",
+							taskId,
+							"--origin-amp-thread-id",
+							exposedOriginThreadId,
+							"--project-path",
+							projectPath,
+						],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(selfAcceptance.exitCode).toBe(1);
+					expect(selfAcceptance.stdout).toContain("authenticated Amp Architect actor capability");
+
+					const reviewTasks = await runCliCommandAndCollectOutput({
+						args: ["task", "list", "--column", "review", "--project-path", projectPath],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(reviewTasks.exitCode).toBe(0);
+					const reviewPayload = JSON.parse(reviewTasks.stdout) as {
+						tasks?: Array<{ id?: string; column?: string; acceptanceEvidence?: unknown }>;
+					};
+					expect(reviewPayload.tasks).toContainEqual(expect.objectContaining({ id: taskId, column: "review" }));
+					expect(reviewPayload.tasks?.find((task) => task.id === taskId)?.acceptanceEvidence).toBeUndefined();
+				} finally {
+					await requestGracefulShutdown(serverProcess);
+					if (!(await waitForExit(serverProcess, 5_000))) serverProcess.kill("SIGKILL");
+				}
+			} finally {
+				cleanupProject();
+				cleanupHome();
+			}
+		},
+	);
+
 	it("opens only for launch invocations", { timeout: 60_000 }, async () => {
 		if (process.platform === "win32") {
 			return;
@@ -359,6 +534,8 @@ describe("source task commands", () => {
 				[
 					"--require",
 					resolveShutdownIpcHookPath(),
+					"--import",
+					resolveSentryStubHookPath(),
 					"--import",
 					resolveTsxLoaderImportSpecifier(),
 					resolve(process.cwd(), "src/cli.ts"),
@@ -428,6 +605,8 @@ describe("source task commands", () => {
 					[
 						"--require",
 						resolveShutdownIpcHookPath(),
+						"--import",
+						resolveSentryStubHookPath(),
 						"--import",
 						resolveTsxLoaderImportSpecifier(),
 						resolve(process.cwd(), "src/cli.ts"),

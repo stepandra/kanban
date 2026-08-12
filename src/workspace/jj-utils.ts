@@ -19,25 +19,42 @@ export interface JjWorkspaceState {
 	stateToken: string;
 }
 
-export async function runJj(cwd: string, args: string[]): Promise<JjCommandResult> {
+async function executeJj(cwd: string, args: string[], trimOutput = true): Promise<JjCommandResult> {
 	try {
-		const { stdout, stderr } = await execFileAsync("jj", ["--no-pager", "--color=never", "-R", cwd, ...args], {
+		const { stdout, stderr } = await execFileAsync("jj", args, {
+			cwd,
 			encoding: "utf8",
 			maxBuffer: JJ_MAX_BUFFER_BYTES,
 		});
 		return {
 			ok: true,
-			stdout: String(stdout ?? "").trim(),
-			stderr: String(stderr ?? "").trim(),
+			stdout: trimOutput ? String(stdout ?? "").trim() : String(stdout ?? ""),
+			stderr: trimOutput ? String(stderr ?? "").trim() : String(stderr ?? ""),
 		};
 	} catch (error) {
 		const candidate = error as { stdout?: unknown; stderr?: unknown; message?: unknown };
 		return {
 			ok: false,
-			stdout: String(candidate.stdout ?? "").trim(),
-			stderr: String(candidate.stderr ?? candidate.message ?? "").trim(),
+			stdout: trimOutput ? String(candidate.stdout ?? "").trim() : String(candidate.stdout ?? ""),
+			stderr: trimOutput
+				? String(candidate.stderr ?? candidate.message ?? "").trim()
+				: String(candidate.stderr ?? candidate.message ?? ""),
 		};
 	}
+}
+
+export function runJj(cwd: string, args: string[]): Promise<JjCommandResult> {
+	return executeJj(cwd, ["--no-pager", "--color=never", "-R", cwd, ...args]);
+}
+
+// Working-copy reads must discover the workspace from cwd. Passing -R can select
+// another workspace backed by the same colocated repository store.
+export function runJjInWorkingCopy(cwd: string, args: string[]): Promise<JjCommandResult> {
+	return executeJj(cwd, ["--no-pager", "--color=never", ...args]);
+}
+
+export function runJjInWorkingCopyRaw(cwd: string, args: string[]): Promise<JjCommandResult> {
+	return executeJj(cwd, ["--no-pager", "--color=never", ...args], false);
 }
 
 function parseDiffStatCount(output: string, kind: "file" | "insertion" | "deletion"): number {

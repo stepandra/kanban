@@ -36,6 +36,10 @@ const startRequest = {
 };
 
 describe("runtime task start authority", () => {
+	it("does not expose a worker-reachable per-task read-only acceptance procedure", () => {
+		expect(Object.keys(runtimeAppRouter._def.procedures)).not.toContain("workspace.acceptReadOnlyReport");
+	});
+
 	it("allows browser callers to enqueue through Absurd", async () => {
 		const context = createContext(false);
 		const caller = runtimeAppRouter.createCaller(context);

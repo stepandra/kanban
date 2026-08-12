@@ -37,6 +37,13 @@ export const runtimeWorkspaceChangesResponseSchema = z.object({
 	repoRoot: z.string(),
 	generatedAt: z.number(),
 	files: z.array(runtimeWorkspaceFileChangeSchema),
+	vcs: z.enum(["git", "jj"]).optional(),
+	stateKey: z
+		.string()
+		.regex(/^[0-9a-f]{64}$/u)
+		.optional(),
+	conflicts: z.array(z.string()).optional(),
+	error: z.string().nullable().optional(),
 });
 export type RuntimeWorkspaceChangesResponse = z.infer<typeof runtimeWorkspaceChangesResponseSchema>;
 
@@ -147,7 +154,62 @@ export const runtimeTaskPlanningContextSchema = z.object({
 });
 export type RuntimeTaskPlanningContext = z.infer<typeof runtimeTaskPlanningContextSchema>;
 
-export const runtimeTaskAcceptanceEvidenceSchema = z.object({
+export const runtimeTaskDeliverableKindSchema = z.enum(["change", "read_only_report"]);
+export type RuntimeTaskDeliverableKind = z.infer<typeof runtimeTaskDeliverableKindSchema>;
+
+export const runtimeVcsModeSchema = z.enum(["git", "jj"]);
+export type RuntimeVcsMode = z.infer<typeof runtimeVcsModeSchema>;
+
+export const runtimeSha256DigestSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+
+export const runtimeTaskGitWorkspaceReceiptSchema = z.object({
+	vcs: z.literal("git"),
+	clean: z.boolean(),
+	headCommit: z.string().regex(/^[0-9a-f]{40,64}$/u),
+	baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/u),
+	hasConflicts: z.boolean(),
+	hasUntracked: z.boolean(),
+	divergent: z.boolean(),
+	stateDigest: runtimeSha256DigestSchema,
+});
+
+export const runtimeTaskJjWorkspaceReceiptSchema = z.object({
+	vcs: z.literal("jj"),
+	clean: z.boolean(),
+	changeId: z.string().trim().min(1),
+	commitId: z.string().regex(/^[0-9a-f]{40,64}$/u),
+	parentCommitIds: z.array(z.string().regex(/^[0-9a-f]{40,64}$/u)).max(16),
+	baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/u),
+	hasConflicts: z.boolean(),
+	divergent: z.boolean(),
+	stateDigest: runtimeSha256DigestSchema,
+});
+
+export const runtimeTaskWorkspaceReceiptSchema = z.discriminatedUnion("vcs", [
+	runtimeTaskGitWorkspaceReceiptSchema,
+	runtimeTaskJjWorkspaceReceiptSchema,
+]);
+export type RuntimeTaskWorkspaceReceipt = z.infer<typeof runtimeTaskWorkspaceReceiptSchema>;
+
+export const runtimeTaskReviewSubmissionSchema = z.object({
+	taskId: z.string().trim().min(1),
+	generation: z.number().int().positive(),
+	executionAttemptId: z.string().trim().min(1).nullable(),
+	deliverableKind: runtimeTaskDeliverableKindSchema,
+	reportMarkdown: z.string().min(1).max(262_144),
+	reportDigest: runtimeSha256DigestSchema,
+	submittedAt: z.number().int().nonnegative(),
+	workspace: z.object({
+		taskId: z.string().trim().min(1),
+		path: z.string().trim().min(1),
+		vcs: runtimeVcsModeSchema,
+		baseRef: z.string().trim().min(1),
+	}),
+	receipt: runtimeTaskWorkspaceReceiptSchema,
+});
+export type RuntimeTaskReviewSubmission = z.infer<typeof runtimeTaskReviewSubmissionSchema>;
+
+const runtimeVerifiedRemoteRevisionAcceptanceEvidenceSchema = z.object({
 	kind: z.literal("verified_remote_revision"),
 	taskId: z.string().trim().min(1),
 	generation: z.number().int().positive(),
@@ -158,12 +220,34 @@ export const runtimeTaskAcceptanceEvidenceSchema = z.object({
 	}),
 	verifiedAt: z.number().int().nonnegative(),
 });
+
+export const runtimeVerifiedNoChangeReportAcceptanceEvidenceSchema = z.object({
+	kind: z.literal("verified_no_change_report"),
+	taskId: z.string().trim().min(1),
+	generation: z.number().int().positive(),
+	executionAttemptId: z.string().trim().min(1).nullable(),
+	reportDigest: runtimeSha256DigestSchema,
+	receipt: runtimeTaskWorkspaceReceiptSchema,
+	architectThreadId: runtimeAmpThreadIdSchema,
+	verifiedAt: z.number().int().nonnegative(),
+});
+
+export const runtimeTaskAcceptanceEvidenceSchema = z.discriminatedUnion("kind", [
+	runtimeVerifiedRemoteRevisionAcceptanceEvidenceSchema,
+	runtimeVerifiedNoChangeReportAcceptanceEvidenceSchema,
+]);
 export type RuntimeTaskAcceptanceEvidence = z.infer<typeof runtimeTaskAcceptanceEvidenceSchema>;
 
-const runtimePersistedTaskAcceptanceEvidenceSchema = runtimeTaskAcceptanceEvidenceSchema.extend({
-	taskId: z.string().trim().min(1).optional(),
-	generation: z.number().int().positive().optional(),
-});
+const runtimePersistedRemoteRevisionAcceptanceEvidenceSchema =
+	runtimeVerifiedRemoteRevisionAcceptanceEvidenceSchema.extend({
+		taskId: z.string().trim().min(1).optional(),
+		generation: z.number().int().positive().optional(),
+	});
+
+const runtimePersistedTaskAcceptanceEvidenceSchema = z.union([
+	runtimePersistedRemoteRevisionAcceptanceEvidenceSchema,
+	runtimeVerifiedNoChangeReportAcceptanceEvidenceSchema,
+]);
 
 export const runtimeBoardCardSchema = z
 	.object({
@@ -179,6 +263,8 @@ export const runtimeBoardCardSchema = z
 		origin: runtimeTaskOriginSchema.optional(),
 		execution: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 		planning: runtimeTaskPlanningContextSchema.optional(),
+		deliverableKind: runtimeTaskDeliverableKindSchema.optional(),
+		submission: runtimeTaskReviewSubmissionSchema.optional(),
 		acceptanceEvidence: runtimePersistedTaskAcceptanceEvidenceSchema.optional(),
 		baseRef: z.string(),
 		createdAt: z.number(),
@@ -188,11 +274,15 @@ export const runtimeBoardCardSchema = z
 		const migratedRemovedAgentId: "cline" | undefined =
 			agentId === "cline" || removedAgentId === "cline" ? "cline" : undefined;
 		const migratedAcceptanceEvidence = acceptanceEvidence
-			? runtimeTaskAcceptanceEvidenceSchema.parse({
-					...acceptanceEvidence,
-					taskId: acceptanceEvidence.taskId ?? card.id,
-					generation: acceptanceEvidence.generation ?? card.generation ?? 1,
-				})
+			? runtimeTaskAcceptanceEvidenceSchema.parse(
+					acceptanceEvidence.kind === "verified_remote_revision"
+						? {
+								...acceptanceEvidence,
+								taskId: acceptanceEvidence.taskId ?? card.id,
+								generation: acceptanceEvidence.generation ?? card.generation ?? 1,
+							}
+						: acceptanceEvidence,
+				)
 			: undefined;
 		return {
 			...card,
@@ -378,9 +468,6 @@ export const runtimeGitRepositoryInfoSchema = z.object({
 	branches: z.array(z.string()),
 });
 export type RuntimeGitRepositoryInfo = z.infer<typeof runtimeGitRepositoryInfoSchema>;
-
-export const runtimeVcsModeSchema = z.enum(["git", "jj"]);
-export type RuntimeVcsMode = z.infer<typeof runtimeVcsModeSchema>;
 
 export const runtimeGitSyncActionSchema = z.enum(["fetch", "pull", "push"]);
 export type RuntimeGitSyncAction = z.infer<typeof runtimeGitSyncActionSchema>;
@@ -879,6 +966,7 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
+	deliverableKind: runtimeTaskDeliverableKindSchema.optional(),
 	executionAttempt: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;

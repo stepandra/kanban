@@ -95,6 +95,43 @@ function attachAcceptanceEvidence(board: BoardData, taskId: string): BoardData {
 	};
 }
 
+function attachReadOnlySubmission(board: BoardData, taskId: string): BoardData {
+	return {
+		...board,
+		columns: board.columns.map((column) => ({
+			...column,
+			cards: column.cards.map((card) =>
+				card.id === taskId
+					? {
+							...card,
+							deliverableKind: "read_only_report" as const,
+							submission: {
+								taskId,
+								generation: card.generation ?? 1,
+								executionAttemptId: card.execution?.attemptId ?? null,
+								deliverableKind: "read_only_report" as const,
+								reportMarkdown: "# Audit\n\nNo changes required.\n",
+								reportDigest: "a".repeat(64),
+								submittedAt: 10,
+								workspace: { taskId, path: "/tmp/task", vcs: "git" as const, baseRef: card.baseRef },
+								receipt: {
+									vcs: "git" as const,
+									clean: true,
+									headCommit: "1".repeat(40),
+									baseCommit: "1".repeat(40),
+									hasConflicts: false,
+									hasUntracked: false,
+									divergent: false,
+									stateDigest: "b".repeat(64),
+								},
+							},
+						}
+					: card,
+			),
+		})),
+	};
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
@@ -477,7 +514,10 @@ describe("board dependency state", () => {
 		expect(movedAToTrash.moved).toBe(true);
 		const movedBToReview = moveTaskToColumn(movedAToTrash.board, taskB, "review");
 		expect(movedBToReview.moved).toBe(true);
-		const boardWithHistoricalAcceptance = attachAcceptanceEvidence(movedBToReview.board, taskA);
+		const boardWithHistoricalAcceptance = attachReadOnlySubmission(
+			attachAcceptanceEvidence(movedBToReview.board, taskA),
+			taskA,
+		);
 
 		const movedToReview = applyDragResult(boardWithHistoricalAcceptance, {
 			draggableId: taskA,
@@ -497,6 +537,7 @@ describe("board dependency state", () => {
 		const reviewColumn = movedToReview.board.columns.find((column) => column.id === "review");
 		expect(reviewColumn?.cards.map((card) => card.id)).toEqual([taskB, taskA]);
 		expect(reviewColumn?.cards.find((card) => card.id === taskA)?.acceptanceEvidence).toBeUndefined();
+		expect(reviewColumn?.cards.find((card) => card.id === taskA)?.submission).toBeUndefined();
 	});
 
 	it("rejects programmatic Review to Done drags without acceptance evidence", () => {
@@ -682,6 +723,52 @@ describe("board dependency state", () => {
 			},
 			verifiedAt: 42,
 		});
+	});
+
+	it("preserves a durable read-only submission and verified no-change acceptance evidence", () => {
+		const taskId = "read-only-accepted";
+		const baseBoard = addTaskToColumn(createInitialBoardData(), "trash", {
+			prompt: "Read-only audit",
+			baseRef: "main",
+		});
+		const generatedTaskId = baseBoard.columns.find((column) => column.id === "trash")?.cards[0]?.id;
+		if (!generatedTaskId) throw new Error("Expected generated read-only task.");
+		const submission = attachReadOnlySubmission(baseBoard, generatedTaskId);
+		const sourceTask = submission.columns.find((column) => column.id === "trash")?.cards[0];
+		if (!sourceTask?.submission) throw new Error("Expected read-only submission fixture.");
+		const rawTask = {
+			...sourceTask,
+			id: taskId,
+			submission: {
+				...sourceTask.submission,
+				taskId,
+				workspace: { ...sourceTask.submission.workspace, taskId },
+			},
+			acceptanceEvidence: {
+				kind: "verified_no_change_report",
+				taskId,
+				generation: 1,
+				executionAttemptId: null,
+				reportDigest: sourceTask.submission.reportDigest,
+				receipt: sourceTask.submission.receipt,
+				architectThreadId: "T-read-only-origin",
+				verifiedAt: 20,
+			},
+		};
+		const normalized = normalizeBoardData({
+			columns: [
+				{ id: "backlog", cards: [] },
+				{ id: "in_progress", cards: [] },
+				{ id: "review", cards: [] },
+				{ id: "trash", cards: [rawTask] },
+			],
+			dependencies: [],
+		});
+		const task = normalized?.columns.find((column) => column.id === "trash")?.cards[0];
+
+		expect(task?.deliverableKind).toBe("read_only_report");
+		expect(task?.submission).toEqual(rawTask.submission);
+		expect(task?.acceptanceEvidence).toEqual(rawTask.acceptanceEvidence);
 	});
 
 	it("discards execution receipts that do not match the current generation", () => {

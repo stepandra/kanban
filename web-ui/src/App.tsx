@@ -950,6 +950,7 @@ export default function App(): ReactElement {
 									currentProjectId={currentProjectId}
 									workspacePath={workspacePath}
 									gitFeaturesEnabled={gitFeaturesEnabled}
+									workspaceVcs={workspaceVcs}
 									sessionSummary={detailSession}
 									executionProjection={executionProjections[selectedCard.card.id] ?? null}
 									dependencies={board.dependencies}

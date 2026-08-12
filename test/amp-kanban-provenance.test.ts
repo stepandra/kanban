@@ -43,6 +43,15 @@ describe("Amp Kanban task provenance", () => {
 		).toEqual(["task", "trash", "--task-id", "task-1", "--project-path", "/workspace"]);
 	});
 
+	it("fails closed when the current Amp Architect thread has no verifiable actor capability", () => {
+		expect(() =>
+			buildTaskArgs({ action: "accept_read_only", taskId: "task-1" }, "/workspace", "T-architect-1"),
+		).toThrow("authenticated Amp Architect actor capability");
+		expect(() => buildTaskArgs({ action: "accept_read_only", taskId: "task-1" }, "/workspace")).toThrow(
+			"current Amp Architect thread context",
+		);
+	});
+
 	it("rejects an executable from a different published revision", () => {
 		const expectedRevision = "a".repeat(40);
 		const provenance = parseKanbanProvenance(

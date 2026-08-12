@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -6,7 +7,9 @@ import type {
 	RuntimeWorkspaceFileChange,
 	RuntimeWorkspaceFileStatus,
 } from "../core/api-contract";
+import { detectRepositoryKind } from "../state/workspace-state";
 import { getGitStdout } from "./git-utils";
+import { runJjInWorkingCopy, runJjInWorkingCopyRaw } from "./jj-utils";
 
 const WORKSPACE_CHANGES_CACHE_MAX_ENTRIES = 128;
 
@@ -47,6 +50,17 @@ interface FileFingerprint {
 	ctimeMs: number | null;
 }
 
+export interface JjWorkingCopyInspection {
+	repoRoot: string;
+	changeId: string;
+	commitId: string;
+	parentCommitIds: string[];
+	hasConflicts: boolean;
+	conflicts: string[];
+	summary: string;
+	stateKey: string;
+}
+
 function mapNameStatus(code: string): RuntimeWorkspaceFileStatus {
 	const kind = code.charAt(0);
 	if (kind === "M") return "modified";
@@ -55,6 +69,10 @@ function mapNameStatus(code: string): RuntimeWorkspaceFileStatus {
 	if (kind === "R") return "renamed";
 	if (kind === "C") return "copied";
 	return "unknown";
+}
+
+function sha256(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
 }
 
 function toLineCount(text: string): number {
@@ -301,6 +319,167 @@ async function buildFileChange(repoRoot: string, entry: NameStatusEntry): Promis
 	};
 }
 
+function parseJjRenamePath(pathExpression: string): { path: string; previousPath?: string } {
+	const braceStart = pathExpression.indexOf("{");
+	const braceEnd = pathExpression.indexOf("}", braceStart + 1);
+	if (braceStart >= 0 && braceEnd > braceStart) {
+		const replacement = pathExpression.slice(braceStart + 1, braceEnd);
+		const separator = replacement.indexOf(" => ");
+		if (separator >= 0) {
+			const prefix = pathExpression.slice(0, braceStart);
+			const suffix = pathExpression.slice(braceEnd + 1);
+			return {
+				previousPath: `${prefix}${replacement.slice(0, separator)}${suffix}`,
+				path: `${prefix}${replacement.slice(separator + 4)}${suffix}`,
+			};
+		}
+	}
+	const separator = pathExpression.indexOf(" => ");
+	if (separator >= 0) {
+		return {
+			previousPath: pathExpression.slice(0, separator),
+			path: pathExpression.slice(separator + 4),
+		};
+	}
+	return { path: pathExpression };
+}
+
+function parseJjSummary(summary: string): NameStatusEntry[] {
+	const entries: NameStatusEntry[] = [];
+	for (const line of summary.split("\n")) {
+		const match = line.match(/^([MADR])\s+(.+)$/u);
+		if (!match?.[1] || !match[2]) continue;
+		const status = mapNameStatus(match[1]);
+		if (status === "renamed") {
+			const renamed = parseJjRenamePath(match[2]);
+			entries.push({ status, ...renamed });
+			continue;
+		}
+		entries.push({ path: match[2], status });
+	}
+	return entries;
+}
+
+function requireJjOutput(result: Awaited<ReturnType<typeof runJjInWorkingCopy>>, fallback: string): string {
+	if (!result.ok) {
+		throw new Error(result.stderr || fallback);
+	}
+	return result.stdout;
+}
+
+export async function inspectJjWorkingCopy(cwd: string): Promise<JjWorkingCopyInspection> {
+	const repoRoot = requireJjOutput(
+		await runJjInWorkingCopy(cwd, ["workspace", "root"]),
+		"Could not resolve jj workspace root.",
+	);
+	const identityOutput = requireJjOutput(
+		await runJjInWorkingCopy(cwd, [
+			"log",
+			"--no-graph",
+			"-r",
+			"@",
+			"-T",
+			'change_id ++ "\\n" ++ commit_id ++ "\\n" ++ parents.map(|p| p.commit_id()).join("\\n") ++ "\\n" ++ if(conflict, "true", "false")',
+		]),
+		"Could not read jj working-copy identity.",
+	);
+	const identityLines = identityOutput.split("\n");
+	const changeId = identityLines[0]?.trim() ?? "";
+	const commitId = identityLines[1]?.trim() ?? "";
+	const conflictValue = identityLines.at(-1)?.trim();
+	const parentCommitIds = identityLines
+		.slice(2, -1)
+		.map((value) => value.trim())
+		.filter(Boolean);
+	if (!changeId || !commitId || (conflictValue !== "true" && conflictValue !== "false")) {
+		throw new Error("jj returned an incomplete working-copy identity.");
+	}
+	const hasConflicts = conflictValue === "true";
+	let conflicts: string[] = [];
+	if (hasConflicts) {
+		const listed = await runJjInWorkingCopy(cwd, ["resolve", "--list"]);
+		if (!listed.ok) {
+			throw new Error(listed.stderr || "Could not list jj conflicts.");
+		}
+		conflicts = listed.stdout
+			.split("\n")
+			.map((value) => value.trim())
+			.filter(Boolean)
+			.sort();
+	}
+	const summary = requireJjOutput(await runJjInWorkingCopy(cwd, ["diff", "--summary"]), "Could not read jj changes.");
+	const stateKey = sha256(JSON.stringify({ changeId, commitId, parentCommitIds, hasConflicts, conflicts, summary }));
+	return {
+		repoRoot,
+		changeId,
+		commitId,
+		parentCommitIds,
+		hasConflicts,
+		conflicts,
+		summary,
+		stateKey,
+	};
+}
+
+async function readJjFileAtParent(cwd: string, path: string): Promise<string | null> {
+	const result = await runJjInWorkingCopyRaw(cwd, ["file", "show", "-r", "@-", "--", path]);
+	return result.ok ? result.stdout : null;
+}
+
+async function readJjDiffStat(cwd: string, path: string): Promise<DiffStat | null> {
+	const result = await runJjInWorkingCopy(cwd, ["diff", "--git", "--", `root:${JSON.stringify(path)}`]);
+	if (!result.ok || !result.stdout) return null;
+	let additions = 0;
+	let deletions = 0;
+	for (const line of result.stdout.split("\n")) {
+		if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
+		if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
+	}
+	return { additions, deletions };
+}
+
+async function buildJjFileChange(cwd: string, entry: NameStatusEntry): Promise<RuntimeWorkspaceFileChange> {
+	const oldText = entry.status === "added" ? null : await readJjFileAtParent(cwd, entry.previousPath ?? entry.path);
+	const newText = entry.status === "deleted" ? null : await readWorkingTreeFile(cwd, entry.path);
+	const stats = (await readJjDiffStat(cwd, entry.path)) ?? fallbackStats(oldText, newText);
+	return {
+		path: entry.path,
+		previousPath: entry.previousPath,
+		status: entry.status,
+		additions: stats.additions,
+		deletions: stats.deletions,
+		oldText,
+		newText,
+	};
+}
+
+export async function getJjWorkspaceChanges(cwd: string): Promise<RuntimeWorkspaceChangesResponse> {
+	const inspection = await inspectJjWorkingCopy(cwd);
+	const existing = workspaceChangesCacheByRepoRoot.get(inspection.repoRoot);
+	if (existing?.stateKey === inspection.stateKey) {
+		existing.lastAccessedAt = Date.now();
+		return existing.response;
+	}
+	const files = await Promise.all(parseJjSummary(inspection.summary).map((entry) => buildJjFileChange(cwd, entry)));
+	files.sort((left, right) => left.path.localeCompare(right.path));
+	const response: RuntimeWorkspaceChangesResponse = {
+		repoRoot: inspection.repoRoot,
+		generatedAt: Date.now(),
+		files,
+		vcs: "jj",
+		stateKey: inspection.stateKey,
+		conflicts: inspection.conflicts,
+		error: null,
+	};
+	workspaceChangesCacheByRepoRoot.set(inspection.repoRoot, {
+		stateKey: inspection.stateKey,
+		response,
+		lastAccessedAt: Date.now(),
+	});
+	pruneWorkspaceChangesCache();
+	return response;
+}
+
 async function buildFileChangeBetweenRefs(
 	repoRoot: string,
 	entry: NameStatusEntry,
@@ -352,6 +531,18 @@ async function buildFileChangeFromRef(
 }
 
 export async function createEmptyWorkspaceChangesResponse(cwd: string): Promise<RuntimeWorkspaceChangesResponse> {
+	if (detectRepositoryKind(cwd) === "jj") {
+		const inspection = await inspectJjWorkingCopy(cwd);
+		return {
+			repoRoot: inspection.repoRoot,
+			generatedAt: Date.now(),
+			files: [],
+			vcs: "jj",
+			stateKey: inspection.stateKey,
+			conflicts: inspection.conflicts,
+			error: null,
+		};
+	}
 	const repoRoot = (await getGitStdout(["rev-parse", "--show-toplevel"], cwd)).trim();
 	if (!repoRoot) {
 		throw new Error("Could not resolve git repository root.");
@@ -360,10 +551,15 @@ export async function createEmptyWorkspaceChangesResponse(cwd: string): Promise<
 		repoRoot,
 		generatedAt: Date.now(),
 		files: [],
+		vcs: "git",
+		error: null,
 	};
 }
 
 export async function getWorkspaceChanges(cwd: string): Promise<RuntimeWorkspaceChangesResponse> {
+	if (detectRepositoryKind(cwd) === "jj") {
+		return getJjWorkspaceChanges(cwd);
+	}
 	const repoRoot = (await getGitStdout(["rev-parse", "--show-toplevel"], cwd)).trim();
 	if (!repoRoot) {
 		throw new Error("Could not resolve git repository root.");
@@ -411,6 +607,9 @@ export async function getWorkspaceChanges(cwd: string): Promise<RuntimeWorkspace
 		repoRoot,
 		generatedAt: Date.now(),
 		files,
+		vcs: "git",
+		stateKey: sha256(stateKey),
+		error: null,
 	};
 	workspaceChangesCacheByRepoRoot.set(repoRoot, {
 		stateKey,

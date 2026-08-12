@@ -235,6 +235,32 @@ describe("task priority", () => {
 	});
 });
 
+describe("task deliverable contract", () => {
+	it("persists an explicit read-only deliverable and fences execution when the kind changes", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "Audit the release", baseRef: "main", deliverableKind: "read_only_report" },
+			() => "aaaaa111",
+		);
+		expect(created.task.deliverableKind).toBe("read_only_report");
+
+		const admitted = recordTaskExecutionAttempt(created.board, created.task.id, {
+			attemptId: "attempt-1",
+			generation: 1,
+			queuedAt: 10,
+		});
+		const changed = updateTask(admitted.board, created.task.id, {
+			prompt: "Audit the release",
+			baseRef: "main",
+			deliverableKind: "change",
+		});
+
+		expect(changed.task).toMatchObject({ deliverableKind: "change", generation: 2 });
+		expect(changed.task?.execution).toBeUndefined();
+	});
+});
+
 describe("deleteTasksFromBoard", () => {
 	it("refuses to delete a task while a surviving task still references it", () => {
 		const createA = addTaskToColumn(

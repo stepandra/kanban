@@ -80,6 +80,7 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": resolve(__dirname, "src"),
+			"@runtime-contract": resolve(__dirname, "../src/core/api-contract.ts"),
 			"@runtime-agent-catalog": resolve(__dirname, "../src/core/agent-catalog.ts"),
 			"@runtime-tool-call-display": resolve(__dirname, "../src/core/tool-call-display.ts"),
 			"@runtime-shortcuts": resolve(__dirname, "../src/config/shortcut-utils.ts"),

@@ -2,6 +2,7 @@
 // It observes process lifecycle, filters terminal protocols, and updates
 // summaries for command-driven agents and shell sessions.
 import type {
+	RuntimeTaskDeliverableKind,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
@@ -90,6 +91,7 @@ export interface StartTaskSessionRequest {
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
 	projectPath?: string;
+	deliverableKind?: RuntimeTaskDeliverableKind;
 	executionAttempt?: RuntimeTaskExecutionAttemptReference;
 }
 
@@ -462,6 +464,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			env: request.env,
 			workspaceId: request.workspaceId,
 			projectPath: request.projectPath,
+			deliverableKind: request.deliverableKind,
 		});
 
 		const env = buildTerminalEnvironment(request.env, launch.env);
