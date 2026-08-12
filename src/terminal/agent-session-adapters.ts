@@ -296,7 +296,9 @@ const grokAdapter: AgentSessionAdapter = {
 				deferredStartupInput: toBracketedPasteSubmission(`/plan ${prompt}`),
 			};
 		}
-		const launch = withPrompt(args, prompt, "flag", "--prompt");
+		// Current grok CLI has no `--prompt`. Positional PROMPT starts a durable
+		// TUI session; `-p`/`--single` and `--prompt-file` are one-shot and exit.
+		const launch = withPrompt(args, prompt, "append");
 		return {
 			...launch,
 			env: { ...launch.env, ...env },

@@ -64,7 +64,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		sequence was:
 
 		1. A new live session started and the terminal correctly saw a new startedAt.
-		2. usePersistentTerminalSession reset the xterm instance for the new session.
+		2. usePersistentTerminalSession reset the browser terminal for the new session.
 		3. A stale summary from an older interrupted session was replayed back into
 		   React state from workspace hydration or the persistent terminal cache.
 		4. That older summary overwrote the newer running one.

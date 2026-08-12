@@ -968,6 +968,8 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	agentId: runtimeAgentIdSchema.optional(),
 	deliverableKind: runtimeTaskDeliverableKindSchema.optional(),
 	executionAttempt: runtimeTaskExecutionAttemptReferenceSchema.optional(),
+	/** Task-scoped Grok config home prepared by the durable admission worker. */
+	grokHome: z.string().min(1).optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
 

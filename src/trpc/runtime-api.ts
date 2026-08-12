@@ -299,6 +299,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					? (terminalManager.getSummary(body.taskId)?.agentId ?? null)
 					: null;
 				const effectiveAgentId = previousTerminalAgentId ?? body.agentId ?? scopedRuntimeConfig.selectedAgentId;
+				if (body.grokHome && effectiveAgentId !== "grok") {
+					return {
+						ok: false,
+						summary: null,
+						error: "A task-scoped Grok config can only be used by the Grok agent.",
+					};
+				}
 
 				const resolvedConfig =
 					effectiveAgentId !== scopedRuntimeConfig.selectedAgentId
@@ -329,6 +336,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					projectPath: workspaceScope.workspacePath,
 					deliverableKind: body.deliverableKind,
 					executionAttempt: body.executionAttempt,
+					env: body.grokHome ? { GROK_HOME: body.grokHome } : undefined,
 				});
 
 				let nextSummary = summary;

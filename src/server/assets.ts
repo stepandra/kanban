@@ -16,6 +16,7 @@ const MIME_TYPES: Record<string, string> = {
 	".ico": "image/x-icon",
 	".map": "application/json; charset=utf-8",
 	".txt": "text/plain; charset=utf-8",
+	".wasm": "application/wasm",
 };
 
 export interface RuntimeAsset {

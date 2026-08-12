@@ -1,5 +1,3 @@
-import "@xterm/xterm/css/xterm.css";
-
 import { Command, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
 import type { MutableRefObject, ReactElement } from "react";
 import { useMemo } from "react";

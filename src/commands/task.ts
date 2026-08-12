@@ -634,6 +634,7 @@ async function startTaskDirect(input: {
 	taskId: string;
 	attemptId: string;
 	projectPath?: string;
+	grokHome?: string;
 }): Promise<JsonRecord> {
 	const executionReference = parseTaskExecutionReference(input.taskId);
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
@@ -697,6 +698,7 @@ async function startTaskDirect(input: {
 			agentId: task.agentId,
 			deliverableKind: task.deliverableKind,
 			executionAttempt: task.execution,
+			grokHome: input.grokHome,
 		});
 		if (!started.ok || !started.summary) {
 			throw new Error(started.error ?? "Could not start task session.");
@@ -1560,11 +1562,13 @@ export function registerTaskCommand(program: Command): void {
 				if (!attemptId) {
 					throw new Error("start-direct requires KANBAN_ABSURD_TASK_ID.");
 				}
+				const grokHome = process.env.KANBAN_GROK_HOME?.trim();
 				return await startTaskDirect({
 					cwd: process.cwd(),
 					taskId: options.taskId,
 					attemptId,
 					projectPath: options.projectPath,
+					grokHome: grokHome || undefined,
 				});
 			});
 		});

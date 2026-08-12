@@ -1,10 +1,22 @@
 import * as esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
 
+const exactRevisionPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
 function resolveBuildRevision() {
 	const configured = process.env.KANBAN_BUILD_REVISION?.trim();
 	if (configured) {
 		return configured;
+	}
+	try {
+		const revision = execFileSync("jj", ["log", "-r", "@", "--no-graph", "-T", "commit_id"], {
+			encoding: "utf8",
+		}).trim();
+		if (exactRevisionPattern.test(revision)) {
+			return revision;
+		}
+	} catch {
+		// Not a Jujutsu repository; fall back to Git.
 	}
 	try {
 		if (execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" }).trim()) {

@@ -267,6 +267,81 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
+	it("injects a task-scoped Grok home only into a Grok session", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "grok",
+			label: "Grok Build",
+			command: "grok",
+			binary: "grok",
+			args: [],
+		});
+		const terminalManager = {
+			startTaskSession: vi.fn(async () => createSummary({ agentId: "grok" })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => {
+				const runtimeConfigState = createRuntimeConfigState();
+				runtimeConfigState.selectedAgentId = "grok";
+				return runtimeConfigState;
+			}),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				baseRef: "main",
+				prompt: "Continue task",
+				grokHome: "/tmp/grok-task-home",
+			},
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({ env: { GROK_HOME: "/tmp/grok-task-home" } }),
+		);
+	});
+
+	it("rejects a Grok home for a non-Grok session", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		const terminalManager = {
+			startTaskSession: vi.fn(async () => createSummary()),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{
+				taskId: "task-1",
+				baseRef: "main",
+				prompt: "Continue task",
+				grokHome: "/tmp/grok-task-home",
+			},
+		);
+
+		expect(response).toEqual({
+			ok: false,
+			summary: null,
+			error: "A task-scoped Grok config can only be used by the Grok agent.",
+		});
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+	});
+
 	it("ensures the worktree when no existing task cwd is available", async () => {
 		taskWorktreeMocks.resolveTaskCwd
 			.mockRejectedValueOnce(new Error("missing"))

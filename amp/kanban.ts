@@ -297,6 +297,15 @@ async function resolveExpectedKanbanRevision(): Promise<string> {
 		}
 		return configuredRevision;
 	}
+	const jjRevision = await runProcess(
+		"jj",
+		["log", "-r", "@", "--no-graph", "-T", "commit_id"],
+		KANBAN_PLUGIN_REPOSITORY_ROOT,
+	);
+	const normalizedJjRevision = jjRevision.stdout.trim().toLowerCase();
+	if (jjRevision.exitCode === 0 && EXACT_GIT_REVISION_PATTERN.test(normalizedJjRevision)) {
+		return normalizedJjRevision;
+	}
 	const sourceRevision = await runProcess("git", ["rev-parse", "HEAD"], KANBAN_PLUGIN_REPOSITORY_ROOT);
 	const normalizedRevision = sourceRevision.stdout.trim().toLowerCase();
 	if (sourceRevision.exitCode === 0 && EXACT_GIT_REVISION_PATTERN.test(normalizedRevision)) {

@@ -224,7 +224,7 @@ export function createTerminalWebSocketBridge({
 		let resumeCheckTimer: ReturnType<typeof setTimeout> | null = null;
 		// Same idea as VS Code terminal flow control: count output that has been sent
 		// but not yet acknowledged as committed by the terminal renderer. We also look
-		// at the websocket's own bufferedAmount so we catch both xterm lag and socket lag.
+		// at the websocket's own bufferedAmount so we catch both renderer lag and socket lag.
 		let unacknowledgedOutputBytes = 0;
 
 		const shouldPauseOutput = () =>

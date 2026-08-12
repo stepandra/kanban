@@ -248,7 +248,9 @@ enabled = true
 
 		expect(grokLaunch.args).toContain("--always-approve");
 		expect(grokLaunch.args).not.toContain("--permission-mode");
-		expect(grokLaunch.args).toContain("--prompt");
+		expect(grokLaunch.args).not.toContain("--prompt");
+		expect(grokLaunch.args).not.toContain("-p");
+		expect(grokLaunch.args).not.toContain("--single");
 		expect(grokLaunch.args.at(-1)).toContain("'task' 'submit' '--task-id' 'task-grok'");
 		expect(grokLaunch.args.at(-1)).toContain("'--project-path' '/tmp/project'");
 		expect(grokLaunch.env.KANBAN_HOOK_TASK_ID).toBe("task-grok");

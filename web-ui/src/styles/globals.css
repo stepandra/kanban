@@ -937,20 +937,50 @@ body.kb-dependency-link-mode {
 
 /* -- Terminal scrollbar -- */
 
-.kb-terminal-container .xterm .xterm-scrollable-element > .scrollbar.vertical {
-	width: 10px !important;
-	right: 1px !important;
+.kb-terminal-scrollback {
+	position: absolute;
+	top: 0;
+	right: 1px;
+	z-index: 2;
+	width: 10px;
+	height: 100%;
+	margin: 0;
+	appearance: none;
+	background: transparent;
+	direction: rtl;
+	writing-mode: vertical-lr;
 }
 
-.kb-terminal-container .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
-	left: 2px !important;
-	width: 6px !important;
+.kb-terminal-scrollback::-webkit-slider-runnable-track {
+	width: 10px;
+	background: transparent;
+}
+
+.kb-terminal-scrollback::-webkit-slider-thumb {
+	width: 6px;
+	height: 24px;
+	appearance: none;
+	border: 0;
 	border-radius: 999px;
+	background: var(--color-surface-4);
+}
+
+.kb-terminal-scrollback::-moz-range-track {
+	width: 10px;
+	background: transparent;
+}
+
+.kb-terminal-scrollback::-moz-range-thumb {
+	width: 6px;
+	height: 24px;
+	border: 0;
+	border-radius: 999px;
+	background: var(--color-surface-4);
 }
 
 /* -- Terminal light-mode inversion --
    Terminal renders dark internally so CLI agents output correct ANSI colors.
-   CSS filter inverts the xterm canvas, then a multiply-blend overlay tints
+   CSS filter inverts the RioTerm canvas, then a multiply-blend overlay tints
    the resulting white bg to match the theme's actual surface color.
    Multiply blend: white × surface = surface; dark × surface ≈ dark. */
 
@@ -964,11 +994,11 @@ body.kb-dependency-link-mode {
 	isolation: isolate;
 }
 
-[data-theme="light"] .kb-terminal-container .xterm,
-[data-theme="overcast"] .kb-terminal-container .xterm,
-[data-theme="solarized-light"] .kb-terminal-container .xterm,
-[data-theme="latte"] .kb-terminal-container .xterm,
-[data-theme="high-contrast-light"] .kb-terminal-container .xterm {
+[data-theme="light"] .kb-terminal-container canvas,
+[data-theme="overcast"] .kb-terminal-container canvas,
+[data-theme="solarized-light"] .kb-terminal-container canvas,
+[data-theme="latte"] .kb-terminal-container canvas,
+[data-theme="high-contrast-light"] .kb-terminal-container canvas {
 	filter: invert(1) hue-rotate(180deg);
 }
 

@@ -1,59 +1,43 @@
-import type { ITerminalOptions } from "@xterm/xterm";
+import { defaultTheme, type OpenOptions } from "rioterm";
 
 import type { ThemeTerminalColors } from "@/hooks/use-theme";
 
 interface CreateKanbanTerminalOptionsInput {
 	cursorColor: string;
-	isMacPlatform: boolean;
 	terminalBackgroundColor: string;
 	themeColors: ThemeTerminalColors;
 }
 
-const TERMINAL_WORD_SEPARATOR = " ()[]{}',\"`";
 const TERMINAL_FONT_FAMILY =
 	"'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'SF Mono', Menlo, Monaco, 'Courier New', monospace";
 
 export function createKanbanTerminalOptions({
 	cursorColor,
-	isMacPlatform,
 	terminalBackgroundColor,
 	themeColors,
-}: CreateKanbanTerminalOptionsInput): ITerminalOptions {
+}: CreateKanbanTerminalOptionsInput): OpenOptions {
+	// Light themes intentionally render the terminal against a dark palette and
+	// invert the canvas in CSS. CSS custom properties are not valid Canvas2D
+	// fillStyle values, so use the matching concrete terminal color for them.
+	const background = terminalBackgroundColor.trim().startsWith("var(")
+		? themeColors.surfacePrimary
+		: terminalBackgroundColor;
+
 	return {
-		allowProposedApi: true,
-		allowTransparency: false,
 		convertEol: false,
-		cursorBlink: false,
-		cursorInactiveStyle: "outline",
 		cursorStyle: "block",
-		disableStdin: false,
+		detectUrls: true,
 		fontFamily: TERMINAL_FONT_FAMILY,
 		fontSize: 13,
-		fontWeight: "normal",
-		fontWeightBold: "bold",
-		letterSpacing: 0,
 		lineHeight: 1,
-		macOptionClickForcesSelection: isMacPlatform,
-		macOptionIsMeta: isMacPlatform,
-		rightClickSelectsWord: false,
-		scrollOnEraseInDisplay: true,
-		scrollOnUserInput: true,
 		scrollback: 10_000,
-		smoothScrollDuration: 0,
 		theme: {
-			background: terminalBackgroundColor,
+			...defaultTheme,
+			background,
 			cursor: cursorColor,
-			cursorAccent: terminalBackgroundColor,
 			foreground: themeColors.textPrimary,
 			selectionBackground: themeColors.selectionBackground,
 			selectionForeground: themeColors.selectionForeground,
-			selectionInactiveBackground: themeColors.selectionInactiveBackground,
 		},
-		windowOptions: {
-			getCellSizePixels: true,
-			getWinSizeChars: true,
-			getWinSizePixels: true,
-		},
-		wordSeparator: TERMINAL_WORD_SEPARATOR,
 	};
 }

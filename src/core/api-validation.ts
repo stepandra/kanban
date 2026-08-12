@@ -198,10 +198,15 @@ export function parseTaskSessionStartRequest(value: unknown): RuntimeTaskSession
 	if (!baseRef) {
 		throw new Error("Task session baseRef cannot be empty.");
 	}
+	const grokHome = parsed.grokHome?.trim();
+	if (parsed.grokHome !== undefined && !grokHome) {
+		throw new Error("Task session grokHome cannot be empty.");
+	}
 	return {
 		...parsed,
 		taskId,
 		baseRef,
+		...(grokHome ? { grokHome } : {}),
 	};
 }
 

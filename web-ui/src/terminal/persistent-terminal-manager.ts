@@ -1,9 +1,4 @@
-import { ClipboardAddon } from "@xterm/addon-clipboard";
-import { FitAddon } from "@xterm/addon-fit";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal } from "@xterm/xterm";
+import { open, type RioTermHandle, type Terminal as RioTerminal } from "rioterm";
 import { getTerminalThemeColors, type ThemeTerminalColors } from "@/hooks/use-theme";
 import { estimateTaskSessionGeometry } from "@/runtime/task-session-geometry";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
@@ -104,12 +99,27 @@ function getTerminalSocketChunkByteLength(data: string | ArrayBuffer | Blob): nu
 	return 0;
 }
 
-function isCopyShortcut(event: KeyboardEvent): boolean {
+function appearancesMatch(left: PersistentTerminalAppearance, right: PersistentTerminalAppearance): boolean {
 	return (
-		event.type === "keydown" &&
-		((isMacPlatform && event.metaKey && !event.shiftKey && event.key.toLowerCase() === "c") ||
-			(!isMacPlatform && event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "c"))
+		left.cursorColor === right.cursorColor &&
+		left.terminalBackgroundColor === right.terminalBackgroundColor &&
+		left.themeColors?.textPrimary === right.themeColors?.textPrimary &&
+		left.themeColors?.surfacePrimary === right.themeColors?.surfacePrimary &&
+		left.themeColors?.selectionBackground === right.themeColors?.selectionBackground &&
+		left.themeColors?.selectionForeground === right.themeColors?.selectionForeground
 	);
+}
+
+function openTerminalLink(uri: string): void {
+	try {
+		const url = new URL(uri);
+		if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "mailto:") {
+			return;
+		}
+		window.open(url.href, "_blank", "noopener,noreferrer");
+	} catch {
+		// Ignore malformed terminal links.
+	}
 }
 
 function getParkingRoot(): HTMLDivElement {
@@ -139,12 +149,13 @@ function buildKey(workspaceId: string, taskId: string): string {
 }
 
 class PersistentTerminal {
-	private readonly terminal: Terminal;
-	private readonly fitAddon = new FitAddon();
+	private terminal: RioTerminal | null = null;
+	private terminalHandle: RioTermHandle | null = null;
+	private readonly terminalReady: Promise<void>;
 	private readonly hostElement: HTMLDivElement;
+	private readonly scrollbackControl: HTMLInputElement;
 	private readonly subscribers = new Set<PersistentTerminalSubscriber>();
 	private readonly parkingRoot: HTMLDivElement;
-	private readonly unicode11Addon = new Unicode11Addon();
 	// This identifies one browser viewer, not the PTY session itself.
 	// The server uses it to keep per-tab restore and socket state while all tabs
 	// still share the same taskId backed PTY.
@@ -154,6 +165,7 @@ class PersistentTerminal {
 	private lastError: string | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+	private scrollbackFrame: number | null = null;
 	private visibleContainer: HTMLDivElement | null = null;
 	private ioSocket: WebSocket | null = null;
 	private controlSocket: WebSocket | null = null;
@@ -162,6 +174,21 @@ class PersistentTerminal {
 	private outputTextDecoder = new TextDecoder();
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
 	private disposed = false;
+	private readonly handleHostKeyDown = (event: KeyboardEvent): void => {
+		if (event.key !== "Enter" || !event.shiftKey || !this.terminal) {
+			return;
+		}
+		event.preventDefault();
+		event.stopImmediatePropagation();
+		this.terminal.input(SHIFT_ENTER_SEQUENCE);
+	};
+	private readonly handleScrollbackInput = (): void => {
+		if (!this.terminal) {
+			return;
+		}
+		const desiredOffset = Number(this.scrollbackControl.value);
+		this.terminal.scrollLines(desiredOffset - this.terminal.displayOffset());
+	};
 
 	constructor(
 		private readonly taskId: string,
@@ -174,63 +201,87 @@ class PersistentTerminal {
 		Object.assign(this.hostElement.style, {
 			width: "100%",
 			height: "100%",
+			position: "relative",
 		});
 		this.parkingRoot.appendChild(this.hostElement);
+		this.hostElement.addEventListener("keydown", this.handleHostKeyDown, true);
+		this.scrollbackControl = document.createElement("input");
+		this.scrollbackControl.type = "range";
+		this.scrollbackControl.min = "0";
+		this.scrollbackControl.max = "1";
+		this.scrollbackControl.value = "1";
+		this.scrollbackControl.hidden = true;
+		this.scrollbackControl.className = "kb-terminal-scrollback";
+		this.scrollbackControl.setAttribute("aria-label", "Terminal scrollback");
+		this.scrollbackControl.addEventListener("input", this.handleScrollbackInput);
+		this.hostElement.appendChild(this.scrollbackControl);
 		const initialGeometry = estimateTaskSessionGeometry(window.innerWidth, window.innerHeight);
+		this.terminalReady = this.openTerminal(initialGeometry.cols, initialGeometry.rows)
+			.then(() => {
+				this.ensureConnected();
+			})
+			.catch((error: unknown) => {
+				const detail = error instanceof Error ? error.message : String(error);
+				this.lastError = `Terminal renderer failed to start: ${detail}`;
+				this.notifyLastError();
+			});
+	}
 
-		this.terminal = new Terminal({
+	private async openTerminal(cols: number, rows: number, snapshot = ""): Promise<void> {
+		const handle = await open(this.hostElement, {
 			...createKanbanTerminalOptions({
 				cursorColor: this.appearance.cursorColor,
-				isMacPlatform,
 				terminalBackgroundColor: this.appearance.terminalBackgroundColor,
 				themeColors: this.appearance.themeColors ?? getTerminalThemeColors(),
 			}),
-			cols: initialGeometry.cols,
-			rows: initialGeometry.rows,
+			autoFocus: false,
+			cols,
+			fit: false,
+			linkHandler: {
+				activate: openTerminalLink,
+			},
+			renderer: "canvas",
+			rows,
 		});
-		this.terminal.loadAddon(this.fitAddon);
-		this.terminal.loadAddon(new ClipboardAddon());
-		this.terminal.loadAddon(new WebLinksAddon());
-		this.terminal.loadAddon(this.unicode11Addon);
-		this.terminal.unicode.activeVersion = "11";
-		this.terminal.open(this.hostElement);
-		this.terminal.onData((data) => {
+		if (this.disposed) {
+			handle.dispose();
+			return;
+		}
+		handle.terminal.setAltIsMeta(isMacPlatform);
+		if (snapshot) {
+			handle.terminal.write(snapshot);
+		}
+		this.hostElement.querySelector("textarea")?.setAttribute("aria-label", "Terminal input");
+		handle.terminal.onData((data) => {
 			this.sendIoData(data);
 		});
-		this.terminal.onBinary((data) => {
-			const bytes = new Uint8Array(data.length);
-			for (let index = 0; index < data.length; index += 1) {
-				bytes[index] = data.charCodeAt(index) & 0xff;
-			}
-			this.sendIoData(bytes);
+		this.terminal = handle.terminal;
+		this.terminalHandle = handle;
+		handle.terminal.onUpdate(() => {
+			this.scheduleScrollbackControlSync();
 		});
-		this.terminal.attachCustomKeyEventHandler((event) => {
-			if (event.key === "Enter" && event.shiftKey) {
-				if (event.type === "keydown") {
-					this.terminal.input(SHIFT_ENTER_SEQUENCE);
-				}
-				return false;
-			}
-			if (isCopyShortcut(event) && this.terminal.hasSelection()) {
-				void navigator.clipboard.writeText(this.terminal.getSelection()).catch(() => {
-					// Ignore clipboard failures.
-				});
-				return false;
-			}
-			return true;
-		});
+		this.syncScrollbackControl();
+	}
 
-		try {
-			const webglAddon = new WebglAddon();
-			webglAddon.onContextLoss(() => {
-				webglAddon.dispose();
-			});
-			this.terminal.loadAddon(webglAddon);
-		} catch {
-			// Fall back to the default renderer when WebGL is unavailable.
+	private scheduleScrollbackControlSync(): void {
+		if (this.scrollbackFrame !== null) {
+			return;
 		}
+		this.scrollbackFrame = window.requestAnimationFrame(() => {
+			this.scrollbackFrame = null;
+			this.syncScrollbackControl();
+		});
+	}
 
-		this.ensureConnected();
+	private syncScrollbackControl(): void {
+		if (!this.terminal) {
+			this.scrollbackControl.hidden = true;
+			return;
+		}
+		const historySize = this.terminal.historySize();
+		this.scrollbackControl.hidden = historySize === 0;
+		this.scrollbackControl.max = String(Math.max(1, historySize));
+		this.scrollbackControl.value = String(this.terminal.displayOffset());
 	}
 
 	private notifyLastError(): void {
@@ -285,27 +336,24 @@ class PersistentTerminal {
 		const notifyText = options.notifyText ?? null;
 		this.terminalWriteQueue = this.terminalWriteQueue
 			.catch(() => undefined)
-			.then(
-				async () =>
-					await new Promise<void>((resolve) => {
-						if (this.disposed) {
-							resolve();
-							return;
-						}
-						this.terminal.write(data, () => {
-							if (notifyText) {
-								this.notifyOutputText(notifyText);
-							}
-							if (ackBytes > 0) {
-								this.sendControlMessage({
-									type: "output_ack",
-									bytes: ackBytes,
-								});
-							}
-							resolve();
-						});
-					}),
-			);
+			.then(async () => {
+				await this.terminalReady;
+				if (this.disposed || !this.terminal) {
+					return;
+				}
+				// RioTerm parses synchronously. Returning from write() is the same
+				// commit boundary that xterm's write callback represented here.
+				this.terminal.write(data);
+				if (notifyText) {
+					this.notifyOutputText(notifyText);
+				}
+				if (ackBytes > 0) {
+					this.sendControlMessage({
+						type: "output_ack",
+						bytes: ackBytes,
+					});
+				}
+			});
 		return this.terminalWriteQueue;
 	}
 
@@ -315,8 +363,12 @@ class PersistentTerminal {
 		rows: number | null | undefined,
 	): Promise<void> {
 		await this.terminalWriteQueue.catch(() => undefined);
-		this.terminal.reset();
-		if (cols && rows && (this.terminal.cols !== cols || this.terminal.rows !== rows)) {
+		await this.terminalReady;
+		if (!this.terminal) {
+			throw new Error("Terminal renderer is unavailable");
+		}
+		this.terminal.write("\u001bc");
+		if (cols && rows && (this.terminal.options.cols !== cols || this.terminal.options.rows !== rows)) {
 			this.terminal.resize(cols, rows);
 		}
 		if (!snapshot) {
@@ -326,21 +378,24 @@ class PersistentTerminal {
 	}
 
 	private requestResize(): void {
-		if (!this.visibleContainer) {
+		if (!this.visibleContainer || !this.terminal || !this.terminalHandle) {
 			return;
 		}
-		this.fitAddon.fit();
 		const bounds = this.visibleContainer.getBoundingClientRect();
 		const pixelWidth = Math.round(bounds.width);
 		const pixelHeight = Math.round(bounds.height);
+		if (pixelWidth <= 0 || pixelHeight <= 0) {
+			return;
+		}
+		this.terminalHandle.renderer.fit(pixelWidth, pixelHeight);
 		reportTerminalGeometry(this.taskId, {
-			cols: this.terminal.cols,
-			rows: this.terminal.rows,
+			cols: this.terminal.options.cols,
+			rows: this.terminal.options.rows,
 		});
 		this.sendControlMessage({
 			type: "resize",
-			cols: this.terminal.cols,
-			rows: this.terminal.rows,
+			cols: this.terminal.options.cols,
+			rows: this.terminal.options.rows,
 			pixelWidth: pixelWidth > 0 ? pixelWidth : undefined,
 			pixelHeight: pixelHeight > 0 ? pixelHeight : undefined,
 		});
@@ -489,16 +544,32 @@ class PersistentTerminal {
 	}
 
 	private updateAppearance(appearance: PersistentTerminalAppearance): void {
+		if (appearancesMatch(this.appearance, appearance)) {
+			return;
+		}
 		this.appearance = appearance;
-		this.terminal.options.theme = {
-			...this.terminal.options.theme,
-			...createKanbanTerminalOptions({
-				cursorColor: appearance.cursorColor,
-				isMacPlatform,
-				terminalBackgroundColor: appearance.terminalBackgroundColor,
-				themeColors: appearance.themeColors ?? getTerminalThemeColors(),
-			}).theme,
-		};
+		this.terminalWriteQueue = this.terminalWriteQueue
+			.catch(() => undefined)
+			.then(async () => {
+				await this.terminalReady;
+				if (this.disposed || !this.terminal || !this.terminalHandle) {
+					return;
+				}
+				const snapshot = this.terminal.serialize();
+				const { cols, rows } = this.terminal.options;
+				const restoreFocus = this.hostElement.contains(document.activeElement);
+				const previousHandle = this.terminalHandle;
+				this.terminal = null;
+				this.terminalHandle = null;
+				previousHandle.dispose();
+				await this.openTerminal(cols, rows, snapshot);
+				if (this.visibleContainer) {
+					this.requestResize();
+				}
+				if (restoreFocus) {
+					(this.terminalHandle as RioTermHandle | null)?.focus();
+				}
+			});
 	}
 
 	setAppearance(appearance: PersistentTerminalAppearance): void {
@@ -548,10 +619,16 @@ class PersistentTerminal {
 		this.resizeObserver.observe(container);
 		if (options.isVisible !== false) {
 			window.requestAnimationFrame(() => {
-				this.requestResize();
-				if (options.autoFocus) {
-					this.terminal.focus();
-				}
+				void this.terminalWriteQueue.then(async () => {
+					await this.terminalReady;
+					if (this.disposed || this.visibleContainer !== container) {
+						return;
+					}
+					this.requestResize();
+					if (options.autoFocus) {
+						this.terminalHandle?.focus();
+					}
+				});
 			});
 		}
 	}
@@ -568,6 +645,10 @@ class PersistentTerminal {
 			clearTimeout(this.resizeTimer);
 			this.resizeTimer = null;
 		}
+		if (this.scrollbackFrame !== null) {
+			window.cancelAnimationFrame(this.scrollbackFrame);
+			this.scrollbackFrame = null;
+		}
 		if (container && this.visibleContainer !== container) {
 			return;
 		}
@@ -577,11 +658,13 @@ class PersistentTerminal {
 	}
 
 	focus(): void {
-		this.terminal.focus();
+		void this.terminalWriteQueue.then(() => {
+			this.terminalHandle?.focus();
+		});
 	}
 
 	input(text: string): boolean {
-		if (!this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
+		if (!this.terminal || !this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
 			return false;
 		}
 		this.terminal.input(text);
@@ -589,7 +672,7 @@ class PersistentTerminal {
 	}
 
 	paste(text: string): boolean {
-		if (!this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
+		if (!this.terminal || !this.ioSocket || this.ioSocket.readyState !== WebSocket.OPEN) {
 			return false;
 		}
 		this.terminal.paste(text);
@@ -597,25 +680,11 @@ class PersistentTerminal {
 	}
 
 	clear(): void {
-		this.terminalWriteQueue = this.terminalWriteQueue
-			.catch(() => undefined)
-			.then(() => {
-				if (this.disposed) {
-					return;
-				}
-				this.terminal.clear();
-			});
+		void this.enqueueTerminalWrite("\u001b[2J\u001b[3J\u001b[H");
 	}
 
 	reset(): void {
-		this.terminalWriteQueue = this.terminalWriteQueue
-			.catch(() => undefined)
-			.then(() => {
-				if (this.disposed) {
-					return;
-				}
-				this.terminal.reset();
-			});
+		void this.enqueueTerminalWrite("\u001bc");
 	}
 
 	waitForLikelyPrompt(timeoutMs: number): Promise<boolean> {
@@ -691,7 +760,11 @@ class PersistentTerminal {
 		this.ioSocket = null;
 		this.controlSocket = null;
 		this.subscribers.clear();
-		this.terminal.dispose();
+		this.hostElement.removeEventListener("keydown", this.handleHostKeyDown, true);
+		this.scrollbackControl.removeEventListener("input", this.handleScrollbackInput);
+		this.terminalHandle?.dispose();
+		this.terminal = null;
+		this.terminalHandle = null;
 		this.hostElement.remove();
 	}
 }

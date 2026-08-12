@@ -80,12 +80,25 @@ describe("parseTaskSessionStartRequest", () => {
 			prompt: "",
 			baseRef: "  main  ",
 			resumeFromTrash: true,
+			grokHome: "  /tmp/grok-task-home  ",
 		});
 		expect(parsed).toEqual({
 			taskId: "task-1",
 			prompt: "",
 			baseRef: "main",
 			resumeFromTrash: true,
+			grokHome: "/tmp/grok-task-home",
 		});
+	});
+
+	it("rejects an empty Grok task home", () => {
+		expect(() =>
+			parseTaskSessionStartRequest({
+				taskId: "task-1",
+				prompt: "",
+				baseRef: "main",
+				grokHome: "   ",
+			}),
+		).toThrow("Task session grokHome cannot be empty.");
 	});
 });
