@@ -12,6 +12,23 @@
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import {
+	chmodSync,
+	closeSync,
+	constants,
+	fchmodSync,
+	fstatSync,
+	fsyncSync,
+	linkSync,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 
 const PASSCODE_LENGTH = 8;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -33,6 +50,9 @@ interface RateLimitEntry {
 }
 
 const INTERNAL_TOKEN_ENV = "KANBAN_INTERNAL_AUTH_TOKEN";
+export const INTERNAL_TOKEN_FILE_ENV = "KANBAN_INTERNAL_AUTH_TOKEN_FILE";
+const INTERNAL_TOKEN_FILENAME = "internal-auth-token";
+const INTERNAL_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 
 let passcodeState: PasscodeState | null = null;
 let passcodeEnabled = true;
@@ -190,11 +210,126 @@ export function clearRateLimit(ip: string): void {
 // A separate bearer token used by CLI sub-processes (hooks ingest, task
 // commands) to authenticate against the runtime server without the
 // browser-facing passcode flow.  The token is:
-//   • Generated once alongside the passcode (or when explicitly requested).
-//   • Stored in-memory AND propagated via the KANBAN_INTERNAL_AUTH_TOKEN env
-//     var so that child processes (spawned terminals, detached hook commands)
-//     inherit it automatically.
+//   • Loaded from an explicit environment override when one is configured.
+//   • Otherwise persisted in an owner-only local file so independently
+//     launched Kanban processes share the same authenticated boundary.
+//   • Propagated via KANBAN_INTERNAL_AUTH_TOKEN for child process inheritance.
 //   • Never exposed to browser clients.
+
+function createInternalToken(): string {
+	return randomBytes(32).toString("hex");
+}
+
+function getInternalTokenFilePath(): string {
+	return process.env[INTERNAL_TOKEN_FILE_ENV]?.trim() || join(homedir(), ".cline", "kanban", INTERNAL_TOKEN_FILENAME);
+}
+
+function assertOwnedByCurrentUser(uid: number, path: string): void {
+	const currentUid = process.geteuid?.();
+	if (currentUid !== undefined && uid !== currentUid) {
+		throw new Error(`Kanban internal auth path is not owned by the current user: ${path}`);
+	}
+}
+
+function ensurePrivateTokenDirectory(tokenDirectory: string): void {
+	mkdirSync(tokenDirectory, { recursive: true, mode: 0o700 });
+	const directory = lstatSync(tokenDirectory);
+	if (!directory.isDirectory() || directory.isSymbolicLink()) {
+		throw new Error(`Kanban internal auth token directory is not a regular directory: ${tokenDirectory}`);
+	}
+	assertOwnedByCurrentUser(directory.uid, tokenDirectory);
+	if (process.platform !== "win32" && (directory.mode & 0o077) !== 0) {
+		chmodSync(tokenDirectory, 0o700);
+	}
+}
+
+function publishInternalToken(tokenPath: string): void {
+	const tokenDirectory = dirname(tokenPath);
+	const temporaryPath = join(
+		tokenDirectory,
+		`.${basename(tokenPath)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
+	);
+	let temporaryFd: number | null = null;
+	try {
+		temporaryFd = openSync(
+			temporaryPath,
+			constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+			0o600,
+		);
+		writeFileSync(temporaryFd, `${createInternalToken()}\n`, "utf8");
+		fsyncSync(temporaryFd);
+		closeSync(temporaryFd);
+		temporaryFd = null;
+		try {
+			linkSync(temporaryPath, tokenPath);
+		} catch (error) {
+			if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+				throw error;
+			}
+		}
+	} finally {
+		if (temporaryFd !== null) {
+			closeSync(temporaryFd);
+		}
+		try {
+			unlinkSync(temporaryPath);
+		} catch {
+			// The unpublished file is owner-only inside an owner-only directory.
+			// Cleanup must not mask the credential publication/read result.
+		}
+	}
+}
+
+function readInternalToken(tokenPath: string): string {
+	const tokenFd = openSync(tokenPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	try {
+		const tokenFile = fstatSync(tokenFd);
+		if (!tokenFile.isFile()) {
+			throw new Error(`Kanban internal auth token path is not a regular file: ${tokenPath}`);
+		}
+		assertOwnedByCurrentUser(tokenFile.uid, tokenPath);
+		if (process.platform !== "win32" && (tokenFile.mode & 0o077) !== 0) {
+			fchmodSync(tokenFd, 0o600);
+		}
+
+		const persistedToken = readFileSync(tokenFd, "utf8").trim();
+		if (!INTERNAL_TOKEN_PATTERN.test(persistedToken)) {
+			throw new Error(`Kanban internal auth token file is invalid: ${tokenPath}`);
+		}
+		return persistedToken;
+	} finally {
+		closeSync(tokenFd);
+	}
+}
+
+/**
+ * Load the internal bearer token, creating an owner-only local token file on
+ * first use. The file is the rendezvous point for independently launched
+ * local processes such as the Kanban runtime and the Absurd worker.
+ */
+export function initializeInternalToken(tokenPath = getInternalTokenFilePath()): string {
+	const configuredToken = process.env[INTERNAL_TOKEN_ENV]?.trim();
+	if (configuredToken) {
+		internalAuthToken = configuredToken;
+		return configuredToken;
+	}
+
+	ensurePrivateTokenDirectory(dirname(tokenPath));
+	try {
+		lstatSync(tokenPath);
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+			publishInternalToken(tokenPath);
+		} else {
+			throw error;
+		}
+	}
+	const persistedToken = readInternalToken(tokenPath);
+
+	internalAuthToken = persistedToken;
+	process.env[INTERNAL_TOKEN_ENV] = persistedToken;
+	return persistedToken;
+}
 
 /**
  * Generate (or regenerate) the internal CLI auth token.
@@ -203,7 +338,7 @@ export function clearRateLimit(ip: string): void {
  * child processes inherit it.
  */
 export function generateInternalToken(): string {
-	const token = randomBytes(32).toString("hex");
+	const token = createInternalToken();
 	internalAuthToken = token;
 	process.env[INTERNAL_TOKEN_ENV] = token;
 	return token;
@@ -214,7 +349,7 @@ export function generateInternalToken(): string {
  * (this covers CLI sub-processes that were spawned by the server).
  */
 export function getInternalToken(): string | null {
-	return internalAuthToken ?? process.env[INTERNAL_TOKEN_ENV]?.trim() ?? null;
+	return internalAuthToken ?? (process.env[INTERNAL_TOKEN_ENV]?.trim() || null);
 }
 
 /**

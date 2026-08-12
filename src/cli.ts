@@ -30,7 +30,7 @@ import {
 	setKanbanRuntimePort,
 	setKanbanRuntimeTls,
 } from "./core/runtime-endpoint";
-import { disablePasscode, generateInternalToken, generatePasscode } from "./security/passcode-manager";
+import { disablePasscode, generatePasscode, initializeInternalToken } from "./security/passcode-manager";
 import { terminateProcessForTimeout } from "./server/process-termination";
 import type { RuntimeStateHub } from "./server/runtime-state-hub";
 import { detectRepositoryKind, saveWorkspaceSessionSummary } from "./state/workspace-state";
@@ -542,6 +542,8 @@ async function startServerWithAutoPortRetry(options: CliOptions): Promise<Awaite
 }
 
 async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolean): Promise<void> {
+	initializeInternalToken();
+
 	if (options.host) {
 		setKanbanRuntimeHost(options.host);
 		console.log(`Binding to host ${options.host}.`);
@@ -571,7 +573,6 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 			console.log("Passcode authentication disabled (--no-passcode). Ensure you have your own auth layer.");
 		} else {
 			const passcode = generatePasscode();
-			generateInternalToken();
 			// NOTE: passcode is printed ONLY here and never stored in logs or env.
 			console.log(`\n🔐 Remote access passcode: ${passcode}\n\nShare this with users who need access.\n`);
 		}

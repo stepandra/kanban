@@ -2,6 +2,12 @@
  * Unit tests for the internal CLI auth token mechanism in passcode-manager.ts.
  */
 
+import { execFile } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	disablePasscode,
@@ -11,12 +17,15 @@ import {
 	generatePasscode,
 	getInternalToken,
 	INTERNAL_TOKEN_ENV,
+	initializeInternalToken,
 	isPasscodeEnabled,
 	issueSession,
 	validateInternalToken,
 	validatePasscode,
 	validateSession,
 } from "../../../src/security/passcode-manager";
+
+const execFileAsync = promisify(execFile);
 
 function runHttpGate(input: {
 	isRemoteMode: boolean;
@@ -60,6 +69,11 @@ afterEach(() => {
 });
 
 describe("Internal CLI auth token", () => {
+	it("treats a blank inherited token as absent", () => {
+		process.env[INTERNAL_TOKEN_ENV] = "   ";
+		expect(getInternalToken()).toBeNull();
+	});
+
 	it("generates a 64-char hex token", () => {
 		expect(generateInternalToken()).toMatch(/^[0-9a-f]{64}$/);
 	});
@@ -72,6 +86,51 @@ describe("Internal CLI auth token", () => {
 	it("sets the env var for child process inheritance", () => {
 		const token = generateInternalToken();
 		expect(process.env[INTERNAL_TOKEN_ENV]).toBe(token);
+	});
+
+	it("shares a persisted token between independently initialized local processes", () => {
+		const sandboxPath = mkdtempSync(join(tmpdir(), "kanban-internal-auth-"));
+		const tokenPath = join(sandboxPath, "internal-auth-token");
+		try {
+			delete process.env[INTERNAL_TOKEN_ENV];
+			const firstToken = initializeInternalToken(tokenPath);
+
+			generateInternalToken();
+			delete process.env[INTERNAL_TOKEN_ENV];
+			const secondToken = initializeInternalToken(tokenPath);
+
+			expect(secondToken).toBe(firstToken);
+			expect(readFileSync(tokenPath, "utf8").trim()).toBe(firstToken);
+			if (process.platform !== "win32") {
+				expect(statSync(sandboxPath).mode & 0o777).toBe(0o700);
+				expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+			}
+		} finally {
+			rmSync(sandboxPath, { recursive: true, force: true });
+		}
+	});
+
+	it("atomically publishes one token when local processes initialize concurrently", async () => {
+		const sandboxPath = mkdtempSync(join(tmpdir(), "kanban-internal-auth-race-"));
+		const tokenPath = join(sandboxPath, "internal-auth-token");
+		const moduleUrl = pathToFileURL(resolve("src/security/passcode-manager.ts")).href;
+		const script = `import { initializeInternalToken } from ${JSON.stringify(moduleUrl)}; process.stdout.write(initializeInternalToken(process.argv[1]));`;
+		const environment = { ...process.env };
+		delete environment[INTERNAL_TOKEN_ENV];
+
+		try {
+			const results = await Promise.all(
+				Array.from({ length: 6 }, () =>
+					execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, tokenPath], {
+						env: environment,
+					}),
+				),
+			);
+			const tokens = new Set(results.map(({ stdout }) => stdout.trim()));
+			expect(tokens).toEqual(new Set([readFileSync(tokenPath, "utf8").trim()]));
+		} finally {
+			rmSync(sandboxPath, { recursive: true, force: true });
+		}
 	});
 
 	it("regenerating produces a different value", () => {
