@@ -320,9 +320,8 @@ const kimiAdapter: AgentSessionAdapter = {
 				deferredStartupInput: toBracketedPasteSubmission(prompt),
 			};
 		}
-		if (!hasCliOption(args, "--auto") && !hasCliOption(args, "--yolo")) {
-			args.push("--auto");
-		}
+		// Kimi prompt mode is already autonomous and rejects --prompt when
+		// combined with either --auto or --yolo.
 		const launch = withPrompt(args, prompt, "flag", "--prompt");
 		return {
 			...launch,

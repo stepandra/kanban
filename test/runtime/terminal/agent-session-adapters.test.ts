@@ -253,7 +253,7 @@ enabled = true
 		expect(grokLaunch.args.at(-1)).toContain("'--project-path' '/tmp/project'");
 		expect(grokLaunch.env.KANBAN_HOOK_TASK_ID).toBe("task-grok");
 		expect(kimiLaunch.args).not.toContain("--yolo");
-		expect(kimiLaunch.args).toContain("--auto");
+		expect(kimiLaunch.args).not.toContain("--auto");
 		expect(kimiLaunch.args).toContain("--prompt");
 		expect(kimiLaunch.args.at(-1)).toContain("'task' 'submit' '--task-id' 'task-kimi'");
 		expect(kimiLaunch.args.at(-1)).toContain("'--project-path' '/tmp/project'");
