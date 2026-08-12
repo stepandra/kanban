@@ -51,7 +51,7 @@ export async function enqueueAbsurdTaskStart(input: EnqueueAbsurdTaskStartInput)
 				"--agent",
 				input.agentId,
 			],
-			{ encoding: "utf8", timeout: 10_000 },
+			{ encoding: "utf8", timeout: 30_000 },
 		));
 	} catch (error) {
 		const message = error instanceof Error && error.message.trim() ? error.message : String(error);

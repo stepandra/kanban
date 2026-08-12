@@ -48,7 +48,7 @@ describe("enqueueAbsurdTaskStart", () => {
 		expect(childProcessMocks.execFilePromise).toHaveBeenCalledWith(
 			"/tmp/juja",
 			["kanban-enqueue", "--task-id", "task-1~g4~q123~resume", "--project-path", "/tmp/repo", "--agent", "codex"],
-			{ encoding: "utf8", timeout: 10_000 },
+			{ encoding: "utf8", timeout: 30_000 },
 		);
 	});
 
