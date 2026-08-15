@@ -9,7 +9,8 @@ import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, CardSelection } from "@/types";
 
 const mockUseRuntimeWorkspaceChanges = vi.fn();
-const { mockAgentTerminalPanel, mockDiffViewerPanel } = vi.hoisted(() => ({
+const { mockAcpActivityPanel, mockAgentTerminalPanel, mockDiffViewerPanel } = vi.hoisted(() => ({
+	mockAcpActivityPanel: vi.fn((_props: unknown) => <div data-testid="acp-activity-panel" />),
 	mockAgentTerminalPanel: vi.fn((_props: { panelBackgroundColor?: string; terminalBackgroundColor?: string }) => null),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 }));
@@ -20,6 +21,10 @@ vi.mock("react-hotkeys-hook", () => ({
 
 vi.mock("@/hooks/use-is-mobile", () => ({
 	useIsMobile: () => false,
+}));
+
+vi.mock("@/components/detail-panels/acp-activity-panel", () => ({
+	AcpActivityPanel: mockAcpActivityPanel,
 }));
 
 vi.mock("@/components/detail-panels/agent-terminal-panel", () => ({
@@ -207,6 +212,7 @@ describe("CardDetailView", () => {
 		container = document.createElement("div");
 		document.body.appendChild(container);
 		root = createRoot(container);
+		mockAcpActivityPanel.mockClear();
 		mockAgentTerminalPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		mockUseRuntimeWorkspaceChanges.mockReturnValue({
@@ -231,6 +237,7 @@ describe("CardDetailView", () => {
 			root.unmount();
 		});
 		mockUseRuntimeWorkspaceChanges.mockReset();
+		mockAcpActivityPanel.mockClear();
 		mockAgentTerminalPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		vi.restoreAllMocks();
@@ -439,6 +446,62 @@ describe("CardDetailView", () => {
 			panelBackgroundColor: "var(--color-surface-0)",
 			terminalBackgroundColor: TERMINAL_THEME_COLORS.surfacePrimary,
 		});
+	});
+
+	it("uses structured ACP activity instead of a PTY for ordinary Grok ACP sessions", async () => {
+		const selection = createSelection();
+		selection.column.cards = [];
+		selection.column = selection.allColumns.find((column) => column.id === "in_progress")!;
+		selection.column.cards = [selection.card];
+
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					sessionSummary={{
+						taskId: "task-1",
+						state: "running",
+						mode: "act",
+						agentId: "grok",
+						workspacePath: "/tmp/task-1",
+						pid: null,
+						startedAt: 1,
+						updatedAt: 1,
+						lastOutputAt: null,
+						reviewReason: null,
+						exitCode: null,
+						lastHookAt: null,
+						latestHookActivity: null,
+						acpConnection: {
+							transport: "websocket",
+							endpoint: "ws://127.0.0.1:2419/ws",
+							zmxSessionName: "kanban.ws.grok.task.digest",
+							attemptId: "attempt-1",
+							generation: 1,
+							queuedAt: 1,
+							sessionId: "session-1",
+							secretRef: "kanban-secret-file:/tmp/secret",
+						},
+						acpActivity: [],
+						acpNextSequence: 1,
+					}}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		expect(container.querySelector('[data-testid="acp-activity-panel"]')).not.toBeNull();
+		expect(mockAcpActivityPanel).toHaveBeenCalled();
+		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
 	});
 
 	it("routes Add diff comments to the review comments handler", async () => {

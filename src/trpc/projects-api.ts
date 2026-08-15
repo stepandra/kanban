@@ -1,5 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
+import type { GrokAcpRuntime } from "../acp/grok-acp-runtime";
 import type {
 	RuntimeBoardData,
 	RuntimeDirectoryListResponse,
@@ -45,6 +46,7 @@ export interface CreateProjectsApiDependencies {
 	}) => RuntimeProjectSummary;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
 	getTerminalManagerForWorkspace: (workspaceId: string) => TerminalSessionManager | null;
+	getGrokAcpRuntimeForWorkspace: (workspaceId: string) => Pick<GrokAcpRuntime, "stopAll"> | null;
 	disposeWorkspace: (
 		workspaceId: string,
 		options?: DisposeWorkspaceOptions,
@@ -183,6 +185,7 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 				if (removedTerminalManager) {
 					removedTerminalManager.markInterruptedAndStopAll();
 				}
+				await deps.getGrokAcpRuntimeForWorkspace(body.projectId)?.stopAll();
 
 				const removed = await removeWorkspaceIndexEntry(body.projectId);
 				if (!removed) {

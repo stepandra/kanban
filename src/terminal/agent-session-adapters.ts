@@ -475,17 +475,21 @@ function getAgentSessionAdapter(agentId: RuntimeAgentId): AgentSessionAdapter {
 	}
 }
 
+export async function prepareAgentPrompt(input: AgentAdapterLaunchInput): Promise<string> {
+	const preparedPrompt = await prepareTaskPromptWithImages({
+		prompt: input.prompt,
+		images: input.images,
+	});
+	return withReviewSubmission(preparedPrompt, input);
+}
+
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {
 	const adapter = getAgentSessionAdapter(input.agentId);
 	if (adapter === ampAdapter || adapter === launchDisabledCompatibilityAdapter) {
 		return await adapter.prepare(input);
 	}
-	const preparedPrompt = await prepareTaskPromptWithImages({
-		prompt: input.prompt,
-		images: input.images,
-	});
 	return await adapter.prepare({
 		...input,
-		prompt: withReviewSubmission(preparedPrompt, input),
+		prompt: await prepareAgentPrompt(input),
 	});
 }

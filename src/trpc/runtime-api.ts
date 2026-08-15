@@ -7,6 +7,7 @@ import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
+import type { GrokAcpRuntime } from "../acp/grok-acp-runtime";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
 import type {
@@ -16,6 +17,7 @@ import type {
 	RuntimeSystemReadinessResponse,
 	RuntimeTaskExecutionAttemptReference,
 	RuntimeTaskExecutionProjectionResponse,
+	RuntimeTaskSessionSummary,
 	RuntimeTracksProjection,
 	RuntimeUpdateStatusResponse,
 	RuntimeWorkerCommandLogResponse,
@@ -41,6 +43,7 @@ import type {
 } from "../state/workspace-state";
 import { getLegacyTaskWorktreesHomePath, getTaskWorkspacesHomePath } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
+import { createHookRuntimeEnv } from "../terminal/hook-runtime-context";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureBestEffortTurnCheckpoint } from "../workspace/turn-checkpoints";
@@ -52,6 +55,7 @@ export interface CreateRuntimeApiDependencies {
 	loadScopedRuntimeConfig: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeConfigState>;
 	setActiveRuntimeConfig: (config: RuntimeConfigState) => void;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
+	getScopedGrokAcpRuntime: (scope: RuntimeTrpcWorkspaceScope) => Promise<GrokAcpRuntime>;
 	resolveInteractiveShellCommand: () => { binary: string; args: string[] };
 	runCommand: (command: string, cwd: string) => Promise<RuntimeCommandRunResponse>;
 	prepareForStateReset?: () => Promise<void>;
@@ -319,25 +323,51 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						error: "No runnable agent command is configured. Open Settings, install a supported CLI, and select it.",
 					};
 				}
-				const summary = await terminalManager.startTaskSession({
-					taskId: body.taskId,
-					agentId: resolved.agentId,
-					binary: resolved.binary,
-					args: resolved.args,
-					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
-					cwd: taskCwd,
-					prompt: body.prompt,
-					images: body.images,
-					startInPlanMode: body.startInPlanMode,
-					resumeFromTrash: body.resumeFromTrash,
-					cols: body.cols,
-					rows: body.rows,
-					workspaceId: workspaceScope.workspaceId,
-					projectPath: workspaceScope.workspacePath,
-					deliverableKind: body.deliverableKind,
-					executionAttempt: body.executionAttempt,
-					env: body.grokHome ? { GROK_HOME: body.grokHome } : undefined,
-				});
+				let summary: RuntimeTaskSessionSummary;
+				let grokRuntime: GrokAcpRuntime | null = null;
+				if (resolved.agentId === "grok" && body.transport !== "terminal_rescue") {
+					if (!body.executionAttempt) {
+						throw new Error("Grok ACP requires an exact execution attempt identity.");
+					}
+					grokRuntime = await deps.getScopedGrokAcpRuntime(workspaceScope);
+					summary = await grokRuntime.start({
+						taskId: body.taskId,
+						binary: resolved.binary,
+						cwd: taskCwd,
+						prompt: body.prompt,
+						images: body.images,
+						startInPlanMode: body.startInPlanMode,
+						resumeFromTrash: body.resumeFromTrash,
+						workspaceId: workspaceScope.workspaceId,
+						projectPath: workspaceScope.workspacePath,
+						deliverableKind: body.deliverableKind,
+						executionAttempt: body.executionAttempt,
+						env: {
+							...createHookRuntimeEnv({ taskId: body.taskId, workspaceId: workspaceScope.workspaceId }),
+							...(body.grokHome ? { GROK_HOME: body.grokHome } : {}),
+						},
+					});
+				} else {
+					summary = await terminalManager.startTaskSession({
+						taskId: body.taskId,
+						agentId: resolved.agentId,
+						binary: resolved.binary,
+						args: resolved.args,
+						autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+						cwd: taskCwd,
+						prompt: body.prompt,
+						images: body.images,
+						startInPlanMode: body.startInPlanMode,
+						resumeFromTrash: body.resumeFromTrash,
+						cols: body.cols,
+						rows: body.rows,
+						workspaceId: workspaceScope.workspaceId,
+						projectPath: workspaceScope.workspacePath,
+						deliverableKind: body.deliverableKind,
+						executionAttempt: body.executionAttempt,
+						env: body.grokHome ? { GROK_HOME: body.grokHome } : undefined,
+					});
+				}
 
 				let nextSummary = summary;
 				if (shouldCaptureTurnCheckpoint) {
@@ -347,7 +377,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						latestTurnCheckpoint: summary.latestTurnCheckpoint,
 					});
 					if (checkpoint) {
-						nextSummary = terminalManager.applyTurnCheckpoint(body.taskId, checkpoint) ?? summary;
+						nextSummary =
+							(grokRuntime
+								? grokRuntime.applyTurnCheckpoint(body.taskId, checkpoint)
+								: terminalManager.applyTurnCheckpoint(body.taskId, checkpoint)) ?? summary;
 					}
 				}
 				return {
@@ -367,7 +400,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				const body = parseTaskSessionStopRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const summary = await terminalManager.stopTaskSession(body.taskId, body.executionAttemptId);
+				const current = terminalManager.getSummary(body.taskId);
+				const summary =
+					current?.agentId === "grok" && current.acpConnection
+						? await (await deps.getScopedGrokAcpRuntime(workspaceScope)).stop(
+								body.taskId,
+								body.executionAttemptId,
+							)
+						: await terminalManager.stopTaskSession(body.taskId, body.executionAttemptId);
 				return {
 					ok: Boolean(summary),
 					summary,
@@ -386,7 +426,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseTaskSessionInputRequest(input);
 				const payloadText = body.appendNewline ? `${body.text}\n` : body.text;
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
-				const summary = terminalManager.writeInput(body.taskId, Buffer.from(payloadText, "utf8"));
+				const current = terminalManager.getSummary(body.taskId);
+				const summary =
+					current?.agentId === "grok" && current.acpConnection
+						? await (await deps.getScopedGrokAcpRuntime(workspaceScope)).sendPrompt(body.taskId, payloadText)
+						: terminalManager.writeInput(body.taskId, Buffer.from(payloadText, "utf8"));
 				if (!summary) {
 					return {
 						ok: false,

@@ -1,3 +1,4 @@
+import { GrokAcpRuntime } from "../acp/grok-acp-runtime";
 import { type RuntimeConfigState, toGlobalRuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeBoardData,
@@ -59,7 +60,9 @@ export interface WorkspaceRegistry {
 	setActiveRuntimeConfig: (config: RuntimeConfigState) => void;
 	loadScopedRuntimeConfig: (scope: WorkspaceRegistryScope) => Promise<RuntimeConfigState>;
 	getTerminalManagerForWorkspace: (workspaceId: string) => TerminalSessionManager | null;
+	getGrokAcpRuntimeForWorkspace: (workspaceId: string) => GrokAcpRuntime | null;
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
+	ensureGrokAcpRuntimeForWorkspace: (workspaceId: string, repoPath: string) => Promise<GrokAcpRuntime>;
 	setActiveWorkspace: (workspaceId: string, repoPath: string) => Promise<void>;
 	clearActiveWorkspace: () => void;
 	disposeWorkspace: (
@@ -124,6 +127,20 @@ function countTasksByColumn(board: RuntimeBoardData): RuntimeProjectTaskCounts {
 	return counts;
 }
 
+function collectCurrentExecutionAttempts(
+	board: RuntimeBoardData,
+): Record<string, RuntimeTaskExecutionAttemptReference | undefined> {
+	const attempts: Record<string, RuntimeTaskExecutionAttemptReference | undefined> = {};
+	for (const column of board.columns) {
+		for (const task of column.cards) {
+			if (task.execution?.generation === resolveTaskGeneration(task.generation)) {
+				attempts[task.id] = task.execution;
+			}
+		}
+	}
+	return attempts;
+}
+
 export function collectProjectWorktreeTaskIdsForRemoval(board: RuntimeBoardData): Set<string> {
 	const taskIds = new Set<string>();
 	for (const column of board.columns) {
@@ -174,6 +191,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	const projectTaskCountsByWorkspaceId = new Map<string, RuntimeProjectTaskCounts>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const terminalManagerLoadPromises = new Map<string, Promise<TerminalSessionManager>>();
+	const grokAcpRuntimesByWorkspaceId = new Map<string, GrokAcpRuntime>();
+	const grokAcpRuntimeLoadPromises = new Map<string, Promise<GrokAcpRuntime>>();
 
 	const rememberWorkspace = (workspaceId: string, repoPath: string): void => {
 		workspacePathsById.set(workspaceId, repoPath);
@@ -207,14 +226,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			const manager = new TerminalSessionManager({ workspaceId });
 			try {
 				const existingWorkspace = await loadWorkspaceState(repoPath);
-				const executionAttemptsByTaskId: Record<string, RuntimeTaskExecutionAttemptReference | undefined> = {};
-				for (const column of existingWorkspace.board.columns) {
-					for (const task of column.cards) {
-						if (task.execution?.generation === resolveTaskGeneration(task.generation)) {
-							executionAttemptsByTaskId[task.id] = task.execution;
-						}
-					}
-				}
+				const executionAttemptsByTaskId = collectCurrentExecutionAttempts(existingWorkspace.board);
 				manager.hydrateFromRecord(existingWorkspace.sessions, executionAttemptsByTaskId);
 			} catch {
 				// Workspace state will be created on demand.
@@ -230,11 +242,48 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		return loaded;
 	};
 
+	const getGrokAcpRuntimeForWorkspace = (workspaceId: string): GrokAcpRuntime | null =>
+		grokAcpRuntimesByWorkspaceId.get(workspaceId) ?? null;
+
+	const ensureGrokAcpRuntimeForWorkspace = async (workspaceId: string, repoPath: string): Promise<GrokAcpRuntime> => {
+		const existing = grokAcpRuntimesByWorkspaceId.get(workspaceId);
+		if (existing) {
+			return existing;
+		}
+		const pending = grokAcpRuntimeLoadPromises.get(workspaceId);
+		if (pending) {
+			return await pending;
+		}
+		const loading = (async () => {
+			const terminalManager = await ensureTerminalManagerForWorkspace(workspaceId, repoPath);
+			const runtime = new GrokAcpRuntime({
+				onSummary: (summary) => {
+					terminalManager.applyStructuredRuntimeSummary(summary);
+				},
+			});
+			try {
+				const existingWorkspace = await loadWorkspaceState(repoPath);
+				const executionAttemptsByTaskId = collectCurrentExecutionAttempts(existingWorkspace.board);
+				runtime.hydrate(existingWorkspace.sessions, executionAttemptsByTaskId);
+			} catch {
+				// Workspace state will be created on demand.
+			}
+			grokAcpRuntimesByWorkspaceId.set(workspaceId, runtime);
+			await runtime.reconcile();
+			return runtime;
+		})().finally(() => {
+			grokAcpRuntimeLoadPromises.delete(workspaceId);
+		});
+		grokAcpRuntimeLoadPromises.set(workspaceId, loading);
+		return await loading;
+	};
+
 	const setActiveWorkspace = async (workspaceId: string, repoPath: string): Promise<void> => {
 		activeWorkspaceId = workspaceId;
 		activeWorkspacePath = repoPath;
 		rememberWorkspace(workspaceId, repoPath);
 		await ensureTerminalManagerForWorkspace(workspaceId, repoPath);
+		await ensureGrokAcpRuntimeForWorkspace(workspaceId, repoPath);
 		activeRuntimeConfig = await deps.loadRuntimeConfig(repoPath);
 		globalRuntimeConfig = toGlobalRuntimeConfigState(activeRuntimeConfig);
 	};
@@ -257,6 +306,14 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			terminalManagersByWorkspaceId.delete(workspaceId);
 			terminalManagerLoadPromises.delete(workspaceId);
 		}
+		const grokRuntime = grokAcpRuntimesByWorkspaceId.get(workspaceId);
+		if (grokRuntime) {
+			void (options?.stopTerminalSessions === false ? grokRuntime.shutdown() : grokRuntime.stopAll()).catch(
+				() => undefined,
+			);
+			grokAcpRuntimesByWorkspaceId.delete(workspaceId);
+		}
+		grokAcpRuntimeLoadPromises.delete(workspaceId);
 		projectTaskCountsByWorkspaceId.delete(workspaceId);
 		const workspacePath = workspacePathsById.get(workspaceId) ?? null;
 		workspacePathsById.delete(workspaceId);
@@ -403,7 +460,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	};
 
 	if (initialWorkspace) {
-		await ensureTerminalManagerForWorkspace(initialWorkspace.workspaceId, initialWorkspace.repoPath);
+		await ensureGrokAcpRuntimeForWorkspace(initialWorkspace.workspaceId, initialWorkspace.repoPath);
 	}
 
 	return {
@@ -423,7 +480,9 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			return await deps.loadRuntimeConfig(scope.workspacePath);
 		},
 		getTerminalManagerForWorkspace,
+		getGrokAcpRuntimeForWorkspace,
 		ensureTerminalManagerForWorkspace,
+		ensureGrokAcpRuntimeForWorkspace,
 		setActiveWorkspace,
 		clearActiveWorkspace,
 		disposeWorkspace,

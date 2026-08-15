@@ -136,6 +136,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 
 	const getScopedTerminalManager = async (scope: RuntimeTrpcWorkspaceScope): Promise<TerminalSessionManager> =>
 		await deps.ensureTerminalManagerForWorkspace(scope.workspaceId, scope.workspacePath);
+	const getScopedGrokAcpRuntime = async (scope: RuntimeTrpcWorkspaceScope) =>
+		await deps.workspaceRegistry.ensureGrokAcpRuntimeForWorkspace(scope.workspaceId, scope.workspacePath);
 	const prepareForStateReset = async (): Promise<void> => {
 		const workspaceIds = new Set<string>();
 		for (const { workspaceId } of deps.workspaceRegistry.listManagedWorkspaces()) {
@@ -145,6 +147,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		if (activeWorkspaceId) {
 			workspaceIds.add(activeWorkspaceId);
 		}
+		await Promise.all(
+			Array.from(workspaceIds, async (workspaceId) => {
+				await deps.workspaceRegistry.getGrokAcpRuntimeForWorkspace(workspaceId)?.stopAll();
+			}),
+		);
 		for (const workspaceId of workspaceIds) {
 			deps.disposeWorkspace(workspaceId, {
 				stopTerminalSessions: true,
@@ -158,6 +165,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 		setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
 		getScopedTerminalManager,
+		getScopedGrokAcpRuntime,
 		resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
 		runCommand: deps.runCommand,
 		prepareForStateReset,
@@ -196,6 +204,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				createProjectSummary: deps.workspaceRegistry.createProjectSummary,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
 				getTerminalManagerForWorkspace: deps.workspaceRegistry.getTerminalManagerForWorkspace,
+				getGrokAcpRuntimeForWorkspace: deps.workspaceRegistry.getGrokAcpRuntimeForWorkspace,
 				disposeWorkspace: deps.disposeWorkspace,
 				collectProjectWorktreeTaskIdsForRemoval: deps.collectProjectWorktreeTaskIdsForRemoval,
 				warn: deps.warn,

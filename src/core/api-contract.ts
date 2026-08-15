@@ -551,6 +551,64 @@ export const runtimeTaskTurnCheckpointSchema = z.object({
 });
 export type RuntimeTaskTurnCheckpoint = z.infer<typeof runtimeTaskTurnCheckpointSchema>;
 
+export const runtimeAcpPlanEntrySchema = z.object({
+	content: z.string(),
+	priority: z.enum(["high", "medium", "low"]),
+	status: z.enum(["pending", "in_progress", "completed"]),
+});
+export type RuntimeAcpPlanEntry = z.infer<typeof runtimeAcpPlanEntrySchema>;
+
+export const runtimeAcpActivityItemSchema = z.object({
+	sequence: z.number().int().positive(),
+	timestamp: z.number().int().nonnegative(),
+	kind: z.enum(["message", "thought", "tool", "plan"]),
+	text: z.string(),
+	toolCallId: z.string().nullable().optional(),
+	toolKind: z
+		.enum(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"])
+		.nullable()
+		.optional(),
+	toolStatus: z.enum(["pending", "in_progress", "completed", "failed"]).nullable().optional(),
+	plan: z.array(runtimeAcpPlanEntrySchema).max(100).optional(),
+});
+export type RuntimeAcpActivityItem = z.infer<typeof runtimeAcpActivityItemSchema>;
+
+const runtimeGrokAcpEndpointSchema = z
+	.string()
+	.url()
+	.refine((value) => {
+		try {
+			const endpoint = new URL(value);
+			const port = Number(endpoint.port);
+			return (
+				endpoint.protocol === "ws:" &&
+				endpoint.hostname === "127.0.0.1" &&
+				Number.isInteger(port) &&
+				port > 0 &&
+				port <= 65_535 &&
+				endpoint.pathname === "/ws" &&
+				!endpoint.username &&
+				!endpoint.password &&
+				!endpoint.search &&
+				!endpoint.hash
+			);
+		} catch {
+			return false;
+		}
+	}, "Grok ACP endpoint must be an uncredentialed loopback WebSocket URL.");
+
+export const runtimeGrokAcpConnectionIdentitySchema = z.object({
+	transport: z.literal("websocket"),
+	endpoint: runtimeGrokAcpEndpointSchema,
+	zmxSessionName: z.string().min(1),
+	attemptId: z.string().min(1),
+	generation: z.number().int().positive(),
+	queuedAt: z.number().int().nonnegative(),
+	sessionId: z.string().min(1),
+	secretRef: z.string().min(1),
+});
+export type RuntimeGrokAcpConnectionIdentity = z.infer<typeof runtimeGrokAcpConnectionIdentitySchema>;
+
 export const runtimeTaskSessionSummarySchema = z.object({
 	taskId: z.string(),
 	state: runtimeTaskSessionStateSchema,
@@ -573,6 +631,9 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	warningMessage: z.string().nullable().optional(),
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
+	acpConnection: runtimeGrokAcpConnectionIdentitySchema.nullable().optional(),
+	acpActivity: z.array(runtimeAcpActivityItemSchema).max(200).optional(),
+	acpNextSequence: z.number().int().positive().optional(),
 });
 export type RuntimeTaskSessionSummary = z.infer<typeof runtimeTaskSessionSummarySchema>;
 
@@ -970,6 +1031,8 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	executionAttempt: runtimeTaskExecutionAttemptReferenceSchema.optional(),
 	/** Task-scoped Grok config home prepared by the durable admission worker. */
 	grokHome: z.string().min(1).optional(),
+	/** Explicit operator rescue route; ordinary Grok starts use ACP. */
+	transport: z.enum(["acp", "terminal_rescue"]).optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
 

@@ -4,9 +4,12 @@ Kanban is a local Node runtime plus a React app for running many coding-agent ta
 
 ## Accepted target and migration status
 
-The current checkout implements local zmx-backed workers and has removed the
-per-task Amp worker, Fixer, reviewer, and Orb paths. Campaign-scoped QA and
-remote Grok transport are target architecture but are not yet implemented.
+The current checkout implements ordinary local Grok tasks through an authenticated
+ACP WebSocket session whose process is owned by zmx. Kanban and Absurd remain
+task and attempt truth; ACP activity is structured telemetry, and the PTY-backed
+Grok path is an explicit rescue transport only. Other harnesses remain on their
+existing PTY path. Campaign-scoped QA and remote host transport remain target
+architecture and are not yet implemented.
 
 The accepted target is recorded in
 [`decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md`](./decisions/2026-08-11-grok-build-workers-and-qa-campaigns.md):
@@ -296,12 +299,14 @@ app-router.ts
     v
 runtime-api.ts
     |
-    +--> terminal/session-manager.ts for all agents
+    +--> acp/grok-acp-runtime.ts for ordinary Grok tasks
+    |
+    +--> terminal/session-manager.ts for other agents and explicit Grok rescue
 
 
 Live runtime output
     |
-    +--> terminal session summaries
+    +--> ACP activity and terminal session summaries
     |
     v
 runtime-state-hub.ts
@@ -324,10 +329,12 @@ The browser layer is the presentation and orchestration layer. It renders the bo
 
 The runtime layer is the control layer. It decides what session to start, where it should run, what worktree or workspace it belongs to, what command should be used, and what state should be streamed back to the browser.
 
-The execution layer is the actual agent implementation: a CLI process attached
-to a durable zmx session. Absurd owns the queued/running execution attempt and
-admission; Kanban owns the task, generation, workspace, and deterministic zmx
-identity. A terminal attachment is only a local projection of that execution.
+The execution layer is the actual agent implementation. Ordinary Grok tasks run
+as an ACP server process attached to a durable zmx session; other harnesses and
+the explicit Grok rescue path remain PTY-backed. Absurd owns the queued/running
+execution attempt and admission; Kanban owns the task, generation, workspace,
+and persisted execution identity. ACP updates and terminal attachments are only
+local projections of that execution.
 
 That split explains a lot of the architecture:
 
@@ -341,8 +348,29 @@ Kanban currently supports two runtime modes.
 
 | Runtime mode | Used for | Scope | Backing implementation | Why it exists |
 | --- | --- | --- | --- | --- |
-| CLI-backed task terminal | Claude Code, Codex, Grok, and Kimi | task-scoped | PTY-backed process runtime | these are the current launch-supported local workers; Grok Build over ACP is the accepted remote target |
+| Grok ACP task activity | ordinary Grok tasks | task-scoped | authenticated ACP WebSocket to a zmx-owned Grok process | preserves Grok's configured parent/subagent model routing and exposes structured activity |
+| CLI-backed task terminal | Claude Code, Codex, Kimi, and explicit Grok rescue | task-scoped | PTY-backed process runtime | preserves existing harness behavior while keeping PTY out of the ordinary Grok path |
 | Workspace shell terminal | the bottom shell panel | workspace-scoped | PTY-backed shell process | this is for manual commands in the repo, not task execution |
+
+The ACP client authenticates immediately after `initialize` by selecting the
+advertised `xai.api_key` method; it never falls back to cached OIDC. Plaintext
+transport secrets remain in owner-readable task-scoped files and never enter
+browser payloads or activity logs. Session summaries may expose the opaque
+owner-local `secretRef` needed for runtime reconnect. Tool `rawInput` and
+`rawOutput` are never persisted or projected. Kanban never passes `--model`, so
+Grok retains its configured parent and heterogeneous subagent routing.
+
+The persisted ACP identity fences the exact generation, queued-at time, attempt,
+zmx session, loopback endpoint, ACP session, and secret reference. Runtime
+startup reconnects live identities before accepting further input; missing zmx
+sessions and failed authentication or session load are projected fail-closed.
+Concurrent reconnects are coalesced, stale connection callbacks are ignored,
+and transport secrets are removed after failed startup or explicit teardown.
+
+A live prompt smoke against a real provider remains deferred because completing
+this candidate must not launch a nested Grok worker. The focused fake-server
+suite covers handshake ordering, API-key method selection, session creation,
+and failure when only cached OIDC is available.
 
 Older Droid, Kiro, Gemini, and OpenCode values remain parseable migration input
 but are not launch-supported worker choices.

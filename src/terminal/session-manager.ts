@@ -300,6 +300,37 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return entry ? cloneSummary(entry.summary) : null;
 	}
 
+	applyStructuredRuntimeSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSummary {
+		const entry = this.ensureEntry(summary.taskId);
+		entry.summary = cloneSummary(summary);
+		const executionAttempt = summary.acpConnection
+			? {
+					attemptId: summary.acpConnection.attemptId,
+					generation: summary.acpConnection.generation,
+					queuedAt: summary.acpConnection.queuedAt,
+				}
+			: null;
+		if (executionAttempt) {
+			const latestAttempt = entry.latestExecutionAttempt;
+			const order = latestAttempt ? compareExecutionAttempts(executionAttempt, latestAttempt) : 1;
+			const sameAttempt = latestAttempt?.attemptId === executionAttempt.attemptId && order === 0;
+			if (!latestAttempt || order > 0 || sameAttempt) {
+				entry.executionAttempt = executionAttempt;
+				entry.latestExecutionAttempt = executionAttempt;
+			}
+		}
+		if (summary.durableSessionName) {
+			this.durableTaskIds.add(summary.taskId);
+		} else {
+			this.durableTaskIds.delete(summary.taskId);
+		}
+		for (const listener of entry.listeners.values()) {
+			listener.onState?.(cloneSummary(summary));
+		}
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return Array.from(this.entries.values()).map((entry) => cloneSummary(entry.summary));
 	}

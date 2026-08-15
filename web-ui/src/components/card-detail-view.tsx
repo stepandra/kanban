@@ -3,6 +3,7 @@ import { Files, FileText, GitCompareArrows, Maximize2, MessageSquare, Minimize2,
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
+import { AcpActivityPanel } from "@/components/detail-panels/acp-activity-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
@@ -617,7 +618,17 @@ export function CardDetailView({
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
 
-	const agentChatPanel = (
+	const agentChatPanel = sessionSummary?.acpConnection ? (
+		<AcpActivityPanel
+			taskId={selection.card.id}
+			workspaceId={currentProjectId}
+			summary={sessionSummary}
+			onSummary={onSessionSummary}
+			showMoveToTrash={showMoveToTrashActions}
+			onMoveToTrash={onMoveToTrash}
+			isMoveToTrashLoading={isMoveToTrashLoading}
+		/>
+	) : (
 		<AgentTerminalPanel
 			taskId={selection.card.id}
 			workspaceId={currentProjectId}

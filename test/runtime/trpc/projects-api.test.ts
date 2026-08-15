@@ -39,6 +39,7 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 		})),
 		broadcastRuntimeProjectsUpdated: vi.fn(),
 		getTerminalManagerForWorkspace: vi.fn(() => null),
+		getGrokAcpRuntimeForWorkspace: vi.fn(() => null),
 		disposeWorkspace: vi.fn(() => ({
 			terminalManager: null as TerminalSessionManager | null,
 			workspacePath: null as string | null,

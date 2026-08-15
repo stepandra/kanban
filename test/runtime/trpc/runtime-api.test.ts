@@ -63,6 +63,7 @@ function createTestRuntimeApi(
 		| "buildWorkspaceStateSnapshot"
 		| "mutateWorkspaceState"
 		| "broadcastRuntimeWorkspaceStateUpdated"
+		| "getScopedGrokAcpRuntime"
 	> &
 		Partial<
 			Pick<
@@ -72,6 +73,7 @@ function createTestRuntimeApi(
 				| "buildWorkspaceStateSnapshot"
 				| "mutateWorkspaceState"
 				| "broadcastRuntimeWorkspaceStateUpdated"
+				| "getScopedGrokAcpRuntime"
 			>
 		>,
 ): RuntimeTrpcContext["runtimeApi"] {
@@ -101,6 +103,11 @@ function createTestRuntimeApi(
 		});
 	return createRuntimeApi({
 		...deps,
+		getScopedGrokAcpRuntime:
+			deps.getScopedGrokAcpRuntime ??
+			vi.fn(async () => {
+				throw new Error("Unexpected Grok ACP runtime request.");
+			}),
 		buildWorkspaceStateSnapshot,
 		mutateWorkspaceState,
 		broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated ?? vi.fn(),
@@ -277,8 +284,15 @@ describe("createRuntimeApi startTaskSession", () => {
 			args: [],
 		});
 		const terminalManager = {
+			getSummary: vi.fn(() => null),
 			startTaskSession: vi.fn(async () => createSummary({ agentId: "grok" })),
 			applyTurnCheckpoint: vi.fn(),
+		};
+		const grokRuntime = {
+			start: vi.fn(async () => createSummary({ agentId: "grok" })),
+			applyTurnCheckpoint: vi.fn((_taskId, checkpoint) =>
+				createSummary({ agentId: "grok", latestTurnCheckpoint: checkpoint }),
+			),
 		};
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
@@ -289,6 +303,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			}),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedGrokAcpRuntime: vi.fn(async () => grokRuntime as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -300,13 +315,26 @@ describe("createRuntimeApi startTaskSession", () => {
 				baseRef: "main",
 				prompt: "Continue task",
 				grokHome: "/tmp/grok-task-home",
+				executionAttempt: { attemptId: "attempt-1", generation: 1, queuedAt: 10 },
 			},
 		);
 
 		expect(response.ok).toBe(true);
-		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({ env: { GROK_HOME: "/tmp/grok-task-home" } }),
+		expect(grokRuntime.start).toHaveBeenCalledWith(
+			expect.objectContaining({
+				env: {
+					GROK_HOME: "/tmp/grok-task-home",
+					KANBAN_HOOK_TASK_ID: "task-1",
+					KANBAN_HOOK_WORKSPACE_ID: "workspace-1",
+				},
+			}),
 		);
+		expect(grokRuntime.applyTurnCheckpoint).toHaveBeenCalledWith(
+			"task-1",
+			expect.objectContaining({ ref: "refs/kanban/checkpoints/task-1/turn/1" }),
+		);
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		expect(terminalManager.applyTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
 	it("rejects a Grok home for a non-Grok session", async () => {
