@@ -1,10 +1,25 @@
 import { describe, expect, it } from "vitest";
 
+import { runtimeTaskAcceptRequestSchema } from "../../src/core/api-contract";
 import {
 	parseHookIngestRequest,
 	parseTaskSessionStartRequest,
 	parseWorkspaceFileSearchRequest,
 } from "../../src/core/api-validation";
+
+describe("runtimeTaskAcceptRequestSchema", () => {
+	it("requires the exact typed task and Amp thread identity", () => {
+		expect(
+			runtimeTaskAcceptRequestSchema.parse({
+				taskId: " task-1 ",
+				architectThreadId: "T-architect-1",
+			}),
+		).toEqual({ taskId: "task-1", architectThreadId: "T-architect-1" });
+		expect(() =>
+			runtimeTaskAcceptRequestSchema.parse({ taskId: "task-1", architectThreadId: "copied-thread" }),
+		).toThrow();
+	});
+});
 
 describe("parseWorkspaceFileSearchRequest", () => {
 	it("parses q and limit", () => {

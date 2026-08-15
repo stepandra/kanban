@@ -43,11 +43,30 @@ describe("Amp Kanban task provenance", () => {
 		).toEqual(["task", "trash", "--task-id", "task-1", "--project-path", "/workspace"]);
 	});
 
-	it("fails closed when the current Amp Architect thread has no verifiable actor capability", () => {
-		expect(() =>
+	it("passes the exact PluginToolContext thread to the first-class accept command", () => {
+		expect(buildTaskArgs({ action: "accept", taskId: "task-1" }, "/workspace", "T-architect-1")).toEqual([
+			"task",
+			"accept",
+			"--task-id",
+			"task-1",
+			"--origin-amp-thread-id",
+			"T-architect-1",
+			"--project-path",
+			"/workspace",
+		]);
+		expect(
 			buildTaskArgs({ action: "accept_read_only", taskId: "task-1" }, "/workspace", "T-architect-1"),
-		).toThrow("authenticated Amp Architect actor capability");
-		expect(() => buildTaskArgs({ action: "accept_read_only", taskId: "task-1" }, "/workspace")).toThrow(
+		).toEqual([
+			"task",
+			"accept",
+			"--task-id",
+			"task-1",
+			"--origin-amp-thread-id",
+			"T-architect-1",
+			"--project-path",
+			"/workspace",
+		]);
+		expect(() => buildTaskArgs({ action: "accept", taskId: "task-1" }, "/workspace")).toThrow(
 			"current Amp Architect thread context",
 		);
 	});

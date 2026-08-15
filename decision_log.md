@@ -450,6 +450,32 @@ delete a workspace.
 legacy. Browser and Zellij can share one explicit focus selection without
 becoming competing control planes.
 
+## D-024 — Local control-plane invocation authorizes bounded per-task acceptance
+
+- **Status:** Accepted compatibility boundary
+- **Date:** 2026-08-15
+
+For the local single-user control plane, Kanban trusts `kanban task accept`
+invoked by the local OS user. The installed `kanban_tasks` Amp plugin is the
+normal caller and supplies the exact current `PluginToolContext` thread ID;
+Kanban requires it to match immutable task origin. Direct local CLI invocation
+has the same authority by design because no second caller-authentication
+mechanism exists. Kanban still re-resolves the exact task workspace and verifies
+current generation, execution attempt, base and VCS identity, state digest, and
+conflicts before one atomic archive transition. Change acceptance records typed
+local-workspace evidence without pushing or requiring a remote ref. Read-only
+report acceptance reuses the immutable report digest and clean receipt and
+rejects any changed receipt.
+
+The browser and whole-board snapshot saves remain unable to accept Review work.
+Environment markers, bearer tokens, hidden commands, and prompt policy are not
+authority. The future QA campaign boundary remains the target for frozen
+multi-task acceptance and will replace this local compatibility path.
+
+**Consequence:** Amp Architect review can unblock local dependants now without
+weakening ordinary browser mutation fences or inventing a new authentication
+framework.
+
 ## D-023 — Tracks is the global delivery and operations place
 
 - **Status:** Accepted target; implementation pending

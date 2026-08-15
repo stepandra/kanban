@@ -1,23 +1,29 @@
-# Read-only Review submissions
+# Review acceptance
 
-Tasks that produce an audit instead of repository changes must opt into `deliverableKind=read_only_report`. The worker writes a bounded Markdown report outside the repository and submits it with:
+Kanban tasks enter Review through `kanban task submit`. Tasks that produce an audit instead of repository changes must opt into `deliverableKind=read_only_report` and submit a bounded Markdown report outside the repository:
 
 ```text
 kanban task submit --task-id <id> --project-path <project> --report-file <outside-repository-report.md>
 ```
 
-Submission fails closed unless the task workspace exists and its Git or jj receipt is clean, conflict-free, non-divergent, and fenced to the current task generation and execution attempt. Existing Review cards can attach their first durable submission when they have no historical execution attempt.
+Read-only submission fails closed unless the exact task workspace exists and its Git or jj receipt is clean, conflict-free, non-divergent, and fenced to the current task generation and execution attempt. Existing Review cards can attach their first durable submission when they have no historical execution attempt.
 
-## Acceptance authority
+## Local acceptance authority
 
-Per-task read-only acceptance is fail-closed. The compatibility CLI command `task accept-read-only` exits nonzero without mutating the board, and the browser exposes no acceptance mutation. A submitted report remains in Review with no acceptance evidence.
+The selected local single-user trust boundary is `kanban task accept` invoked by the local OS user. The installed Amp `kanban_tasks` plugin is the normal caller: its first-class `action="accept"` operation supplies the current `PluginToolContext` thread ID and invokes:
 
-The Amp `kanban_tasks` action remains `accept_read_only`. It receives Amp's authenticated current thread context, but refuses before launching Kanban because that context provides no actor capability Kanban can verify. A thread ID, including the exact immutable origin copied from `task list` or the card, is provenance rather than authentication. Browser fields, ordinary environment markers, prompt instructions, hidden command names, and Kanban's CLI-wide internal bearer are likewise not Architect authority.
+```text
+kanban task accept --task-id <id> --origin-amp-thread-id <current-thread> --project-path <project>
+```
 
-The exact missing typed primitive is an opaque Amp-issued actor capability bound to the authenticated current tool invocation, thread, acceptance action, and Kanban audience, together with a Kanban-side verifier or Architect-only channel that consumes it. The current Amp/Kanban types provide a thread ID but no such capability. Kanban does not invent a replacement authentication framework here.
+`accept_read_only` and `task accept-read-only` remain compatibility aliases. They use the same acceptance path and do not grant a weaker read-only-only authority.
 
-Any future authenticated acceptance channel must still bind the exact immutable Amp origin and re-verify the current task generation, execution attempt, report digest, clean receipt, VCS identity, exact parents, and live task workspace before one atomic acceptance transition. Those integrity checks do not substitute for actor authority.
+Kanban requires the supplied thread ID to match the task's exact immutable `origin.kind="amp_architect"` thread. A wrong or missing origin remains in Review. Direct CLI use by the same local OS user has the same authority by design; there is no separate caller-authentication mechanism and the thread ID is not a portable bearer token.
 
-## Migrating an existing read-only Review card
+For a `change` deliverable, acceptance re-resolves the exact task workspace and verifies the current task generation, execution attempt, origin thread, base ref, VCS mode and identity, state digest, and absence of conflicts. It then atomically stores typed `verified_local_workspace` evidence and archives the task. The local workspace may contain the reviewed changes; acceptance does not push or require a remote ref.
 
-For a legacy card such as `6f7a6`, update it to `read_only_report` only if changing the task generation is acceptable, ensure its task workspace exists and is clean, then submit a bounded report with `--report-file`. If the card is already in Review and has no submission, that first valid submission is allowed with a legacy null attempt. It then remains in Review until a genuine authenticated acceptance channel exists. Cards without Amp origin also remain fail-closed and must be recreated or deliberately migrated with valid provenance before any future acceptance.
+For a `read_only_report` deliverable, acceptance also requires the immutable Review submission. Kanban recomputes the report digest, requires the exact submitted workspace path and base identity, re-verifies the clean receipt and VCS identity, and rejects any changed receipt. It then atomically stores `verified_no_change_report` evidence and archives the task.
+
+Both paths reject stale generation or execution attempt, a missing task workspace, a missing read-only submission, conflicts, a changed workspace state, or a mismatched origin thread. Successful acceptance removes dependency edges through the existing board semantics, allowing waiting dependants to start. Acceptance does not stop the durable worker session; session lifecycle remains a separate exact-attempt operation.
+
+The browser remains unable to accept Review work through whole-board snapshot saves or ordinary card movement. Environment markers, internal bearer values, hidden commands, and prompt instructions are not acceptance authority.

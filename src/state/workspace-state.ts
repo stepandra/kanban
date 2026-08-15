@@ -657,7 +657,7 @@ function assertAuthorizedBoardSnapshotTransitions(currentBoard: RuntimeBoardData
 		?.cards.find((card) => reviewTaskIds.has(card.id));
 	if (acceptedThroughSnapshot) {
 		throw new Error(
-			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to the archive through a board snapshot save. Per-task acceptance is disabled until Kanban has a verifiable actor capability.`,
+			`Task "${acceptedThroughSnapshot.id}" cannot move from Review to the archive through a board snapshot save. Use the trusted task accept command.`,
 		);
 	}
 	for (const [taskId, nextTask] of nextTasks) {
@@ -669,7 +669,7 @@ function assertAuthorizedBoardSnapshotTransitions(currentBoard: RuntimeBoardData
 		}
 		if (nextTask.acceptanceEvidence !== undefined) {
 			throw new Error(
-				`Task "${taskId}" cannot create a task with acceptance evidence through a board snapshot save. Per-task acceptance is disabled until Kanban has a verifiable actor capability.`,
+				`Task "${taskId}" cannot create a task with acceptance evidence through a board snapshot save. Use the trusted task accept command.`,
 			);
 		}
 		if (nextTask.origin !== undefined) {
@@ -719,7 +719,7 @@ function assertAuthorizedBoardSnapshotTransitions(currentBoard: RuntimeBoardData
 			(reopened || nextGeneration !== currentGeneration);
 		if (acceptanceChanged && !acceptanceCleared) {
 			throw new Error(
-				`Task "${taskId}" cannot attach or replace acceptance evidence through a board snapshot save. Per-task acceptance is disabled until Kanban has a verifiable actor capability.`,
+				`Task "${taskId}" cannot attach or replace acceptance evidence through a board snapshot save. Use the trusted task accept command.`,
 			);
 		}
 	}
@@ -945,7 +945,9 @@ export interface RuntimeWorkspaceAtomicMutationResponse<T> {
 
 export async function mutateWorkspaceState<T>(
 	cwd: string,
-	mutate: (state: RuntimeWorkspaceStateResponse) => RuntimeWorkspaceAtomicMutationResult<T>,
+	mutate: (
+		state: RuntimeWorkspaceStateResponse,
+	) => RuntimeWorkspaceAtomicMutationResult<T> | Promise<RuntimeWorkspaceAtomicMutationResult<T>>,
 ): Promise<RuntimeWorkspaceAtomicMutationResponse<T>> {
 	const context = await loadWorkspaceContext(cwd);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
@@ -954,7 +956,7 @@ export async function mutateWorkspaceState<T>(
 		const currentMeta = await readWorkspaceMeta(context.workspaceId);
 		const currentState = toWorkspaceStateResponse(context, currentBoard, currentSessions, currentMeta.revision);
 
-		const mutation = mutate(currentState);
+		const mutation = await mutate(currentState);
 		if (mutation.save === false) {
 			return {
 				value: mutation.value,

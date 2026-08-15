@@ -9,6 +9,7 @@ import {
 } from "../../src/core/api-contract";
 import {
 	acceptReadOnlyTask,
+	acceptTask,
 	discardTask,
 	moveTaskToColumn,
 	submitTaskReview,
@@ -60,6 +61,31 @@ const acceptanceEvidence: RuntimeTaskAcceptanceEvidence = {
 		sha: "0123456789abcdef0123456789abcdef01234567",
 		remoteRef: "refs/heads/kanban/task-1-review",
 	},
+	verifiedAt: 2,
+};
+
+const localWorkspaceAcceptanceEvidence: RuntimeTaskAcceptanceEvidence = {
+	kind: "verified_local_workspace",
+	taskId: "task-1",
+	generation: 1,
+	executionAttemptId: "attempt-1",
+	workspace: {
+		taskId: "task-1",
+		path: "/tmp/task-1",
+		vcs: "git",
+		baseRef: "main",
+	},
+	receipt: {
+		vcs: "git",
+		clean: false,
+		headCommit: "0123456789abcdef0123456789abcdef01234567",
+		baseCommit: "89abcdef0123456789abcdef0123456789abcdef",
+		hasConflicts: false,
+		hasUntracked: false,
+		divergent: true,
+		stateDigest: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+	},
+	architectThreadId: "T-architect-1",
 	verifiedAt: 2,
 };
 
@@ -124,7 +150,7 @@ describe("Kanban acceptance boundary", () => {
 				architectThreadId: "T-architect-1",
 				verifiedAt: 30,
 			}),
-		).toThrow("not an explicit read-only report deliverable");
+		).toThrow("requires verified local workspace evidence");
 	});
 
 	it("stores one immutable generation- and attempt-fenced read-only submission", () => {
@@ -176,6 +202,40 @@ describe("Kanban acceptance boundary", () => {
 		const result = submitReview(board, "task-1", createReadOnlySubmission({ executionAttemptId: null }));
 
 		expect(result.task?.submission?.executionAttemptId).toBeNull();
+	});
+
+	it("rejects read-only acceptance without a durable submission or with changed receipts", () => {
+		const board = createReviewBoard();
+		const task = board.columns.find((column) => column.id === "review")?.cards[0];
+		if (!task) throw new Error("Expected review task.");
+		task.deliverableKind = "read_only_report";
+		task.origin = { kind: "amp_architect", threadId: "T-architect-1" };
+		const submission = createReadOnlySubmission();
+		const evidence: Extract<RuntimeTaskAcceptanceEvidence, { kind: "verified_no_change_report" }> = {
+			kind: "verified_no_change_report",
+			taskId: "task-1",
+			generation: 1,
+			executionAttemptId: "attempt-1",
+			reportDigest: submission.reportDigest,
+			receipt: submission.receipt,
+			architectThreadId: "T-architect-1",
+			verifiedAt: 30,
+		};
+
+		expect(() => acceptReadOnlyTask(board, "task-1", evidence)).toThrow("no durable Review submission");
+		task.submission = submission;
+		expect(() =>
+			acceptReadOnlyTask(board, "task-1", {
+				...evidence,
+				reportDigest: "0".repeat(64),
+			}),
+		).toThrow("immutable Review submission");
+		expect(() =>
+			acceptReadOnlyTask(board, "task-1", {
+				...evidence,
+				receipt: { ...evidence.receipt, stateDigest: "1".repeat(64) },
+			}),
+		).toThrow("immutable Review submission");
 	});
 
 	it("accepts a verified no-change report through the dedicated transition and satisfies dependants", () => {
@@ -233,6 +293,75 @@ describe("Kanban acceptance boundary", () => {
 		});
 		expect(accepted.board.dependencies).toEqual([]);
 		expect(moveTaskToColumn(accepted.board, "dependent", "in_progress").moved).toBe(true);
+	});
+
+	it("accepts a change with current local workspace evidence and satisfies dependants", () => {
+		const board = createReviewBoard();
+		const task = board.columns.find((column) => column.id === "review")?.cards[0];
+		if (!task) throw new Error("Expected review task.");
+		task.deliverableKind = "change";
+		task.origin = { kind: "amp_architect", threadId: "T-architect-1" };
+		board.columns
+			.find((column) => column.id === "backlog")
+			?.cards.push({
+				id: "dependent",
+				title: "Dependent",
+				prompt: "Dependent",
+				startInPlanMode: false,
+				baseRef: "main",
+				createdAt: 1,
+				updatedAt: 1,
+			});
+		board.dependencies.push({
+			id: "dependency-1",
+			fromTaskId: "dependent",
+			toTaskId: "task-1",
+			createdAt: 1,
+		});
+
+		const accepted = acceptTask(board, "task-1", localWorkspaceAcceptanceEvidence, 30);
+
+		expect(accepted.task?.acceptanceEvidence).toEqual(localWorkspaceAcceptanceEvidence);
+		expect(accepted.board.dependencies).toEqual([]);
+		expect(moveTaskToColumn(accepted.board, "dependent", "in_progress").moved).toBe(true);
+	});
+
+	it("rejects wrong-thread and stale local workspace acceptance evidence", () => {
+		const board = createReviewBoard();
+		const task = board.columns.find((column) => column.id === "review")?.cards[0];
+		if (!task) throw new Error("Expected review task.");
+		task.origin = { kind: "amp_architect", threadId: "T-architect-1" };
+
+		expect(() =>
+			acceptTask(board, "task-1", {
+				...localWorkspaceAcceptanceEvidence,
+				architectThreadId: "T-wrong-thread",
+			}),
+		).toThrow("origin thread");
+		expect(() =>
+			acceptTask(board, "task-1", {
+				...localWorkspaceAcceptanceEvidence,
+				generation: 2,
+			}),
+		).toThrow("stale");
+		expect(() =>
+			acceptTask(board, "task-1", {
+				...localWorkspaceAcceptanceEvidence,
+				executionAttemptId: "attempt-stale",
+			}),
+		).toThrow("stale");
+		expect(() =>
+			acceptTask(board, "task-1", {
+				...localWorkspaceAcceptanceEvidence,
+				workspace: { ...localWorkspaceAcceptanceEvidence.workspace, baseRef: "other" },
+			}),
+		).toThrow("workspace identity");
+		expect(() =>
+			acceptTask(board, "task-1", {
+				...localWorkspaceAcceptanceEvidence,
+				receipt: { ...localWorkspaceAcceptanceEvidence.receipt, hasConflicts: true },
+			}),
+		).toThrow("conflicts");
 	});
 
 	it("rejects an ordinary Review to Done move", () => {

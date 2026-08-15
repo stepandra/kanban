@@ -34,6 +34,16 @@ retests until clean, and submits one fenced verification receipt. Kanban alone
 accepts the frozen member set after the verified revision is published through
 the release boundary.
 
+Until that campaign boundary is implemented, the local single-user control
+plane supports bounded per-task acceptance through `kanban task accept`. The
+installed `kanban_tasks` Amp plugin is the normal caller and passes its current
+`PluginToolContext` thread; direct CLI use by the same local OS user is trusted
+by the same compatibility boundary. Kanban requires the supplied thread to
+exactly match immutable task origin and still re-verifies the current task
+generation, execution attempt, local workspace identity/state, base identity,
+and conflicts before atomically recording acceptance. This compatibility path
+neither publishes a revision nor changes the campaign acceptance target.
+
 This decision supersedes the per-task Promoter/Fixer and Amp task-worker parts
 of `2026-07-25-kanban-vnext-ownership-and-lifecycle.md`. Generation and attempt
 fencing, immutable submission identity, workspace isolation, and the rule that
@@ -359,16 +369,16 @@ campaign in the Zellij Focus Cockpit, but pane presence is never workflow truth.
    release-intent receipts, execution workspaces/uses, and a local host identity.
    Backfill current local workspaces under one writer and expose a reconciliation
    report between old projections and new records.
-2. Make submit candidate-backed under the new single writer. Keep acceptance
-   fail-closed while contract tests prove candidate identity, stale-fence
-   rejection, and recovery; no per-task compatibility mutation remains.
+2. Make submit candidate-backed under the new single writer. Keep campaign
+   acceptance fail-closed while contract tests prove candidate identity,
+   stale-fence rejection, and recovery; retire the local per-task compatibility
+   mutation when the campaign boundary replaces it.
 3. Implement one-host campaigns using the final workspace records, campaign
    fencing, repository lease, VCS release receipts, and atomic Kanban batch
    acceptance, but keep campaign dispatch and acceptance dark/test-only.
 4. Enable campaign dispatch and acceptance only after its fences and receipts
-   are complete. The post-submit Fixer, Amp task Orbs, and per-task acceptance
-   entrypoints were removed ahead of this cutover so they cannot become interim
-   authorities.
+   are complete. Remove the post-submit Fixer, Amp task Orbs, and bounded local
+   per-task acceptance compatibility path as part of that cutover.
 5. Add remote Grok Build host placement, ACP reconnect, and explicit workspace
    replacement under the same final identities.
 6. Expose the workspace inventory, global Tracks, and candidate/campaign detail

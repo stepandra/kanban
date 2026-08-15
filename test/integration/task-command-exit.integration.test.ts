@@ -341,7 +341,7 @@ describe("source task commands", () => {
 	});
 
 	it(
-		"lets a worker submit a clean read-only report but not self-accept with the known Amp origin",
+		"accepts a clean read-only report only for the exact Amp origin thread",
 		{ timeout: 600_000 },
 		async () => {
 			const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-read-only-review-");
@@ -464,10 +464,28 @@ describe("source task commands", () => {
 						?.threadId;
 					expect(exposedOriginThreadId).toBe("T-read-only-test");
 					if (!exposedOriginThreadId) throw new Error("Expected list to expose the task's Amp origin thread ID.");
-					const selfAcceptance = await runCliCommandAndCollectOutput({
+					const wrongThreadAcceptance = await runCliCommandAndCollectOutput({
 						args: [
 							"task",
-							"accept-read-only",
+							"accept",
+							"--task-id",
+							taskId,
+							"--origin-amp-thread-id",
+							"T-wrong-thread",
+							"--project-path",
+							projectPath,
+						],
+						cwd: projectPath,
+						env,
+						timeoutMs: 90_000,
+					});
+					expect(wrongThreadAcceptance.exitCode).toBe(1);
+					expect(wrongThreadAcceptance.stdout).toContain("origin thread");
+
+					const accepted = await runCliCommandAndCollectOutput({
+						args: [
+							"task",
+							"accept",
 							"--task-id",
 							taskId,
 							"--origin-amp-thread-id",
@@ -479,21 +497,26 @@ describe("source task commands", () => {
 						env,
 						timeoutMs: 90_000,
 					});
-					expect(selfAcceptance.exitCode).toBe(1);
-					expect(selfAcceptance.stdout).toContain("authenticated Amp Architect actor capability");
+					expect(accepted.exitCode).toBe(0);
+					expect(accepted.stdout).toContain('"kind": "verified_no_change_report"');
 
-					const reviewTasks = await runCliCommandAndCollectOutput({
-						args: ["task", "list", "--column", "review", "--project-path", projectPath],
+					const archivedTasks = await runCliCommandAndCollectOutput({
+						args: ["task", "list", "--column", "trash", "--project-path", projectPath],
 						cwd: projectPath,
 						env,
 						timeoutMs: 90_000,
 					});
-					expect(reviewTasks.exitCode).toBe(0);
-					const reviewPayload = JSON.parse(reviewTasks.stdout) as {
-						tasks?: Array<{ id?: string; column?: string; acceptanceEvidence?: unknown }>;
+					expect(archivedTasks.exitCode).toBe(0);
+					const archivedPayload = JSON.parse(archivedTasks.stdout) as {
+						tasks?: Array<{ id?: string; column?: string; acceptanceEvidence?: { kind?: string } }>;
 					};
-					expect(reviewPayload.tasks).toContainEqual(expect.objectContaining({ id: taskId, column: "review" }));
-					expect(reviewPayload.tasks?.find((task) => task.id === taskId)?.acceptanceEvidence).toBeUndefined();
+					expect(archivedPayload.tasks).toContainEqual(
+						expect.objectContaining({
+							id: taskId,
+							column: "trash",
+							acceptanceEvidence: expect.objectContaining({ kind: "verified_no_change_report" }),
+						}),
+					);
 				} finally {
 					await requestGracefulShutdown(serverProcess);
 					if (!(await waitForExit(serverProcess, 5_000))) serverProcess.kill("SIGKILL");
@@ -582,7 +605,7 @@ describe("source task commands", () => {
 	});
 
 	it(
-		"supports claim, submit, explicit trash deletion, and rejects removed completion commands",
+		"supports claim, submit, explicit trash deletion, and keeps accept origin-fenced",
 		{ timeout: 90_000 },
 		async () => {
 			const { path: homeDir, cleanup: cleanupHome } = createTempDir("kanban-home-task-done-delete-");
@@ -723,7 +746,7 @@ describe("source task commands", () => {
 					});
 					expect(accepted.didExit).toBe(true);
 					expect(accepted.exitCode).toBe(1);
-					expect(`${accepted.stdout}\n${accepted.stderr}`).toContain("unknown command 'accept'");
+					expect(`${accepted.stdout}\n${accepted.stderr}`).toContain("required option '--origin-amp-thread-id");
 					expect(existsSync(taskWorkspacePath)).toBe(true);
 
 					const movedByTrashCommand = await runCliCommandAndCollectOutput({

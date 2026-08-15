@@ -453,10 +453,20 @@ separate context. The board renders a compact human label and the detail view
 exposes the supported `amp threads continue <thread-id>` command; neither
 surface can update task lifecycle from Amp thread state.
 
-The current completion path moves in-progress work to Review and stops there.
-No per-task acceptance entrypoint exists. The future owning QA campaign will
-accept its exact frozen member set after publishing one verified campaign
-revision. Discard and ordinary UI movement remain unable to bypass acceptance.
+The local single-user completion path moves work to Review, then allows the
+originating Amp Architect thread to accept it through `kanban task accept`. The
+installed `kanban_tasks` plugin is the normal caller and supplies the exact
+current `PluginToolContext` thread ID. Direct CLI use by the same local OS user
+is intentionally trusted too; this compatibility boundary does not claim a
+second caller-authentication mechanism. Kanban matches immutable task origin,
+re-verifies current generation, execution attempt, base and VCS identity,
+workspace state digest, and conflicts, then atomically records local acceptance
+evidence and archives the task. Change acceptance is local and does not require
+a push or remote ref. Read-only report acceptance additionally reuses the
+immutable report digest and clean receipt. Discard, ordinary UI movement, and
+whole-board snapshot saves remain unable to bypass acceptance. The future owning
+QA campaign remains the target authority for frozen multi-task campaign
+acceptance.
 
 ## Main Flows
 
