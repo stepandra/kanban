@@ -8,7 +8,7 @@ kanban \- local orchestration board for coding agents
 .RI [ command ]
 .br
 .B kanban task
-.RI " " list|create|update|link|unlink|start
+.RI " " list|create|update|claim|submit|accept|trash|delete|link|unlink|prepare|start
 .RI " " [ options ]
 .br
 .B kanban hooks
@@ -77,12 +77,21 @@ Subcommands:
 .RI " " id
 .RI [ --project-path " " path ]
 .br
+.B accept
+.B --task-id
+.RI " " id
+.B --origin-amp-thread-id
+.RI " " thread-id
+.RI [ --project-path " " path ]
+.br
 .B start
 .B --task-id
 .RI " " id
 .RI [ --project-path " " path ]
 
-All task commands return JSON.
+All task commands return JSON. The local single-user accept command requires an
+Amp thread ID that exactly matches the task's immutable Architect origin. The
+installed Amp kanban_tasks plugin supplies its current PluginToolContext thread.
 
 Use kebab-case flags only.
 

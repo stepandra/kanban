@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RuntimeBoardData } from "../../src/core/api-contract";
 import { loadWorkspaceState, mutateWorkspaceState } from "../../src/state/workspace-state";
-import { verifyReadOnlyReviewForAcceptance } from "../../src/workspace/read-only-review";
+import { acceptTaskFromTrustedLocalControlPlane } from "../../src/workspace/task-acceptance";
 import { inspectReviewWorkspace } from "../../src/workspace/review-workspace-receipt";
 import { ensureTaskWorktreeIfDoesntExist } from "../../src/workspace/task-worktree";
 import { createTempDir } from "../utilities/temp-dir";
@@ -156,7 +156,129 @@ describe.sequential("Review workspace receipt integration", () => {
 		}
 	}, 30_000);
 
-	it("re-verifies every acceptance fence without persisting an acceptance transition", async () => {
+	it("accepts a change from its exact local workspace without a remote ref", async () => {
+		await withTemporaryHome(async () => {
+			const sandbox = createTempDir("kanban-change-acceptance-verifier-");
+			try {
+				const repoPath = join(realpathSync(sandbox.path), "repo");
+				mkdirSync(repoPath, { recursive: true });
+				runGit(repoPath, ["init", "-q"]);
+				writeFileSync(join(repoPath, "README.md"), "base\n", "utf8");
+				runGit(repoPath, ["add", "README.md"]);
+				runGit(repoPath, ["commit", "-qm", "base"]);
+				const baseCommit = runGit(repoPath, ["rev-parse", "HEAD"]);
+				const taskId = "change-verifier";
+				const ensured = await ensureTaskWorktreeIfDoesntExist({ cwd: repoPath, taskId, baseRef: baseCommit });
+				if (!ensured.ok || !ensured.path) throw new Error(ensured.error ?? "Expected task workspace.");
+				writeFileSync(join(ensured.path, "README.md"), "accepted local change\n", "utf8");
+				const board: RuntimeBoardData = {
+					columns: [
+						{ id: "backlog", title: "Backlog", cards: [] },
+						{ id: "in_progress", title: "In Progress", cards: [] },
+						{
+							id: "review",
+							title: "Review",
+							cards: [
+								{
+									id: taskId,
+									title: "Change verifier",
+									prompt: "Implement a local change",
+									startInPlanMode: false,
+									baseRef: baseCommit,
+									generation: 2,
+									execution: { attemptId: "attempt-2", generation: 2, queuedAt: 1 },
+									origin: { kind: "amp_architect", threadId: "T-change-architect" },
+									deliverableKind: "change",
+									createdAt: 1,
+									updatedAt: 2,
+								},
+							],
+						},
+						{ id: "trash", title: "Done", cards: [] },
+					],
+					dependencies: [],
+				};
+				await mutateWorkspaceState(repoPath, () => ({ board, value: null }));
+
+				const accepted = await acceptTaskFromTrustedLocalControlPlane({
+					workspaceRepoPath: repoPath,
+					taskId,
+					architectThreadId: "T-change-architect",
+				});
+				expect(accepted.evidence).toMatchObject({
+					kind: "verified_local_workspace",
+					taskId,
+					generation: 2,
+					executionAttemptId: "attempt-2",
+					workspace: { path: ensured.path, vcs: "git", baseRef: baseCommit },
+					receipt: { hasConflicts: false },
+					architectThreadId: "T-change-architect",
+				});
+				const persisted = await loadWorkspaceState(repoPath);
+				expect(persisted.board.columns.find((column) => column.id === "trash")?.cards[0]).toMatchObject({
+					id: taskId,
+					acceptanceEvidence: accepted.evidence,
+				});
+			} finally {
+				sandbox.cleanup();
+			}
+		});
+	}, 30_000);
+
+	it("rejects a missing change workspace without archiving", async () => {
+		await withTemporaryHome(async () => {
+			const sandbox = createTempDir("kanban-change-acceptance-failures-");
+			try {
+				const repoPath = join(realpathSync(sandbox.path), "repo");
+				mkdirSync(repoPath, { recursive: true });
+				runGit(repoPath, ["init", "-q"]);
+				writeFileSync(join(repoPath, "README.md"), "base\n", "utf8");
+				runGit(repoPath, ["add", "README.md"]);
+				runGit(repoPath, ["commit", "-qm", "base"]);
+				const baseCommit = runGit(repoPath, ["rev-parse", "HEAD"]);
+				const taskId = "missing-workspace";
+				const board: RuntimeBoardData = {
+					columns: [
+						{ id: "backlog", title: "Backlog", cards: [] },
+						{ id: "in_progress", title: "In Progress", cards: [] },
+						{
+							id: "review",
+							title: "Review",
+							cards: [
+								{
+									id: taskId,
+									title: "Missing workspace",
+									prompt: "Missing workspace",
+									startInPlanMode: false,
+									baseRef: baseCommit,
+									generation: 1,
+									origin: { kind: "amp_architect", threadId: "T-failure-architect" },
+									createdAt: 1,
+									updatedAt: 1,
+								},
+							],
+						},
+						{ id: "trash", title: "Done", cards: [] },
+					],
+					dependencies: [],
+				};
+				await mutateWorkspaceState(repoPath, () => ({ board, value: null }));
+				await expect(
+					acceptTaskFromTrustedLocalControlPlane({
+						workspaceRepoPath: repoPath,
+						taskId,
+						architectThreadId: "T-failure-architect",
+					}),
+				).rejects.toThrow("Task workspace is missing");
+				const persisted = await loadWorkspaceState(repoPath);
+				expect(persisted.board.columns.find((column) => column.id === "review")?.cards[0]?.id).toBe(taskId);
+			} finally {
+				sandbox.cleanup();
+			}
+		});
+	}, 30_000);
+
+	it("atomically accepts a read-only report through the trusted local control-plane boundary", async () => {
 		await withTemporaryHome(async () => {
 			const sandbox = createTempDir("kanban-read-only-acceptance-verifier-");
 			try {
@@ -213,11 +335,28 @@ describe.sequential("Review workspace receipt integration", () => {
 				};
 				await mutateWorkspaceState(repoPath, () => ({ board, value: null }));
 
-				const verified = await verifyReadOnlyReviewForAcceptance({
+				writeFileSync(join(ensured.path, "changed-receipt.txt"), "changed\n", "utf8");
+				await expect(
+					acceptTaskFromTrustedLocalControlPlane({
+						workspaceRepoPath: repoPath,
+						taskId,
+						architectThreadId: "T-architect-verifier",
+					}),
+				).rejects.toThrow("verified-clean no-change state");
+				unlinkSync(join(ensured.path, "changed-receipt.txt"));
+				await expect(
+					acceptTaskFromTrustedLocalControlPlane({
+						workspaceRepoPath: repoPath,
+						taskId,
+						architectThreadId: "T-wrong-thread",
+					}),
+				).rejects.toThrow("origin thread");
+				const accepted = await acceptTaskFromTrustedLocalControlPlane({
 					workspaceRepoPath: repoPath,
 					taskId,
+					architectThreadId: "T-architect-verifier",
 				});
-				expect(verified.evidence).toMatchObject({
+				expect(accepted.evidence).toMatchObject({
 					taskId,
 					generation: 3,
 					executionAttemptId: "attempt-3",
@@ -226,31 +365,11 @@ describe.sequential("Review workspace receipt integration", () => {
 					receipt: inspected.receipt,
 				});
 				const persisted = await loadWorkspaceState(repoPath);
-				expect(persisted.board.columns.find((column) => column.id === "review")?.cards[0]?.id).toBe(taskId);
-				expect(persisted.board.columns.find((column) => column.id === "trash")?.cards).toEqual([]);
-				expect(verified.task.acceptanceEvidence).toBeUndefined();
-
-				writeFileSync(join(ensured.path, "dirty.txt"), "dirty\n", "utf8");
-				await expect(
-					verifyReadOnlyReviewForAcceptance({
-						workspaceRepoPath: repoPath,
-						taskId,
-					}),
-				).rejects.toThrow("verified-clean no-change state");
-				unlinkSync(join(ensured.path, "dirty.txt"));
-				await mutateWorkspaceState(repoPath, (state) => {
-					const staleBoard = structuredClone(state.board);
-					const task = staleBoard.columns.find((column) => column.id === "review")?.cards[0];
-					if (!task?.execution) throw new Error("Expected current Review execution fence.");
-					task.execution = { ...task.execution, attemptId: "attempt-stale" };
-					return { board: staleBoard, value: null };
+				expect(persisted.board.columns.find((column) => column.id === "review")?.cards).toEqual([]);
+				expect(persisted.board.columns.find((column) => column.id === "trash")?.cards[0]).toMatchObject({
+					id: taskId,
+					acceptanceEvidence: accepted.evidence,
 				});
-				await expect(
-					verifyReadOnlyReviewForAcceptance({
-						workspaceRepoPath: repoPath,
-						taskId,
-					}),
-				).rejects.toThrow("stale for the current task generation or attempt");
 			} finally {
 				sandbox.cleanup();
 			}

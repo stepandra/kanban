@@ -39,6 +39,7 @@ import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { inspectReviewWorkspace } from "../workspace/review-workspace-receipt";
+import { acceptTaskFromTrustedLocalControlPlane } from "../workspace/task-acceptance";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const LIST_TASK_COLUMNS = ["backlog", "in_progress", "review", "trash"] as const;
@@ -85,8 +86,6 @@ function parseListColumn(value: string | undefined): ListTaskColumn | undefined 
 
 const VALID_AGENT_IDS = runtimeAgentIdSchema.options;
 const VALID_DELIVERABLE_KINDS = runtimeTaskDeliverableKindSchema.options;
-const READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE =
-	"Read-only acceptance is disabled: an authenticated Amp Architect actor capability must be opaque, bound to the current tool invocation and thread, and Kanban-verifiable; the current Amp/Kanban boundary provides no such capability. The task remains in Review.";
 
 function parseAgentId(value: string | undefined): RuntimeAgentId | null | undefined {
 	if (value === undefined) {
@@ -917,6 +916,36 @@ async function submitExternalTask(input: {
 	};
 }
 
+async function acceptExternalTask(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	originAmpThreadId: string;
+}): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const origin = parseAmpArchitectOrigin(input.originAmpThreadId);
+	if (!origin) throw new Error("Amp Architect origin thread is required.");
+	const workspace = await resolveRuntimeWorkspace(workspaceRepoPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const accepted = await acceptTaskFromTrustedLocalControlPlane({
+		workspaceRepoPath,
+		taskId: input.taskId,
+		architectThreadId: origin.threadId,
+	});
+	await notifyRuntimeWorkspaceStateUpdated(runtimeClient);
+	const latestState = await runtimeClient.workspace.getState.query();
+	return {
+		ok: true,
+		workspacePath: workspaceRepoPath,
+		task: formatTaskRecord(latestState, accepted.task, "trash"),
+		acceptanceEvidence: accepted.evidence,
+	};
+}
+
 async function transitionExternalTask(input: {
 	cwd: string;
 	taskId: string;
@@ -1505,19 +1534,31 @@ export function registerTaskCommand(program: Command): void {
 			);
 		});
 
-	task
-		.command("accept-read-only")
-		.description("Fail closed because Kanban has no verifiable Amp Architect actor capability.")
-		.requiredOption("--task-id <id>", "Task ID.")
-		.requiredOption("--origin-amp-thread-id <thread-id>", "Current Amp Architect thread provenance.")
-		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { taskId: string; originAmpThreadId: string; projectPath?: string }) => {
-			await runTaskCommand(async () => {
-				const origin = parseAmpArchitectOrigin(options.originAmpThreadId);
-				if (!origin) throw new Error("Amp Architect origin thread is required.");
-				throw new Error(READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE);
+	const registerAcceptCommand = (name: "accept" | "accept-read-only", compatibilityAlias = false) => {
+		task
+			.command(name, compatibilityAlias ? { hidden: true } : undefined)
+			.description(
+				compatibilityAlias
+					? "Compatibility alias for task accept."
+					: "Accept a Review task through the trusted local single-user control plane.",
+			)
+			.requiredOption("--task-id <id>", "Task ID.")
+			.requiredOption("--origin-amp-thread-id <thread-id>", "Amp Architect thread to match to immutable task origin.")
+			.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+			.action(async (options: { taskId: string; originAmpThreadId: string; projectPath?: string }) => {
+				await runTaskCommand(
+					async () =>
+						await acceptExternalTask({
+							cwd: process.cwd(),
+							taskId: options.taskId,
+							projectPath: options.projectPath,
+							originAmpThreadId: options.originAmpThreadId,
+						}),
+				);
 			});
-		});
+	};
+	registerAcceptCommand("accept");
+	registerAcceptCommand("accept-read-only", true);
 
 	task
 		.command("prepare")

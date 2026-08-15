@@ -648,10 +648,10 @@ export function submitTaskReview(
 	};
 }
 
-export function acceptReadOnlyTask(
+export function acceptTask(
 	board: RuntimeBoardData,
 	taskId: string,
-	evidenceInput: Extract<RuntimeTaskAcceptanceEvidence, { kind: "verified_no_change_report" }>,
+	evidenceInput: Exclude<RuntimeTaskAcceptanceEvidence, { kind: "verified_remote_revision" }>,
 	now: number = Date.now(),
 ): RuntimeMoveTaskResult {
 	const normalizedTaskId = taskId.trim();
@@ -660,46 +660,70 @@ export function acceptReadOnlyTask(
 		throw new Error(`Task "${normalizedTaskId}" was not found.`);
 	}
 	if (found.columnId !== "review") {
-		throw new Error(`Task "${normalizedTaskId}" must be in Review before read-only acceptance.`);
-	}
-	if (found.task.deliverableKind !== "read_only_report") {
-		throw new Error(`Task "${normalizedTaskId}" is not an explicit read-only report deliverable.`);
-	}
-	if (!found.task.submission) {
-		throw new Error(`Task "${normalizedTaskId}" has no durable Review submission.`);
+		throw new Error(`Task "${normalizedTaskId}" must be in Review before acceptance.`);
 	}
 	if (!found.task.origin) {
-		throw new Error(`Task "${normalizedTaskId}" has no Amp Architect origin and cannot be accepted read-only.`);
+		throw new Error(`Task "${normalizedTaskId}" has no Amp Architect origin and cannot be accepted.`);
 	}
 
 	const parsedEvidence = runtimeTaskAcceptanceEvidenceSchema.parse(evidenceInput);
-	if (parsedEvidence.kind !== "verified_no_change_report") {
-		throw new Error("Read-only acceptance requires verified no-change report evidence.");
+	if (parsedEvidence.kind === "verified_remote_revision") {
+		throw new Error("Local task acceptance requires local workspace evidence.");
 	}
-	const submission = runtimeTaskReviewSubmissionSchema.parse(found.task.submission);
-	assertReadOnlyReceiptIsClean(submission);
+	const generation = resolveTaskGeneration(found.task.generation);
+	const executionAttemptId = found.task.execution?.attemptId ?? null;
 	if (
 		parsedEvidence.taskId !== found.task.id ||
-		parsedEvidence.generation !== resolveTaskGeneration(found.task.generation) ||
-		parsedEvidence.executionAttemptId !== (found.task.execution?.attemptId ?? null) ||
-		parsedEvidence.generation !== submission.generation ||
-		parsedEvidence.executionAttemptId !== submission.executionAttemptId
+		parsedEvidence.generation !== generation ||
+		parsedEvidence.executionAttemptId !== executionAttemptId
 	) {
-		throw new Error("Read-only acceptance evidence is stale for the current task generation or attempt.");
-	}
-	if (
-		parsedEvidence.reportDigest !== submission.reportDigest ||
-		JSON.stringify(parsedEvidence.receipt) !== JSON.stringify(submission.receipt)
-	) {
-		throw new Error("Read-only acceptance evidence does not match the immutable Review submission.");
+		throw new Error("Acceptance evidence is stale for the current task generation or attempt.");
 	}
 	if (parsedEvidence.architectThreadId !== found.task.origin.threadId) {
-		throw new Error("Read-only acceptance must come from the task's Amp Architect origin thread.");
+		throw new Error("Acceptance must come from the task's Amp Architect origin thread.");
+	}
+
+	const deliverableKind = found.task.deliverableKind ?? "change";
+	if (deliverableKind === "read_only_report") {
+		if (parsedEvidence.kind !== "verified_no_change_report") {
+			throw new Error("Read-only acceptance requires verified no-change report evidence.");
+		}
+		if (!found.task.submission) {
+			throw new Error(`Task "${normalizedTaskId}" has no durable Review submission.`);
+		}
+		const submission = runtimeTaskReviewSubmissionSchema.parse(found.task.submission);
+		assertReadOnlyReceiptIsClean(submission);
+		if (
+			parsedEvidence.generation !== submission.generation ||
+			parsedEvidence.executionAttemptId !== submission.executionAttemptId
+		) {
+			throw new Error("Acceptance evidence is stale for the current task generation or attempt.");
+		}
+		if (
+			parsedEvidence.reportDigest !== submission.reportDigest ||
+			JSON.stringify(parsedEvidence.receipt) !== JSON.stringify(submission.receipt)
+		) {
+			throw new Error("Read-only acceptance evidence does not match the immutable Review submission.");
+		}
+	} else {
+		if (parsedEvidence.kind !== "verified_local_workspace") {
+			throw new Error("Change acceptance requires verified local workspace evidence.");
+		}
+		if (
+			parsedEvidence.workspace.taskId !== found.task.id ||
+			parsedEvidence.workspace.baseRef !== found.task.baseRef ||
+			parsedEvidence.workspace.vcs !== parsedEvidence.receipt.vcs
+		) {
+			throw new Error("Change acceptance evidence does not match the current task workspace identity.");
+		}
+		if (parsedEvidence.receipt.hasConflicts) {
+			throw new Error("Change acceptance evidence contains workspace conflicts.");
+		}
 	}
 
 	const moved = moveTaskToColumnInternal(board, normalizedTaskId, "trash", now);
 	if (!moved.moved || !moved.task) {
-		throw new Error(`Task "${normalizedTaskId}" could not be archived after read-only acceptance.`);
+		throw new Error(`Task "${normalizedTaskId}" could not be archived after acceptance.`);
 	}
 	const acceptedTask: RuntimeBoardCard = {
 		...moved.task,
@@ -708,7 +732,7 @@ export function acceptReadOnlyTask(
 	};
 	const acceptedLocation = findTaskLocation(moved.board, normalizedTaskId);
 	if (!acceptedLocation) {
-		throw new Error(`Task "${normalizedTaskId}" disappeared during read-only acceptance.`);
+		throw new Error(`Task "${normalizedTaskId}" disappeared during acceptance.`);
 	}
 	const columns = moved.board.columns.map((column, columnIndex) =>
 		columnIndex === acceptedLocation.columnIndex
@@ -732,6 +756,15 @@ export function acceptReadOnlyTask(
 		task: acceptedTask,
 		fromColumnId: "review",
 	};
+}
+
+export function acceptReadOnlyTask(
+	board: RuntimeBoardData,
+	taskId: string,
+	evidenceInput: Extract<RuntimeTaskAcceptanceEvidence, { kind: "verified_no_change_report" }>,
+	now: number = Date.now(),
+): RuntimeMoveTaskResult {
+	return acceptTask(board, taskId, evidenceInput, now);
 }
 
 export function deleteTasksFromBoard(board: RuntimeBoardData, taskIds: Iterable<string>): RuntimeDeleteTasksResult {

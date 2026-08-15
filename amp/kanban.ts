@@ -11,8 +11,6 @@ const KANBAN_REPOSITORY = "https://github.com/stepandra/kanban";
 const KANBAN_PROVENANCE_SCHEMA = "stepandra-kanban-provenance/v1";
 const KANBAN_PLUGIN_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EXACT_GIT_REVISION_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
-const READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE =
-	"Read-only acceptance is disabled: an authenticated Amp Architect actor capability must be opaque, bound to the current tool invocation and thread, and Kanban-verifiable; the current Amp PluginToolContext provides no such capability. The task remains in Review.";
 
 type ProcessResult = {
 	exitCode: number;
@@ -46,6 +44,7 @@ export default function (amp: PluginAPI): void {
 						"update",
 						"claim",
 						"submit",
+						"accept",
 						"accept_read_only",
 						"trash",
 						"link",
@@ -56,7 +55,7 @@ export default function (amp: PluginAPI): void {
 				},
 				taskId: {
 					type: "string",
-					description: "Task ID for update, claim, submit, trash, link, or start.",
+					description: "Task ID for update, claim, submit, accept, trash, link, or start.",
 				},
 				linkedTaskId: {
 					type: "string",
@@ -100,7 +99,7 @@ export default function (amp: PluginAPI): void {
 			const args = buildTaskArgs(
 				input,
 				workspacePath,
-				action === "create" || action === "accept_read_only" ? ctx.thread.id : undefined,
+				action === "create" || action === "accept" || action === "accept_read_only" ? ctx.thread.id : undefined,
 			);
 			const result = await runKanbanChecked(args, workspacePath);
 			return result.stdout.trim() || "Kanban command completed.";
@@ -163,7 +162,7 @@ export function buildTaskArgs(
 	ampArchitectThreadId?: string,
 ): string[] {
 	const action = requiredString(input, "action");
-	const args = ["task", action === "accept_read_only" ? "accept-read-only" : action];
+	const args = ["task", action === "accept_read_only" ? "accept" : action];
 
 	switch (action) {
 		case "list":
@@ -190,12 +189,14 @@ export function buildTaskArgs(
 			args.push("--task-id", requiredString(input, "taskId"));
 			appendStringOption(args, "--report-file", input.reportFile);
 			break;
+		case "accept":
 		case "accept_read_only":
 			args.push("--task-id", requiredString(input, "taskId"));
 			if (!ampArchitectThreadId) {
-				throw new Error("Read-only acceptance requires the current Amp Architect thread context.");
+				throw new Error("Acceptance requires the current Amp Architect thread context.");
 			}
-			throw new Error(READ_ONLY_ACCEPTANCE_UNAVAILABLE_MESSAGE);
+			args.push("--origin-amp-thread-id", ampArchitectThreadId);
+			break;
 		case "trash":
 			appendExactlyOneTarget(args, input);
 			break;

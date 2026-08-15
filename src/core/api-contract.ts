@@ -191,6 +191,14 @@ export const runtimeTaskWorkspaceReceiptSchema = z.discriminatedUnion("vcs", [
 ]);
 export type RuntimeTaskWorkspaceReceipt = z.infer<typeof runtimeTaskWorkspaceReceiptSchema>;
 
+export const runtimeTaskWorkspaceSnapshotSchema = z.object({
+	taskId: z.string().trim().min(1),
+	path: z.string().trim().min(1),
+	vcs: runtimeVcsModeSchema,
+	baseRef: z.string().trim().min(1),
+});
+export type RuntimeTaskWorkspaceSnapshot = z.infer<typeof runtimeTaskWorkspaceSnapshotSchema>;
+
 export const runtimeTaskReviewSubmissionSchema = z.object({
 	taskId: z.string().trim().min(1),
 	generation: z.number().int().positive(),
@@ -199,12 +207,7 @@ export const runtimeTaskReviewSubmissionSchema = z.object({
 	reportMarkdown: z.string().min(1).max(262_144),
 	reportDigest: runtimeSha256DigestSchema,
 	submittedAt: z.number().int().nonnegative(),
-	workspace: z.object({
-		taskId: z.string().trim().min(1),
-		path: z.string().trim().min(1),
-		vcs: runtimeVcsModeSchema,
-		baseRef: z.string().trim().min(1),
-	}),
+	workspace: runtimeTaskWorkspaceSnapshotSchema,
 	receipt: runtimeTaskWorkspaceReceiptSchema,
 });
 export type RuntimeTaskReviewSubmission = z.infer<typeof runtimeTaskReviewSubmissionSchema>;
@@ -232,9 +235,21 @@ export const runtimeVerifiedNoChangeReportAcceptanceEvidenceSchema = z.object({
 	verifiedAt: z.number().int().nonnegative(),
 });
 
+export const runtimeVerifiedLocalWorkspaceAcceptanceEvidenceSchema = z.object({
+	kind: z.literal("verified_local_workspace"),
+	taskId: z.string().trim().min(1),
+	generation: z.number().int().positive(),
+	executionAttemptId: z.string().trim().min(1).nullable(),
+	workspace: runtimeTaskWorkspaceSnapshotSchema,
+	receipt: runtimeTaskWorkspaceReceiptSchema,
+	architectThreadId: runtimeAmpThreadIdSchema,
+	verifiedAt: z.number().int().nonnegative(),
+});
+
 export const runtimeTaskAcceptanceEvidenceSchema = z.discriminatedUnion("kind", [
 	runtimeVerifiedRemoteRevisionAcceptanceEvidenceSchema,
 	runtimeVerifiedNoChangeReportAcceptanceEvidenceSchema,
+	runtimeVerifiedLocalWorkspaceAcceptanceEvidenceSchema,
 ]);
 export type RuntimeTaskAcceptanceEvidence = z.infer<typeof runtimeTaskAcceptanceEvidenceSchema>;
 
@@ -247,6 +262,7 @@ const runtimePersistedRemoteRevisionAcceptanceEvidenceSchema =
 const runtimePersistedTaskAcceptanceEvidenceSchema = z.union([
 	runtimePersistedRemoteRevisionAcceptanceEvidenceSchema,
 	runtimeVerifiedNoChangeReportAcceptanceEvidenceSchema,
+	runtimeVerifiedLocalWorkspaceAcceptanceEvidenceSchema,
 ]);
 
 export const runtimeBoardCardSchema = z
@@ -895,6 +911,12 @@ export const runtimeTaskWorkspaceInfoRequestSchema = z.object({
 	baseRef: z.string(),
 });
 export type RuntimeTaskWorkspaceInfoRequest = z.infer<typeof runtimeTaskWorkspaceInfoRequestSchema>;
+
+export const runtimeTaskAcceptRequestSchema = z.object({
+	taskId: z.string().trim().min(1),
+	architectThreadId: runtimeAmpThreadIdSchema,
+});
+export type RuntimeTaskAcceptRequest = z.infer<typeof runtimeTaskAcceptRequestSchema>;
 
 export const runtimeTaskWorkspaceInfoResponseSchema = z.object({
 	taskId: z.string(),

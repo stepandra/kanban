@@ -24,7 +24,13 @@ function resolveBuildRevision() {
 		}
 		return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	} catch {
-		return "unknown";
+		try {
+			return execFileSync("jj", ["--no-pager", "log", "--no-graph", "-r", "@", "-T", "commit_id"], {
+				encoding: "utf8",
+			}).trim();
+		} catch {
+			return "unknown";
+		}
 	}
 }
 

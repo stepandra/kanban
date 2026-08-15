@@ -54,10 +54,10 @@ amp plugins add https://raw.githubusercontent.com/stepandra/kanban/main/amp/kanb
 
 Then ask Amp to add, assign, link, or start Kanban tasks from any thread. Prefer Grok Build for implementation; Claude, Codex, and Kimi remain compatibility harnesses. Amp itself plans and decomposes work rather than running individual tasks. For a dedicated planning thread, run **Kanban: Decompose into tasks** from Amp's command palette. It opens a native Amp `medium` thread rather than embedding another agent runtime in Kanban.
 
-Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. `trash` explicitly discards a task without satisfying dependencies or deleting its workspace. Acceptance is reserved for the owning QA campaign and is currently fail-closed until campaign-scoped receipts are implemented.
+Executors submit completed work to **Review**; they do not accept their own work. Local agents report through Kanban's task hooks. `trash` explicitly discards a task without satisfying dependencies or deleting its workspace. In the local single-user control plane, the originating Amp Architect can accept a reviewed task through `kanban_tasks`; Kanban records a fenced workspace receipt without pushing it. The owning QA campaign remains the target authority for frozen multi-task acceptance.
 
 ### 3. Link and automate
-<kbd>⌘</kbd> + click a card to link it to another task. A dependency points from the waiting task to its prerequisite. Waiting tasks stay blocked when prerequisites are discarded; only verified campaign acceptance can satisfy the dependency.
+<kbd>⌘</kbd> + click a card to link it to another task. A dependency points from the waiting task to its prerequisite. Waiting tasks stay blocked when prerequisites are discarded; typed local acceptance or future verified campaign acceptance satisfies the dependency.
 
 ### 4. Start tasks
 Hit the play button on a card. Kanban creates an ephemeral worktree just for that task so agents work in parallel without merge conflicts. Under the hood, it also symlinks gitignored files like `node_modules` so you don't have to worry about slow `npm install`s for each copy of your project.
