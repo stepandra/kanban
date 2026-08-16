@@ -38,16 +38,22 @@ flowchart TB
 | Operator | Person | Creates tasks, starts/stops attempts, attaches to sessions, accepts/rejects candidates, moves trunk | Full authority via authenticated UI/API |
 | Reviewer | Person | Inspects candidates, diffs, conflict heatmap; read-only session attach | Read-mostly; acceptance stays with operator role |
 | **Kanban v2** | This system | The only writer of workflow truth (tasks, attempts, leases, workspaces, sessions, verdicts). Includes control plane **and** hostd instances on every execution host | Event log is authoritative |
-| Agent harnesses | External software | Do the actual coding inside a leased jj workspace, as child processes owned by hostd — driven over ACP (structured tool calls, plans, permission requests) when the harness speaks it, or inside a durable PTY session otherwise | Untrusted-by-default child processes: they get a workspace lease, not credentials to the control plane; ACP permission requests resolve to typed control-plane approvals |
-| Git remotes / GitHub | External system | Durable code exchange and normal open-source workflow (clone/CI/PR). Kanban uses hidden refs for attempt teleportation and bookmarks for trunk | Trusted for code bytes (content-addressed by Git/jj); never holds workflow state |
+| Agent harnesses | External software | Do the actual coding inside a leased jj workspace, as child processes owned by per-attempt execution workers — driven over ACP (structured tool calls, plans, permission requests) when the harness speaks it, or inside a durable PTY session otherwise | Trust depends on the host's enrolled profile: on a `trusted-host` (v2.0 default) harnesses hold the host user's authority and receipts prove host provenance only; on a `sandboxed` host (v2.1) per-attempt isolation makes them untrusted-by-default. Either way they never hold control-plane credentials, and ACP permission requests resolve to typed control-plane approvals |
+| Git remotes / GitHub | External system | Durable code exchange and normal open-source workflow (clone/CI/PR). Kanban pushes candidates to a namespaced candidate-ref protocol (create-only, GC'd by typed events) and moves trunk by compare-and-swap | Trusted for code bytes (content-addressed by Git/jj); never holds workflow state; external pushes to trunk are expected and reconciled, not forbidden |
 | iroh relays | External infra | Connectivity between control plane and hosts behind NATs | Untrusted: end-to-end encrypted QUIC; host identity = iroh NodeId keypair |
 | Model providers | External system | LLM inference for harnesses | Out of scope; Kanban never proxies model traffic |
 
 ## Trust and failure boundaries
 
 - **Cryptographic host identity.** An execution host *is* its iroh NodeId.
-  Enrollment binds NodeId → host record via an event; every receipt (candidate
-  published, workspace created, artifact hash) is signed by the host key.
+  Enrollment is an explicit flow: a one-time enrollment token mutually pins
+  the control-plane NodeId and the host NodeId, records the host's security
+  profile, and appends `HostEnrolled`; rotation and revocation are typed
+  events (`HostKeyRotated`, `HostRevoked`), and a reinstalled host re-enrolls
+  as a new identity. Every receipt (candidate published, workspace created,
+  artifact hash) is signed by the host key and bound to the command ID and
+  lease epoch it answers — a receipt proves host provenance, not agent
+  innocence (see Trust posture in the README).
 - **Workflow truth lives in one place.** Only typed commands accepted by the
   control plane append events. Terminal output, session liveness, gossip, and
   host self-reports are telemetry feeding reconciliation.

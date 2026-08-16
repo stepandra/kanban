@@ -19,18 +19,23 @@ flowchart TB
             proj["Projections + subscriptions<br/>board · review · inventory · cockpit"]
             ui["Web UI<br/>[Lustre server components]"]
         end
-        pg[("Postgres<br/>[Container]<br/>append-only event log ·<br/>snapshots · projections")]
-        hostd0["hostd (local)<br/>[Container: Rust]"]
+        netgw["netgw [Container: Rust sidecar]<br/>control-plane iroh endpoint,<br/>irpc clients, NodeId key custody;<br/>versioned local-socket protocol to BEAM"]
+        pg[("Postgres<br/>[Container]<br/>append-only event log ·<br/>snapshots · projections · WAL→PITR")]
+        hostd0["hostd + workers (local)<br/>[Containers: Rust]"]
     end
 
     subgraph rhost["Remote execution host (×N)"]
         subgraph hostd["hostd [Container: Rust binary]"]
             ep["iroh endpoint + irpc server<br/>(NodeId identity)"]
-            acp["ACP adapter<br/>JSON-RPC over child stdio<br/>(sessions, updates, permissions)"]
-            sess["Session hosts<br/>PTY + VT model + replay buffer<br/>(fallback / rescue / agent terminals)"]
+            wsup["Worker supervisor<br/>spawn · scan · re-adopt<br/>detached workers by attempt+epoch"]
             jjd["jj driver<br/>(stock jj CLI + templates)"]
             inv["Workspace reconciler +<br/>inventory reporter"]
             rcpt["Receipt signer +<br/>artifact hasher"]
+        end
+        subgraph worker["Execution worker (×attempt) [Container: Rust, detached]"]
+            acp["ACP adapter<br/>JSON-RPC over child stdio<br/>(sessions, updates, permissions)"]
+            sess["Session host<br/>PTY + VT model + replay buffer<br/>(non-ACP / rescue shell / agent terminals)"]
+            wj["Journal writer<br/>append-only, hash-chained"]
         end
         agent["Agent harness process<br/>[Grok Build / Claude Code / ...]"]
         repo[("jj workspaces + Git store<br/>[per-attempt dirs]")]
@@ -44,16 +49,17 @@ flowchart TB
     api --> agg --> pg
     proj --> pg
     lease --> agg
-    beam <-->|"irpc over iroh QUIC<br/>(commands, receipts, PTY streams)"| ep
-    beam <-->|same protocol, loopback| hostd0
-    beam -.->|"iroh-gossip: lossy telemetry<br/>(presence, progress ticks)"| ep
+    beam <-->|"versioned local-socket<br/>protocol (CBOR)"| netgw
+    netgw <-->|"irpc over iroh QUIC<br/>(commands, receipts, streams)"| ep
+    netgw -.->|"iroh-gossip: lossy telemetry<br/>(presence, progress ticks)"| ep
     ep <--> relays
+    wsup -->|"spawn / re-adopt via<br/>authenticated Unix socket"| worker
     acp -->|"spawns, drives<br/>(ACP harnesses)"| agent
     sess -->|"spawns, supervises<br/>(non-ACP / interactive)"| agent
     agent -->|edits via lease| repo
     jjd --> repo
     inv --> repo
-    repo <-->|"git push/fetch<br/>hidden refs + bookmarks"| github
+    repo <-->|"git push/fetch: candidate refs<br/>(create-only) + trunk CAS"| github
 ```
 
 ## Containers
@@ -61,12 +67,14 @@ flowchart TB
 | Container | Tech | Responsibilities | State |
 |---|---|---|---|
 | **Control Plane** | Gleam/BEAM (OTP release) | Accepts typed commands; runs one actor per hot aggregate; appends events; manages leases; runs the reconciler; serves projections and the Lustre UI over WebSocket | None in-process that matters — every actor rebuilds from the event log on restart |
-| **Postgres** | Postgres 16+ | Append-only event log (aggregate streams, global order), snapshots, projection tables, outbox for host commands | The single durable workflow store; backup = whole system state |
+| **netgw** | Rust sidecar, supervised alongside the BEAM release | Owns the control-plane iroh endpoint, NodeId key custody, and all irpc client connections to hosts; verifies receipt signatures; bridges commands/receipts/streams to Gleam over a small versioned CBOR protocol on a local socket | Stateless beyond connection state; restart re-establishes host connections and resumes outbox drain — no truth lives here |
+| **Postgres** | Postgres 16+ | Append-only event log (aggregate streams, commit-ordered), snapshots, projection tables, command inbox, outbox for host commands; WAL archived off-host for PITR | The single durable workflow store; backup = whole system state |
 | **Web UI** | Lustre server components (in the BEAM release) | Board, session cockpit (terminal view), review (candidate diffs, conflict heatmap), **workspace inventory** | Stateless projection consumer |
-| **hostd** | One static Rust binary | iroh endpoint + irpc server; ACP adapter + session hosts (below); jj CLI driver; workspace reconciler/inventory reporter; artifact hashing + receipt signing with the host NodeId key | Local manifest (sessions/workspaces it believes exist) — advisory cache only, re-derivable and always reconciled against the event log |
-| **ACP adapter** | Module inside hostd | Spawns ACP-capable harnesses as child processes and speaks JSON-RPC over their stdio: `initialize`/capability negotiation, `session/new|prompt|cancel`, streams `session/update` (tool calls, plans, diffs, message chunks) to the control plane as telemetry, forwards `session/request_permission` as typed approval commands, and serves the client-side `fs` and `terminal` capabilities (agent-requested commands run in hostd-owned processes with retained output) | Persists harness `sessionId` ↔ attempt mappings and capability snapshots — advisory; ACP session history is agent-owned, so replay/resume is verified, never assumed |
-| **Session host** | Thread/task group inside hostd (optionally a child process per attempt for isolation) | Owns the PTY via `portable-pty`; feeds bytes to a swappable VT model (`vt100` first) for screen snapshots; keeps a sequence-numbered bounded raw replay buffer; fans out to any number of viewers over irpc; injects input; enforces one authoritative PTY size. Used for non-ACP harnesses, auth/setup flows, interactive rescue, and rendering agent-requested terminals | In-memory; durable output is journaled to disk by hostd and referenced by hash in events |
-| **Agent harness** | External CLI (Grok Build primary) | Implements the task inside its leased jj workspace | Its process tree is owned by hostd, via the ACP adapter or a session host |
+| **hostd** | One static Rust binary | iroh endpoint + irpc server; worker supervisor (spawn, scan, **re-adopt** detached workers by attempt + lease epoch); jj CLI driver; workspace reconciler/inventory reporter; receipt signing with the host NodeId key; secrets brokering (host-scoped git credentials, attempt-scoped harness credentials — references only in events) | Local manifest (workers/workspaces it believes exist) — advisory cache only, re-derivable by scanning and always reconciled against the event log |
+| **Execution worker** | Small Rust binary, one **detached process per attempt incarnation** (own process group, survives hostd restart/upgrade) | Owns the agent child end to end: ACP adapter or PTY session host (below), the append-only hash-chained journal, and a reconnectable authenticated Unix socket named by attempt + epoch. hostd re-adopts it after restart by scanning worker sockets and verifying identity | Journal on disk; in-memory VT/replay state; worker death = that attempt's channel death, nothing else |
+| **ACP adapter** | Module inside the execution worker | Spawns ACP-capable harnesses and speaks JSON-RPC over their stdio: `initialize`/capability negotiation, `session/new|prompt|cancel`, streams `session/update` (tool calls, plans, diffs, message chunks) upward as telemetry, forwards `session/request_permission` as typed approval commands, and serves the client-side `fs` (lease-scoped) and `terminal` capabilities (agent-requested commands run in worker-owned processes with retained output) | Persists harness `sessionId` ↔ attempt+epoch mappings and capability snapshots — advisory; ACP session history is agent-owned, so `session/load`/`resume` is verified, never assumed |
+| **Session host** | Module inside the execution worker | Owns the PTY via `portable-pty`; feeds bytes to a swappable VT model (`vt100` first) for screen snapshots; keeps a sequence-numbered bounded raw replay buffer; fans out to any number of viewers; injects input; enforces one authoritative PTY size. Used for non-ACP harnesses, auth/setup flows, **rescue shells (a separate shell in the workspace — never PTY attachment to a piped ACP child)**, and rendering agent-requested terminals | In-memory; durable output is journaled by the worker and referenced by hash in receipts |
+| **Agent harness** | External CLI (Grok Build primary) | Implements the task inside its leased jj workspace | Its process tree is owned by exactly one execution worker |
 
 ## Agent control: ACP first, PTY fallback
 
@@ -82,8 +90,17 @@ path.** These solve different problems and the design needs both:
   Claude Code via `claude-agent-acp`, Codex, OpenCode, Kimi, Cline, and
   others — with zero per-harness code in the control plane.
 - **PTY is durability and humanity.** Non-ACP tools, harness auth/setup
-  flows, interactive rescue of a stuck agent, and rendering of
-  agent-requested terminals.
+  flows, rescue shells, and rendering of agent-requested terminals. A
+  "rescue" is a **separate interactive shell in the attempt's workspace** —
+  a process started with piped stdio can never be retrofitted with a PTY.
+
+Protocol discipline the adapter must enforce (ACP v1 pinned; v2 draft
+tracked, not depended on): strict stdout validation (any non-JSON-RPC bytes
+on stdout → protocol-fault state, stderr → journal), deadlines on
+`initialize`, prompt turns, and permission answers, and a cancellation
+escalation ladder `session/cancel` → SIGTERM → SIGKILL with an
+uncertain-outcome state (`AgentUnresponsive`) that the control plane
+resolves via typed repair, never by silent retry of possibly-executed tools.
 
 What ACP buys the event-sourced core:
 
@@ -112,18 +129,31 @@ Boundaries kept honest:
   WebSocket RFDs). v2.0 does not depend on it: ACP always runs over local
   stdio next to the agent, and irpc-over-iroh carries it across the network.
   If the proxy/remote RFDs stabilize, they slot in without moving truth.
-- ACP updates are **telemetry** like terminal bytes: they inform projections
-  and reconciliation; only typed commands append workflow events.
+- ACP messages split into two classes, and the docs keep them distinct:
+  **lossy updates** (`session/update` chunks, plans, tool-call progress) are
+  telemetry that informs projections and may be dropped; **state-bearing
+  claims** (`session/request_permission`, terminal exit results, final turn
+  outcomes) are converted by the worker into signed receipts/commands that
+  the control plane validates before appending events. "Telemetry never
+  mutates truth" means the lossy class; claims mutate truth only through
+  the typed command path.
 
 ## Session-substrate decision
 
-**Decision: hostd owns PTYs natively.** No external multiplexer (zmx, tmux,
-shpool, wezterm-mux) in the runtime path. Multi-viewer fan-out comes from our
-own irpc streaming; reattach state comes from the in-process VT model
-(snapshot) plus the sequenced replay buffer (tail); durability across hostd
-or host death comes from the event log + reconciliation — **which is the only
-place it can come from, because no surveyed substrate survives its own daemon
-or a reboot either.**
+**Decision: PTYs are owned natively by detached per-attempt execution
+workers.** No external multiplexer (zmx, tmux, shpool, wezterm-mux) in the
+runtime path. Multi-viewer fan-out comes from our own streaming; reattach
+state comes from the in-process VT model (snapshot) plus the sequenced
+replay buffer (tail); reboot durability comes from the event log +
+reconciliation — no surveyed substrate survives a reboot either.
+
+The worker split answers the one failure the mux tools *do* survive that a
+monolithic daemon would not: **hostd restart/upgrade**. Workers are detached
+processes (own process group) that keep the agent, PTY, and journal alive
+while hostd restarts; hostd re-adopts them by scanning their authenticated
+sockets and verifying attempt + lease epoch. This keeps the crash-isolation
+benefit that made zmx attractive, without its unstable ABI, and keeps the
+machine API ours.
 
 Survey results (2026-08, source-verified):
 
@@ -155,48 +185,80 @@ native implementation.
 ## Key flows
 
 Numbered flows below are the contract the containers must honor; each is
-crash-recoverable at every step.
+crash-recoverable at every step. Every host-bound command carries the
+attempt's **lease epoch**; hosts embed it in worker identity, receipts, and
+ref names, and aggregates reject anything stale — fencing, not hope.
 
+0. **Host enrollment.** Operator mints a one-time enrollment token → new
+   host runs `hostd enroll <token>` → mutual NodeId pinning (host learns and
+   pins the control-plane NodeId; control plane records the host NodeId +
+   security profile) → `HostEnrolled`. Reinstalled host = new NodeId = new
+   enrollment; `HostRevoked`/`HostKeyRotated` are typed events.
 1. **Start attempt.** Operator command → `AttemptRequested` event →
-   lease manager picks a host → irpc `CreateWorkspace` (jj driver: new
-   workspace on the attempt's base change) → `WorkspaceLeased` (signed
-   receipt) → irpc `StartAgent`. ACP-capable harness: the adapter spawns it,
-   negotiates capabilities, opens `session/new` in the workspace, sends the
-   task prompt → `AgentStarted` records the ACP sessionId. Otherwise: a
-   session host spawns it in a PTY → `SessionStarted`. Any step timing out
-   expires the lease and replans.
+   placement reserves capacity durably → `CreateWorkspace{attempt, epoch}`
+   (jj driver: new workspace at a deterministic path derived from
+   attempt + epoch; an existing mismatched directory is refused, an existing
+   matching one is the same outcome replayed) → `WorkspaceLeased` (signed
+   receipt) → `StartAgent{epoch}` → worker supervisor spawns a detached
+   execution worker. ACP-capable harness: the adapter negotiates
+   capabilities, opens `session/new`, sends the task prompt →
+   `AgentStarted` records the ACP sessionId + worker identity. Otherwise a
+   PTY session → `SessionStarted`. Any step timing out expires the lease,
+   bumps the epoch, and replans.
 2. **Attach viewers.** Cockpit (or N cockpits) subscribes via control plane.
    ACP attempts stream a semantic timeline (tool calls, plan, diffs, message
    chunks) plus any agent-requested terminal output; pending
    `session/request_permission` gates surface as actionable approvals. PTY
    attempts stream the terminal: VT snapshot at sequence *s*, then raw bytes
-   from *s*. Input/approval requires an explicit interactive grant; default
-   attach is read-only. Attempts never pause when zero viewers are attached.
-3. **Candidate + review.** Harness finishes → hostd snapshots the jj change
-   (stable change ID), pushes a hidden attempt ref to the Git remote, signs a
-   `CandidatePublished` receipt. Review UI shows the immutable change, its
-   diff, and `jj evolog` time travel — never terminal scrollback.
-4. **Conflict heatmap.** Control plane periodically asks an idle host to run
-   speculative merges of open candidates against trunk (jj: conflicts are
-   data, not stop-the-world). Result matrix is a projection; reviewers see
-   which candidates collide before accepting.
-5. **Accept / trunk move.** `CandidateAccepted` → jj driver advances the
-   trunk bookmark and pushes; the trunk pointer is event state first, Git
-   bookmark second. Rollback = accept a `TrunkMoved` to a prior change ID.
-6. **Workspace teleport.** Any enrolled host can reconstruct any attempt
-   workspace by fetching its hidden ref and creating a jj workspace at that
-   change — recovery from a dead laptop is a fetch, not a restore.
-7. **Failure & reconciliation.** hostd reconnect → control plane replays
-   outstanding intents vs. host manifest: sessions alive? workspaces present
-   at expected change? Divergence emits reconciliation events (restart, fail
-   attempt, mark workspace `presence: missing`) — observed state, never
-   silent mutation. Control-plane restart: actors rebuild from the log;
-   hosts keep agents running meanwhile.
+   from *s*. Disconnected-period history is retrievable from the worker
+   journal by cursor. Input/approval requires an explicit interactive grant;
+   default attach is read-only. Attempts never pause with zero viewers.
+3. **Candidate + review.** Harness finishes → control plane assigns a
+   `CandidateId` → host snapshots the jj change and pushes **create-only**
+   to `refs/kanban/candidates/<attempt_id>/<epoch>/<candidate_id>` → the signed
+   `CandidatePublished` receipt carries `{candidate_id, git_commit_oid,
+   jj_change_id, ref_name, journal_hash, epoch}`. The **Git commit OID is
+   the review and reconstruction authority**; the jj change ID is metadata.
+   A retried publish reads the existing ref and returns the same outcome —
+   idempotent by construction, not by dedupe cache. Review UI shows the
+   immutable commit, its diff, and local `jj evolog` where available.
+   Candidate refs are GC'd only by typed `CandidateRetired` events.
+4. **Conflict heatmap (advisory).** Control plane periodically asks an idle
+   host to run speculative merges of open candidates against a **pinned
+   trunk OID** (jj: conflicts are data). Each matrix cell records its exact
+   input OIDs and `computed_at`; cells are hints for reviewers, never
+   acceptance authority — landing re-verifies against the current trunk.
+5. **Accept / trunk move (saga).** `CandidateAccepted` records the verdict.
+   Then `TrunkMoveRequested{expected_old_oid, candidate_oid}` → host
+   executes a compare-and-swap push (force-with-lease semantics) → success
+   receipt emits `TrunkMoved`; failure emits `TrunkMoveConflicted`, fetches
+   the external advance (humans and CI may push trunk too), and the operator
+   rebases or re-accepts. Desired state is never recorded as fact before
+   the remote CAS succeeds. Rollback = a new accepted `TrunkMoveRequested`
+   to a prior OID.
+6. **Workspace reconstruction.** Any enrolled host can build a fresh jj
+   workspace at a candidate's Git commit OID by fetching its candidate ref —
+   recovery from a dead laptop is a fetch, not a restore. This reconstructs
+   the *code state*; jj op-log/evolog history stays host-local (cross-host
+   evolog is a deferred scope gate).
+7. **Failure & reconciliation.** hostd restart: workers survive detached;
+   hostd rescans worker sockets and re-adopts by attempt + epoch. Worker
+   death: that attempt's channel dies alone; the control plane replans.
+   hostd reconnect after partition: control plane diffs outstanding intents
+   vs. host manifest — sessions alive? workspaces at expected state? —
+   and emits typed repair (`RestartAgent`, `FailAttempt`,
+   `MarkWorkspacePresence`). Work continued under an expired lease is
+   **quarantined**: its receipts carry a stale epoch and are rejected from
+   the normal path until an operator explicitly adopts them. Control-plane
+   restart: actors rebuild from the log; hosts keep agents running.
 8. **Workspace inventory (v1 scope).** hostd's reconciler walks its
    workspace roots on a timer and on demand, reporting host, path, attempt
-   ID, jj change ID, and observed presence. The inventory projection joins
-   these reports with lease events. A `missing` report flags a row for
-   operator action; only a typed `WorkspaceRetired` event deletes it.
+   ID + epoch, jj change ID (metadata), current **git commit OID/tree state**
+   vs. the expected pinned OID, and observed presence (`present` / `missing` /
+   `drifted`) — drift detection uses the OID, since a jj change ID survives
+   rewrites. The inventory projection joins these observations with lease
+   events. A `missing` report flags a row for operator action; only a typed
+   `WorkspaceRetired` event deletes it.
 
 ## What is deliberately absent at C2
 

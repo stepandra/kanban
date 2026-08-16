@@ -13,7 +13,8 @@ not a description of the current checkout.
 | [c1-system-context.md](./c1-system-context.md) | C1 | Who uses the system, what it talks to, trust boundaries |
 | [c2-containers.md](./c2-containers.md) | C2 | Deployable containers, protocols, key runtime flows, ACP + session-substrate decisions |
 | [c3-components.md](./c3-components.md) | C3 | Components inside the Control Plane and hostd, with per-component failure stories |
-| [c4-code.md](./c4-code.md) | C4 | Code-level types for the load-bearing 20%: attempt aggregate, event store, host protocol, session host/ACP adapter |
+| [c4-code.md](./c4-code.md) | C4 | Code-level types for the load-bearing 20%: attempt aggregate, event store, enrollment, host protocol, netgw protocol, execution worker, Git integration |
+| [implementation-slices.md](./implementation-slices.md) | — | Dependency-ordered implementation slices with scope, tasks, acceptance criteria, crash tests, and sizing |
 
 ## Goals
 
@@ -50,10 +51,11 @@ code target, see below):
 | State model | **Event sourcing** (single append-only log per aggregate, Postgres) | Truth is replayable; projections are disposable; crash recovery = replay |
 | Persistence | **Postgres** | Boring, durable, one backup story; event log + projections + snapshots |
 | Network/identity | **iroh** (NodeId per host, irpc for RPC, gossip for lossy telemetry only) | NAT traversal without VPN; cryptographic host identity; QUIC streams |
-| VCS | **stock jj (Git backend)** per-attempt workspaces | Stable change IDs, conflicts-as-data, `evolog` time travel, hidden-ref teleportation — all without forking jj |
-| Host agent | **hostd** (single Rust binary per execution host) | Owns agent processes, jj CLI, workspace inventory, signed receipts |
+| BEAM↔iroh bridge | **netgw** — a supervised Rust sidecar next to the BEAM release | irpc is Rust-to-Rust (Tokio, no cross-language bindings); netgw owns the control-plane iroh endpoint and all irpc clients, and speaks a small versioned protocol to Gleam over a local socket |
+| VCS | **stock jj (Git backend)** per-attempt workspaces | Stable change IDs as metadata, **Git commit OIDs as the immutable review/reconstruction authority**, conflicts-as-data, `evolog` time travel, candidate-ref reconstruction on any host — all without forking jj |
+| Host agent | **hostd** (Rust binary per execution host) + **detached per-attempt execution workers** | hostd supervises and re-adopts workers; a worker owns the agent child, stdio/PTY, and journal, and **survives hostd restart/upgrade** |
 | Agent control | **ACP first** (JSON-RPC over child stdio), PTY fallback | One adapter covers every ACP harness; structured tool calls, plans, diffs, and permission requests instead of scrollback scraping — see [c2-containers.md](./c2-containers.md#agent-control-acp-first-pty-fallback) |
-| Terminal sessions | **hostd owns PTYs natively** (portable-pty + swappable VT model, `vt100` first) | See decision record in [c2-containers.md](./c2-containers.md#session-substrate-decision); no external mux survives its own daemon death anyway, so durability must come from the event log, not the mux |
+| Terminal sessions | **detached execution workers own PTYs natively** (portable-pty + swappable VT model, `vt100` first) | See decision record in [c2-containers.md](./c2-containers.md#session-substrate-decision); no external mux survives its own daemon death anyway, so durability comes from the event log + journal, and workers survive hostd restarts |
 | Web UI | **Lustre server components** served by the control plane | One language end to end; UI is a projection, holds no truth |
 
 ## Truth hierarchy
@@ -69,10 +71,52 @@ code target, see below):
 A host reporting a workspace `missing` is an *observation* to reconcile, not
 an authoritative deletion — inventory rows die only via typed events.
 
+## Failure envelope (stated, not implied)
+
+v2.0 targets: any **process** failure (viewer, agent, worker, hostd, netgw,
+BEAM node) recovers automatically by replay/re-adoption/reconciliation.
+**Server or Postgres loss** is accepted unavailability: RPO = last archived
+WAL segment (Postgres PITR + off-host WAL archiving required), RTO = manual
+restore, single control-plane node. Hot standby and multi-node BEAM are
+explicitly v2.1+. Execution hosts keep agents running through control-plane
+outages; results quarantine until leases re-fence. Because a PITR restore
+can rewind epoch counters, the fencing token is `(recovery_generation,
+epoch)`: the restore runbook rotates the recovery generation **before**
+accepting host traffic, so pre-restore workers and claims are quarantined
+for explicit reconciliation instead of colliding with re-minted epochs.
+
+## Trust posture
+
+Two host security profiles, declared per host at enrollment:
+
+- **`trusted-host` (v2.0 default):** harnesses run with the host user's
+  authority. Receipts then prove *host* provenance, not agent innocence —
+  the docs say so honestly. NodeId keys and hostd state are file-permission
+  separated, best effort.
+- **`sandboxed` (v2.1):** per-attempt UID/container isolation, workspace-only
+  mounts, no inherited credentials; the profile every security-relevant
+  claim in C1 assumes. Interfaces are designed for it now (workers already
+  isolate per attempt) so it lands without protocol changes.
+
+Secrets never appear in events, receipts, manifests, or journals — only
+references; hostd brokers host-scoped Git credentials and attempt-scoped
+harness credentials.
+
 ## Size posture
 
-Rough production-code estimate for v2.0 including the mandatory workspace
-inventory: **18–29k LoC** (Gleam control plane + Lustre UI ≈ 11–17k, Rust
-hostd ≈ 6–10k, glue/migrations ≈ 1–2k), with tests in the 30–45k range.
-The deferred fabric items above are what kept the earlier 40–66k estimate
-out of scope.
+Component budget for v2.0 (production code, tests excluded), with the
+mandatory workspace inventory included:
+
+| Component | Budget |
+|---|---|
+| Gleam control plane + Lustre UI | 11–16k |
+| Rust hostd + execution workers | 7–11k |
+| Rust netgw sidecar | 1.5–3k |
+| Enrollment, secrets brokering, migrations, glue | 2–4k |
+| **Total** | **21.5–34k** (+ ~20% contingency) |
+
+Tests in the 35–50k range. Scope gates if the budget slips: the conflict
+heatmap and cross-host `evolog` are deferrable; durability, fencing, and
+security mechanisms are not. Early de-risk spikes required for: netgw
+protocol, worker re-adoption, Git candidate-ref CAS publication, and ACP
+adapter against two real harnesses.
